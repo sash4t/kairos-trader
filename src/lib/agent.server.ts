@@ -290,21 +290,28 @@ export async function runTradingCycle(): Promise<CycleReport> {
 
       // Live accounts report real equity; paper tracks a simulated balance.
       let equityNow = +s.paper_equity + unrealised;
+      let equityIsReal = !isLive;
       if (isLive && creds) {
         try {
           const acct = await fetchLiveAccount(creds.accountAddress);
           equityNow = acct.accountValue;
           unrealised = acct.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
+          equityIsReal = true;
         } catch (err) {
           notes.push(`live account read failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
 
-      await supabaseAdmin.from("equity_snapshots").insert({
-        user_id: s.user_id, equity: equityNow,
-        realized_pnl: realised, unrealized_pnl: unrealised,
-        mode: isLive ? "live" : "paper",
-      });
+      // Never record a simulated balance as a live snapshot — it would corrupt
+      // the live equity curve and the daily-loss breaker.
+      if (equityIsReal) {
+        await supabaseAdmin.from("equity_snapshots").insert({
+          user_id: s.user_id, equity: equityNow,
+          realized_pnl: realised, unrealized_pnl: unrealised,
+          mode: isLive ? "live" : "paper",
+        });
+      }
+
 
       // ---- 3. Look for new entries ----
       if (!canTrade) { /* live mode without keys — never scan into orders */ }
