@@ -207,12 +207,14 @@ export class PaperEngine {
           }
         }
       }
-      // SL / TP
+      // SL / TP — a stop trailed past entry is a trailing-stop exit, not a loss
       if (p.side === "long") {
-        if (m <= p.stop_loss) this.closePosition(p, m, "stop_loss").catch(() => {});
+        const label = p.stop_loss > p.entry_price ? "trailing_stop" : "stop_loss";
+        if (m <= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
         else if (m >= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
       } else {
-        if (m >= p.stop_loss) this.closePosition(p, m, "stop_loss").catch(() => {});
+        const label = p.stop_loss < p.entry_price ? "trailing_stop" : "stop_loss";
+        if (m >= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
         else if (m <= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
       }
     }

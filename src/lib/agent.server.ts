@@ -216,7 +216,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
             .update({ stop_loss: t.stopLoss, trail_high: t.trailHigh }).eq("id", p.id);
         }
 
-        const reason = exitReasonFor(p.side, mark, p.stop_loss, p.take_profit);
+        const reason = exitReasonFor(p.side, mark, p.stop_loss, p.take_profit, p.entry_price);
         if (!reason) continue;
 
         let exitPrice = mark;
