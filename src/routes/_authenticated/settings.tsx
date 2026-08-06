@@ -37,16 +37,26 @@ function SettingsPage() {
     queryFn: async () => (await supabase.from("profiles").select("*").eq("id", userId!).maybeSingle()).data,
   });
 
-  useEffect(() => { if (profile?.wallet_address) setWallet(profile.wallet_address); }, [profile]);
+  const [walletTouched, setWalletTouched] = useState(false);
+  useEffect(() => {
+    if (!walletTouched) setWallet(profile?.wallet_address ?? "");
+  }, [profile, walletTouched]);
 
   const saveWallet = async () => {
+    if (!userId) return;
     setSaving(true);
     const trimmed = wallet.trim();
     if (trimmed && !/^0x[a-fA-F0-9]{40}$/.test(trimmed)) { toast.error("Invalid Ethereum-style address"); setSaving(false); return; }
-    await supabase.from("profiles").update({ wallet_address: trimmed || null }).eq("id", userId!);
-    toast.success("Wallet saved");
+    const { error } = await supabase
+      .from("profiles")
+      .upsert({ id: userId, wallet_address: trimmed || null }, { onConflict: "id" });
     setSaving(false);
+    if (error) { toast.error(error.message); return; }
+    setWalletTouched(false);
+    await queryClient.invalidateQueries({ queryKey: ["profile", userId] });
+    toast.success("Wallet saved");
   };
+
 
   const loadHyperliquid = async () => {
     if (!wallet) return;
@@ -69,7 +79,7 @@ function SettingsPage() {
         <div className="text-sm font-semibold">Hyperliquid wallet address (read-only)</div>
         <div className="text-xs text-muted-foreground">Your public address. Used to read live balance & positions. Signing (for real order execution) is out of scope here — use the executor service.</div>
         <div className="flex flex-col gap-2 sm:flex-row">
-          <input placeholder="0x…" value={wallet} onChange={e => setWallet(e.target.value)}
+          <input placeholder="0x…" value={wallet} onChange={e => { setWalletTouched(true); setWallet(e.target.value); }}
             className="w-full min-w-0 flex-1 rounded-md border border-panel-border bg-background px-3 py-2 mono text-sm" />
           <button onClick={saveWallet} disabled={saving} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50">Save</button>
           <button onClick={loadHyperliquid} disabled={!wallet || loadingWallet} className="rounded-md border border-panel-border px-4 py-2 text-sm">Fetch live state</button>

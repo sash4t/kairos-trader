@@ -1,17 +1,42 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 import { useBot } from "@/lib/botContext";
 import { MODE_MIN_CONFIDENCE } from "@/lib/strategy";
 
-export const Route = createFileRoute("/_authenticated/strategy")({ component: Strategy });
+export const Route = createFileRoute("/_authenticated/strategy")({
+  component: Strategy,
+  errorComponent: ({ error }) => (
+    <div role="alert" className="p-6 text-sm text-bear">Strategy failed to load: {error.message}</div>
+  ),
+  notFoundComponent: () => <div className="p-6 text-sm text-muted-foreground">Strategy not found.</div>,
+});
 
 function NumField({ label, value, onChange, step = 1, suffix }: { label: string; value: number; onChange: (v: number) => void; step?: number; suffix?: string }) {
+  // Keep a local draft so typing on mobile keyboards isn't clobbered by re-renders.
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => { setDraft(String(value)); }, [value]);
+
+  const commit = () => {
+    const n = Number(draft);
+    if (draft.trim() === "" || Number.isNaN(n)) { setDraft(String(value)); return; }
+    if (n !== value) onChange(n);
+  };
+
   return (
     <label className="block">
       <div className="mb-1.5 text-xs uppercase tracking-widest text-muted-foreground">{label}</div>
       <div className="flex items-center rounded-md border border-panel-border bg-background">
-        <input type="number" step={step} value={value} onChange={e => onChange(+e.target.value)}
-          className="w-full bg-transparent px-3 py-2 mono text-sm outline-none" />
-        {suffix && <span className="pr-3 text-xs text-muted-foreground">{suffix}</span>}
+        <input
+          type="number"
+          inputMode="decimal"
+          step={step}
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+          className="w-full min-w-0 bg-transparent px-3 py-2 mono text-sm outline-none"
+        />
+        {suffix && <span className="shrink-0 pr-3 text-xs text-muted-foreground">{suffix}</span>}
       </div>
     </label>
   );
@@ -19,7 +44,15 @@ function NumField({ label, value, onChange, step = 1, suffix }: { label: string;
 
 function Strategy() {
   const { settings, saveSettings } = useBot();
-  if (!settings) return <div className="p-8">Loading…</div>;
+  if (!settings) {
+    return (
+      <div className="space-y-4 p-4 sm:p-6 lg:p-8">
+        <div className="h-6 w-48 animate-pulse rounded bg-muted" />
+        <div className="h-32 animate-pulse rounded-md bg-muted" />
+        <div className="h-56 animate-pulse rounded-md bg-muted" />
+      </div>
+    );
+  }
 
   const modes = [
     { key: "conservative", label: "Conservative", desc: "80%+ confidence · lower frequency · smaller size" },
