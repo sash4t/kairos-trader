@@ -84,8 +84,15 @@ export class PaperEngine {
     this.dayStartEquity = settings.paper_equity;
   }
 
+  /** The browser engine simulates fills; it must never touch a live account. */
+  private isLive() { return this.settings.mode === "live"; }
+
   async start() {
     if (this.running) return;
+    if (this.isLive()) {
+      this.log("info", "Live mode — browser engine stays idle; the server agent handles live trading.");
+      return;
+    }
     this.running = true;
     this.log("info", "Engine starting (paper mode)");
     await this.syncPositions();
