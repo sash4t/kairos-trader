@@ -12,7 +12,7 @@ function Landing() {
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
           <div className="flex items-center gap-2">
             <div className="h-6 w-6 rounded bg-primary" />
-            <span className="mono text-sm font-semibold tracking-tight">ALETHEIA</span>
+            <span className="mono text-sm font-semibold tracking-tight">KAIROS</span>
             <span className="text-xs text-muted-foreground">/ hyperliquid terminal</span>
           </div>
           <div className="flex items-center gap-3">
@@ -26,7 +26,7 @@ function Landing() {
         <div className="max-w-3xl">
           <div className="mono text-xs uppercase tracking-widest text-primary">Hyperliquid · USDC Perpetuals</div>
           <h1 className="mt-4 text-3xl font-semibold leading-tight tracking-tight sm:text-4xl lg:text-5xl">
-            An algorithmic trading terminal built for <span className="text-primary">disciplined execution</span>.
+            An algorithmic trading terminal built to catch <span className="text-primary">the right moment</span>.
           </h1>
           <p className="mt-6 text-base text-muted-foreground sm:text-lg">
             Real-time scanner across every Hyperliquid perpetual market. Multi-confirmation trend/momentum strategy with strict risk limits, correlation guards, and a one-click kill switch. Paper trade first — every decision fully transparent.

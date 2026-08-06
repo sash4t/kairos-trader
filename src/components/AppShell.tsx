@@ -31,7 +31,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="flex items-center gap-2 border-b border-panel-border px-5 py-4">
         <div className="h-6 w-6 shrink-0 rounded bg-primary" />
         <div className="min-w-0">
-          <div className="mono truncate text-sm font-semibold">ALETHEIA</div>
+          <div className="mono truncate text-sm font-semibold">KAIROS</div>
           <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Hyperliquid</div>
         </div>
         <button onClick={() => setOpen(false)} className="ml-auto rounded-md p-1.5 text-muted-foreground hover:bg-accent lg:hidden" aria-label="Close menu">
@@ -96,7 +96,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
           <div className="flex min-w-0 items-center gap-2">
             <div className="h-5 w-5 shrink-0 rounded bg-primary" />
-            <span className="mono truncate text-sm font-semibold">ALETHEIA</span>
+            <span className="mono truncate text-sm font-semibold">KAIROS</span>
           </div>
           <div className="ml-auto flex shrink-0 items-center gap-2">
             <span className={`mono text-[10px] font-semibold uppercase tracking-widest ${settings?.kill_switch_engaged ? "text-bear" : settings?.bot_enabled ? "text-bull" : "text-muted-foreground"}`}>{statusLabel}</span>

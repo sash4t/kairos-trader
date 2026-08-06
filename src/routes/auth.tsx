@@ -63,7 +63,7 @@ function AuthPage() {
       <div className="panel w-full max-w-md p-6 sm:p-8">
         <div className="flex items-center gap-2">
           <div className="h-6 w-6 rounded bg-primary" />
-          <span className="mono text-sm font-semibold">ALETHEIA</span>
+          <span className="mono text-sm font-semibold">KAIROS</span>
         </div>
         <h1 className="mt-6 text-2xl font-semibold">{mode === "signin" ? "Sign in" : "Create account"}</h1>
         <p className="mt-1 text-sm text-muted-foreground">Access your Hyperliquid trading terminal.</p>
