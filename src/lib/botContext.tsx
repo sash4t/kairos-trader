@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PaperEngine, type Settings } from "./paperEngine";
+import { subscribeAllMids } from "./hyperliquid";
 import { toast } from "sonner";
 import { flattenLive } from "./live.functions";
 
@@ -23,12 +24,22 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [mids, setMids] = useState<Record<string, string>>({});
   const [version, setVersion] = useState(0);
   const engineRef = useRef<PaperEngine | null>(null);
-  const midsTimer = useRef<any>(null);
 
   // Get user
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id ?? null));
   }, []);
+
+  // Live mark prices — independent of the engine, which stays idle in live mode.
+  useEffect(() => {
+    let pending: Record<string, string> = {};
+    const unsub = subscribeAllMids(m => { pending = { ...pending, ...m }; });
+    const t = setInterval(() => {
+      if (Object.keys(pending).length) setMids(prev => ({ ...prev, ...pending }));
+    }, 1000);
+    return () => { unsub(); clearInterval(t); };
+  }, []);
+
 
   // Load + poll settings (the server agent mutates them too)
   useEffect(() => {
@@ -65,18 +76,13 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     } else {
       engineRef.current.updateSettings(settings);
     }
-    // publish mids periodically
-    if (!midsTimer.current) {
-      midsTimer.current = setInterval(() => {
-        if (engineRef.current) setMids({ ...engineRef.current.getMids() });
-      }, 1000);
-    }
+    // Mark prices are published by the dedicated allMids subscription above.
+
     return () => { /* keep engine alive across renders */ };
   }, [userId, settings]);
 
   useEffect(() => () => {
     engineRef.current?.stop(); engineRef.current = null;
-    if (midsTimer.current) clearInterval(midsTimer.current);
   }, []);
 
   const saveSettings = async (patch: Partial<Settings>) => {
