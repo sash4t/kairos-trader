@@ -212,6 +212,7 @@ export class PaperEngine {
       const unreal = eq - this.startEquity;
       supabase.from("equity_snapshots").insert({
         user_id: this.userId, equity: eq, realized_pnl: 0, unrealized_pnl: unreal,
+        mode: "paper",
       }).then(() => {});
     }
   }
