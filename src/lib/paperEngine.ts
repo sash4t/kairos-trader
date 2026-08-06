@@ -231,9 +231,24 @@ export class PaperEngine {
   private async evalCycle() {
     if (!this.settings.bot_enabled || this.settings.kill_switch_engaged) return;
     if (this.settings.mode !== "paper") return; // safety
+    // The always-on server agent owns entries when it is enabled; running both
+    // races and can open two positions in the same coin.
+    if (this.settings.server_agent_enabled) return;
+    // Cycles can outlive the 15s timer (network waits) — never overlap them.
+    if (this.evaluating) return;
+    this.evaluating = true;
+    try {
+      await this.runEvalCycle();
+    } finally {
+      this.evaluating = false;
+    }
+  }
+
+  private async runEvalCycle() {
     // scan up to 8 coins per cycle prioritising liquid ones without positions
     const held = new Set(this.positions.map(p => p.coin));
     const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
+
     const scored = this.meta
       .map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
       .filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED_COINS.has(x.meta.name))
