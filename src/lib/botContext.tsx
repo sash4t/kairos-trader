@@ -24,7 +24,6 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [mids, setMids] = useState<Record<string, string>>({});
   const [version, setVersion] = useState(0);
   const engineRef = useRef<PaperEngine | null>(null);
-  const midsTimer = useRef<any>(null);
 
   // Get user
   useEffect(() => {
@@ -84,7 +83,6 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => () => {
     engineRef.current?.stop(); engineRef.current = null;
-    if (midsTimer.current) clearInterval(midsTimer.current);
   }, []);
 
   const saveSettings = async (patch: Partial<Settings>) => {
