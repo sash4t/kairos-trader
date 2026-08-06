@@ -20,7 +20,7 @@ export const resetPaperAccount = createServerFn({ method: "POST" })
 
     // Wipe all paper history so stats/equity curve start clean
     await supabaseAdmin.from("paper_positions").delete().eq("user_id", context.userId);
-    await supabaseAdmin.from("equity_snapshots").delete().eq("user_id", context.userId);
+    await supabaseAdmin.from("equity_snapshots").delete().eq("user_id", context.userId).eq("mode", "paper");
 
     await supabaseAdmin
       .from("bot_settings")

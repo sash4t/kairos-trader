@@ -47,9 +47,9 @@ function Dashboard() {
   });
 
   const { data: equitySeries = [] } = useQuery({
-    queryKey: ["equity", userId],
+    queryKey: ["equity", userId, settings?.mode],
     enabled: !!userId,
-    queryFn: async () => (await supabase.from("equity_snapshots").select("ts, equity").eq("user_id", userId!).order("ts", { ascending: true }).limit(500)).data ?? [],
+    queryFn: async () => (await supabase.from("equity_snapshots").select("ts, equity").eq("user_id", userId!).eq("mode", settings?.mode ?? "paper").order("ts", { ascending: true }).limit(500)).data ?? [],
     refetchInterval: 30000,
   });
 
