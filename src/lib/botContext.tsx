@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { PaperEngine, type Settings } from "./paperEngine";
+import { subscribeAllMids } from "./hyperliquid";
 import { toast } from "sonner";
 import { flattenLive } from "./live.functions";
 
