@@ -127,7 +127,16 @@ export class PaperEngine {
     this.log("info", "Engine stopped");
   }
 
-  updateSettings(s: Settings) { this.settings = s; }
+  updateSettings(s: Settings) {
+    const wasLive = this.settings.mode === "live";
+    this.settings = s;
+    if (s.mode === "live" && this.running) {
+      this.log("warn", "Switched to live mode — browser engine stopped; the server agent owns live trading.");
+      this.stop();
+    } else if (wasLive && s.mode === "paper" && !this.running) {
+      this.start().catch(err => this.log("error", err.message));
+    }
+  }
 
   getPositions() { return this.positions; }
   getMids() { return this.mids; }
