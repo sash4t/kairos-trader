@@ -305,6 +305,12 @@ export class PaperEngine {
   }
 
   private async closePosition(p: OpenPosition, price: number, exitReason: string) {
+    // A live row mirrors a real Hyperliquid position. Marking it "closed" here would
+    // leave the exchange position open while the app thinks it's flat — refuse.
+    if (this.isLive()) {
+      this.log("error", `Refused to close ${p.coin} from the browser: live positions must be closed by the server agent via a real order.`);
+      return;
+    }
     const pnl = this.unrealizedPnl(p, price);
     this.positions = this.positions.filter(x => x.id !== p.id);
     this.startEquity += pnl; // realise
@@ -315,6 +321,10 @@ export class PaperEngine {
   }
 
   async flattenAll(reason: string) {
+    if (this.isLive()) {
+      this.log("error", "Refused to flatten from the browser in live mode — engage the kill switch so the server agent closes positions with real orders.");
+      return;
+    }
     for (const p of [...this.positions]) {
       const m = this.mid(p.coin) ?? p.entry_price;
       await this.closePosition(p, m, reason);
