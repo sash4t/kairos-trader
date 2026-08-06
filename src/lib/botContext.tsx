@@ -77,12 +77,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     } else {
       engineRef.current.updateSettings(settings);
     }
-    // publish mids periodically
-    if (!midsTimer.current) {
-      midsTimer.current = setInterval(() => {
-        if (engineRef.current) setMids({ ...engineRef.current.getMids() });
-      }, 1000);
-    }
+    // Mark prices are published by the dedicated allMids subscription above.
+
     return () => { /* keep engine alive across renders */ };
   }, [userId, settings]);
 
