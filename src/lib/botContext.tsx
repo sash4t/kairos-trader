@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useRef, useState 
 import { supabase } from "@/integrations/supabase/client";
 import { PaperEngine, type Settings } from "./paperEngine";
 import { toast } from "sonner";
+import { flattenLive } from "./live.functions";
 
 interface BotCtx {
   userId: string | null;
