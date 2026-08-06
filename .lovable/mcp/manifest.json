@@ -1,0 +1,225 @@
+{
+  "version": 1,
+  "sdk_version": "0.26.1",
+  "path": "/mcp",
+  "auth": {
+    "type": "oauth",
+    "issuer": "https://cxpbsmcnjlihjofpylul.supabase.co/auth/v1",
+    "accepted_audiences": [
+      "authenticated"
+    ]
+  },
+  "mcp": {
+    "server": {
+      "name": "hyperwealth-bot",
+      "version": "0.1.0",
+      "title": "Hyperwealth Bot"
+    },
+    "tools": [
+      {
+        "name": "get_bot_status",
+        "title": "Get bot status",
+        "description": "Overall trading bot status for the signed-in user: enabled flags, kill switch, mode, paper equity, open position count and last agent cycle.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {}
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "list_open_positions",
+        "title": "List open positions",
+        "description": "List the signed-in user's currently open paper positions with entry, stop loss, take profit and live unrealized PnL at the current mark price.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {}
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "list_recent_trades",
+        "title": "List recent closed trades",
+        "description": "List the signed-in user's most recently closed paper trades with realized PnL, exit reason and the explanation logged at entry.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991,
+              "description": "How many trades to return (1-100, default 20)."
+            }
+          }
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "list_bot_events",
+        "title": "List bot events",
+        "description": "Read the signed-in user's trading event log — scan results, entries, exits, AI verdicts and errors — newest first.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991,
+              "description": "How many events to return (1-200, default 30)."
+            },
+            "level": {
+              "type": "string",
+              "description": "Optional level filter, e.g. info, warn, error, ai, trade."
+            }
+          }
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "get_settings",
+        "title": "Get bot settings",
+        "description": "Read every trading setting for the signed-in user: risk limits, leverage, stop/target configuration, trailing and strategy mode.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {}
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "update_settings",
+        "title": "Update bot settings",
+        "description": "Change the signed-in user's trading settings — enable/disable the bot, the 24/7 background agent, scanning, AI review, the kill switch, and risk/exit parameters. Only the fields you pass are changed.",
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "bot_enabled": {
+              "type": "boolean",
+              "description": "Master on/off for the bot."
+            },
+            "server_agent_enabled": {
+              "type": "boolean",
+              "description": "Run the 24/7 background agent."
+            },
+            "scalp_enabled": {
+              "type": "boolean",
+              "description": "Allow new entries; false = manage open trades only."
+            },
+            "ai_review_enabled": {
+              "type": "boolean",
+              "description": "AI reviews every candidate entry before it is taken."
+            },
+            "kill_switch_engaged": {
+              "type": "boolean",
+              "description": "Engage or reset the kill switch."
+            },
+            "scalp_tp_pct": {
+              "type": "number",
+              "description": "Take-profit percent per trade."
+            },
+            "scalp_sl_pct": {
+              "type": "number",
+              "description": "Stop-loss percent per trade."
+            },
+            "trail_activate_pct": {
+              "type": "number",
+              "description": "Profit percent at which trailing arms."
+            },
+            "trail_dist_pct": {
+              "type": "number",
+              "description": "Trailing stop distance in percent."
+            },
+            "trailing_enabled": {
+              "type": "boolean",
+              "description": "Enable trailing stops."
+            },
+            "max_positions": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991,
+              "description": "Maximum concurrent open positions."
+            },
+            "position_size_pct": {
+              "type": "number",
+              "description": "Percent of equity per position."
+            },
+            "max_exposure_pct": {
+              "type": "number",
+              "description": "Maximum total exposure percent."
+            },
+            "max_leverage": {
+              "type": "number",
+              "description": "Maximum leverage."
+            },
+            "min_confidence": {
+              "type": "number",
+              "description": "Minimum signal confidence required to enter."
+            }
+          }
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "close_paper_position",
+        "title": "Close a paper position",
+        "description": "Close one open PAPER position at the current mark price, realize its PnL into paper equity and log the exit. Refuses when the account is in live mode — real Hyperliquid orders must be closed from the app.",
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": true
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "position_id": {
+              "type": "string",
+              "description": "Position id from list_open_positions."
+            },
+            "coin": {
+              "type": "string",
+              "description": "Coin symbol, e.g. SOL. Used when position_id is not given."
+            }
+          }
+        },
+        "outputSchema": null
+      }
+    ]
+  }
+}
