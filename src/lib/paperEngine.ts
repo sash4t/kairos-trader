@@ -75,6 +75,7 @@ export class PaperEngine {
   private dayStartTs: number = new Date().setUTCHours(0, 0, 0, 0);
   private snapshotTs = 0;
   private running = false;
+  private evaluating = false;
 
   constructor(userId: string, settings: Settings, log: Log) {
     this.userId = userId;
