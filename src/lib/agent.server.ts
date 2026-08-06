@@ -433,12 +433,41 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const startEq = firstSnap?.[0] ? +firstSnap[0].equity : equityNow;
       const nowEq = equityNow;
       const dayPct = ((nowEq - startEq) / (startEq || 1)) * 100;
-      if (dayPct <= -Math.abs(+s.daily_loss_pct)) {
+      if (equityIsReal && dayPct <= -Math.abs(+s.daily_loss_pct)) {
         await supabaseAdmin.from("bot_settings")
           .update({ bot_enabled: false, kill_switch_engaged: true }).eq("user_id", s.user_id);
         await log(s.user_id, "warn", `Daily loss limit hit (${dayPct.toFixed(2)}%). Agent stopped.`);
         notes.push("daily loss limit — agent stopped");
+
+        // In live mode a stopped agent must not leave real risk on the book.
+        if (isLive && creds) {
+          for (const p of [...positions]) {
+            const asset = (await assets()).get(p.coin);
+            const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+            if (!asset) continue;
+            try {
+              const fill = await marketOrder(creds, asset, {
+                isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1,
+              });
+              if (fill.size <= 0) continue;
+              const px = fill.avgPrice || mark;
+              const pnl = p.side === "long" ? (px - p.entry_price) * fill.size : (p.entry_price - px) * fill.size;
+              await supabaseAdmin.from("paper_positions").update({
+                status: "closed", exit_price: px, exit_reason: "daily loss limit",
+                pnl, closed_at: new Date().toISOString(),
+              }).eq("id", p.id);
+              positions = positions.filter((x) => x.id !== p.id);
+              report.closed++;
+              await log(s.user_id, "trade", `LIVE FLATTEN ${p.coin} @ ${px.toFixed(6)} · daily loss limit`, { live: true });
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              report.errors.push(`flatten ${p.coin}: ${msg}`);
+              await log(s.user_id, "error", `Live flatten failed for ${p.coin}: ${msg}`);
+            }
+          }
+        }
       }
+
 
       await supabaseAdmin.from("bot_settings").update({
         last_cycle_at: new Date().toISOString(),
