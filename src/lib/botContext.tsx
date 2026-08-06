@@ -31,6 +31,17 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id ?? null));
   }, []);
 
+  // Live mark prices — independent of the engine, which stays idle in live mode.
+  useEffect(() => {
+    let pending: Record<string, string> = {};
+    const unsub = subscribeAllMids(m => { pending = { ...pending, ...m }; });
+    const t = setInterval(() => {
+      if (Object.keys(pending).length) setMids(prev => ({ ...prev, ...pending }));
+    }, 1000);
+    return () => { unsub(); clearInterval(t); };
+  }, []);
+
+
   // Load + poll settings (the server agent mutates them too)
   useEffect(() => {
     if (!userId) return;
