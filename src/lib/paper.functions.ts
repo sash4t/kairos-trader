@@ -30,6 +30,7 @@ export const resetPaperAccount = createServerFn({ method: "POST" })
     await supabaseAdmin.from("equity_snapshots").insert({
       user_id: context.userId,
       equity: DEFAULT_PAPER_EQUITY,
+      mode: "paper",
     });
 
     await supabaseAdmin.from("bot_events").insert({
