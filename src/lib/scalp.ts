@@ -69,14 +69,23 @@ export function updateTrail(
   return { stopLoss: stop, trailHigh: best, changed: stop !== stopLoss || best !== trailHigh };
 }
 
-/** Decide whether an open position must be closed at the current mark. */
-export function exitReasonFor(side: ScalpSide, mark: number, stopLoss: number, takeProfit: number): string | null {
+/**
+ * Decide whether an open position must be closed at the current mark.
+ * A stop that has been trailed into profit (past entry) exits as `trailing_stop`,
+ * not `stop_loss` — otherwise winning trades look like stop-outs.
+ */
+export function exitReasonFor(
+  side: ScalpSide, mark: number, stopLoss: number, takeProfit: number, entry?: number,
+): string | null {
+  const inProfit = entry != null && (side === "long" ? stopLoss > entry : stopLoss < entry);
+  const stopLabel = inProfit ? "trailing_stop" : "stop_loss";
   if (side === "long") {
-    if (mark <= stopLoss) return "stop_loss";
+    if (mark <= stopLoss) return stopLabel;
     if (mark >= takeProfit) return "take_profit";
   } else {
-    if (mark >= stopLoss) return "stop_loss";
+    if (mark >= stopLoss) return stopLabel;
     if (mark <= takeProfit) return "take_profit";
   }
   return null;
 }
+
