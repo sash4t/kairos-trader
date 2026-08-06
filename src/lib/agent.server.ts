@@ -366,24 +366,31 @@ export async function runTradingCycle(): Promise<CycleReport> {
             if (!verdict.approve) { report.vetoed++; continue; }
           }
 
-          const entry = mids[sig.coin] ? +mids[sig.coin] : sig.price;
-          let size = notional / entry;
-          const sl = sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
-          const tp = sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
+          const quote = mids[sig.coin] ? +mids[sig.coin] : sig.price;
+          let entry = quote;
+          let size = notional / quote;
           const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")} · AI: ${verdict.reason}`;
 
           // ---- Live order ----
           if (isLive && creds) {
             const asset = (await assets()).get(sig.coin);
             if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; }
-            // Hyperliquid enforces a $10 minimum order value.
-            if (size * entry < 10) { notes.push(`${sig.coin}: below $10 minimum order`); continue; }
+            // Hyperliquid enforces a $10 minimum order value; round to the
+            // exchange's size precision before checking it.
+            size = Number(size.toFixed(asset.szDecimals));
+            if (size <= 0 || size * quote < 10) { notes.push(`${sig.coin}: below $10 minimum order`); continue; }
             try {
               await setLeverage(creds, asset, leverage);
-              await marketOrder(creds, asset, {
-                isBuy: sig.side === "long", size, markPrice: entry, slippagePct: 0.6,
+              const fill = await marketOrder(creds, asset, {
+                isBuy: sig.side === "long", size, markPrice: quote, slippagePct: 0.6,
               });
-              size = Number(size.toFixed(asset.szDecimals));
+              if (fill.size <= 0) {
+                await log(s.user_id, "warn", `Live order for ${sig.coin} did not fill — skipped.`);
+                continue;
+              }
+              // Record what actually happened on the exchange, not the quote.
+              size = fill.size;
+              entry = fill.avgPrice || quote;
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
               report.errors.push(`open ${sig.coin}: ${msg}`);
@@ -391,6 +398,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
               continue;
             }
           }
+
+          const sl = sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
+          const tp = sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
 
           const { data: inserted, error } = await supabaseAdmin.from("paper_positions").insert({
             user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry,
@@ -408,6 +418,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           await log(s.user_id, "trade",
             `${isLive ? "LIVE " : ""}OPEN ${reason} @ ${entry.toFixed(6)} · SL ${sl.toFixed(6)} · TP ${tp.toFixed(6)}`,
             { agent: "server", live: isLive });
+
         }
       }
 
