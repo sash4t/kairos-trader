@@ -45,7 +45,7 @@ export const getLiveStatus = createServerFn({ method: "POST" })
 /** Emergency: market-close every live Hyperliquid position with reduce-only orders. */
 export const flattenLive = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .handler(async (): Promise<{ closed: number; errors: string[] }> => {
+  .handler(async ({ context }): Promise<{ closed: number; errors: string[] }> => {
     const { readHlCreds, fetchLiveAccount, loadAssetIndex, marketOrder, hlInfo } =
       await import("./hyperliquidExchange.server");
     const creds = readHlCreds();
@@ -64,13 +64,30 @@ export const flattenLive = createServerFn({ method: "POST" })
       const mark = mids[p.coin] ? +mids[p.coin] : p.entryPrice;
       if (!asset) { errors.push(`${p.coin}: unknown asset`); continue; }
       try {
-        await marketOrder(creds, asset, {
+        const fill = await marketOrder(creds, asset, {
           isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1,
         });
+        if (fill.size <= 0) { errors.push(`${p.coin}: order did not fill`); continue; }
         closed++;
+
+        // Keep the app's records in step with the exchange.
+        const px = fill.avgPrice || mark;
+        const pnl = p.side === "long" ? (px - p.entryPrice) * fill.size : (p.entryPrice - px) * fill.size;
+        const { error } = await context.supabase
+          .from("paper_positions")
+          .update({
+            status: "closed", exit_price: px, exit_reason: "manual flatten",
+            pnl, closed_at: new Date().toISOString(),
+          })
+          .eq("user_id", context.userId)
+          .eq("coin", p.coin)
+          .eq("side", p.side)
+          .eq("status", "open");
+        if (error) errors.push(`${p.coin}: record update failed (${error.message})`);
       } catch (err) {
         errors.push(`${p.coin}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     return { closed, errors };
   });
+
