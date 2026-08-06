@@ -12,7 +12,7 @@ function Landing() {
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
           <div className="flex items-center gap-2">
             <div className="h-6 w-6 rounded bg-primary" />
-            <span className="mono text-sm font-semibold tracking-tight">ALETHEIA</span>
+            <span className="mono text-sm font-semibold tracking-tight">KAIROS</span>
             <span className="text-xs text-muted-foreground">/ hyperliquid terminal</span>
           </div>
           <div className="flex items-center gap-3">

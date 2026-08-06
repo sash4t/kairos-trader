@@ -25,7 +25,7 @@ function Trades() {
     const blob = new Blob([csv(data)], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `aletheia-trades-${new Date().toISOString().slice(0,10)}.csv`; a.click();
+    a.href = url; a.download = `kairos-trades-${new Date().toISOString().slice(0,10)}.csv`; a.click();
     URL.revokeObjectURL(url);
   };
 

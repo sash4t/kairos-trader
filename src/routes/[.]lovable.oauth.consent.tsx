@@ -57,7 +57,7 @@ function Consent() {
       <div className="panel w-full max-w-md p-6 sm:p-8">
         <div className="flex items-center gap-2">
           <div className="h-6 w-6 rounded bg-primary" />
-          <span className="mono text-sm font-semibold">ALETHEIA</span>
+          <span className="mono text-sm font-semibold">KAIROS</span>
         </div>
         <h1 className="mt-6 text-xl font-semibold">Connect {clientName}</h1>
         <p className="mt-2 text-sm text-muted-foreground">
