@@ -187,20 +187,29 @@ export async function setLeverage(creds: HlCreds, asset: AssetInfo, leverage: nu
   });
 }
 
+export interface OrderFill {
+  /** Filled size in coin units (0 when the IOC order crossed nothing). */
+  size: number;
+  /** Volume-weighted average fill price (0 when nothing filled). */
+  avgPrice: number;
+  oid: number | null;
+}
+
 /**
  * Market order via aggressive IOC limit (Hyperliquid has no true market type).
  * `slippagePct` widens the limit so the order crosses the book.
+ * Returns the ACTUAL fill — an IOC can fill partially or not at all.
  */
 export async function marketOrder(
   creds: HlCreds,
   asset: AssetInfo,
   opts: { isBuy: boolean; size: number; markPrice: number; reduceOnly?: boolean; slippagePct?: number },
-) {
+): Promise<OrderFill> {
   const slip = (opts.slippagePct ?? 0.5) / 100;
   const limit = opts.isBuy ? opts.markPrice * (1 + slip) : opts.markPrice * (1 - slip);
   const sz = formatSize(opts.size, asset.szDecimals);
   if (Number(sz) <= 0) throw new Error(`Size rounds to zero for ${asset.name}`);
-  return post(creds, {
+  const json = await post(creds, {
     type: "order",
     orders: [{
       a: asset.index,
@@ -212,4 +221,11 @@ export async function marketOrder(
     }],
     grouping: "na",
   });
+
+  const statuses = (json.response as { data?: { statuses?: unknown[] } } | undefined)?.data?.statuses ?? [];
+  const first = statuses[0] as { filled?: { totalSz: string; avgPx: string; oid: number } } | undefined;
+  const filled = first?.filled;
+  if (!filled) return { size: 0, avgPrice: 0, oid: null };
+  return { size: Math.abs(+filled.totalSz), avgPrice: +filled.avgPx, oid: filled.oid ?? null };
 }
+
