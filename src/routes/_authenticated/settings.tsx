@@ -37,16 +37,26 @@ function SettingsPage() {
     queryFn: async () => (await supabase.from("profiles").select("*").eq("id", userId!).maybeSingle()).data,
   });
 
-  useEffect(() => { if (profile?.wallet_address) setWallet(profile.wallet_address); }, [profile]);
+  const [walletTouched, setWalletTouched] = useState(false);
+  useEffect(() => {
+    if (!walletTouched) setWallet(profile?.wallet_address ?? "");
+  }, [profile, walletTouched]);
 
   const saveWallet = async () => {
+    if (!userId) return;
     setSaving(true);
     const trimmed = wallet.trim();
     if (trimmed && !/^0x[a-fA-F0-9]{40}$/.test(trimmed)) { toast.error("Invalid Ethereum-style address"); setSaving(false); return; }
-    await supabase.from("profiles").update({ wallet_address: trimmed || null }).eq("id", userId!);
-    toast.success("Wallet saved");
+    const { error } = await supabase
+      .from("profiles")
+      .upsert({ id: userId, wallet_address: trimmed || null }, { onConflict: "id" });
     setSaving(false);
+    if (error) { toast.error(error.message); return; }
+    setWalletTouched(false);
+    await queryClient.invalidateQueries({ queryKey: ["profile", userId] });
+    toast.success("Wallet saved");
   };
+
 
   const loadHyperliquid = async () => {
     if (!wallet) return;
