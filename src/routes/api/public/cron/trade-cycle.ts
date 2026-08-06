@@ -8,14 +8,17 @@ export const Route = createFileRoute("/api/public/cron/trade-cycle")({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const expected =
-          process.env["SUPABASE_ANON_KEY"] ??
-          process.env["SUPABASE_PUBLISHABLE_KEY"] ??
-          import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"];
-        if (!expected) return new Response("Not configured", { status: 500 });
+        // Accept either project key form — the scheduler may send whichever is available.
+        const accepted = [
+          process.env["CRON_SECRET"],
+          process.env["SUPABASE_ANON_KEY"],
+          process.env["SUPABASE_PUBLISHABLE_KEY"],
+          import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"],
+        ].filter((v): v is string => !!v);
+        if (accepted.length === 0) return new Response("Not configured", { status: 500 });
 
         const provided = (request.headers.get("apikey") ?? "").trim();
-        if (provided.length !== expected.length || provided !== expected) {
+        if (!accepted.some((k) => k.length === provided.length && k === provided)) {
           return new Response("Unauthorized", { status: 401 });
         }
 

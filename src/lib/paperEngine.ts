@@ -75,6 +75,7 @@ export class PaperEngine {
   private dayStartTs: number = new Date().setUTCHours(0, 0, 0, 0);
   private snapshotTs = 0;
   private running = false;
+  private evaluating = false;
 
   constructor(userId: string, settings: Settings, log: Log) {
     this.userId = userId;
@@ -231,9 +232,24 @@ export class PaperEngine {
   private async evalCycle() {
     if (!this.settings.bot_enabled || this.settings.kill_switch_engaged) return;
     if (this.settings.mode !== "paper") return; // safety
+    // The always-on server agent owns entries when it is enabled; running both
+    // races and can open two positions in the same coin.
+    if (this.settings.server_agent_enabled) return;
+    // Cycles can outlive the 15s timer (network waits) — never overlap them.
+    if (this.evaluating) return;
+    this.evaluating = true;
+    try {
+      await this.runEvalCycle();
+    } finally {
+      this.evaluating = false;
+    }
+  }
+
+  private async runEvalCycle() {
     // scan up to 8 coins per cycle prioritising liquid ones without positions
     const held = new Set(this.positions.map(p => p.coin));
     const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
+
     const scored = this.meta
       .map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
       .filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED_COINS.has(x.meta.name))
@@ -262,6 +278,8 @@ export class PaperEngine {
       if (!sig.side) continue;
       const threshold = Math.max(this.settings.min_confidence, MODE_MIN_CONFIDENCE[this.settings.strategy_mode]);
       if (sig.confidence < threshold) continue;
+      if (this.positions.some(p => p.coin === meta.name)) continue; // opened meanwhile
+      held.add(meta.name);
       await this.tryOpen(sig, meta);
     }
   }
