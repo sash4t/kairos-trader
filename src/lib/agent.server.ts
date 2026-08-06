@@ -140,7 +140,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
         notes.push("live mode on but API wallet not configured — no orders sent");
         await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing.");
       }
-      const canTrade = !isLive || !!creds;
+      let canTrade = !isLive || !!creds;
 
       const exits: ExitParams = {
         tpPct: +s.scalp_tp_pct,
@@ -157,6 +157,49 @@ export async function runTradingCycle(): Promise<CycleReport> {
         take_profit: +p.take_profit, trail_high: p.trail_high == null ? null : +p.trail_high,
         confidence: +p.confidence,
       })) as PositionRow[];
+
+      // ---- 0. Live reconciliation: the exchange is the source of truth ----
+      let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
+      if (isLive && creds) {
+        try {
+          liveAcct = await fetchLiveAccount(creds.accountAddress);
+        } catch (err) {
+          // Without a trustworthy account read we must not send new orders.
+          canTrade = false;
+          const msg = err instanceof Error ? err.message : String(err);
+          notes.push(`live account read failed: ${msg}`);
+          await log(s.user_id, "error", `Could not read Hyperliquid account — trading paused this cycle: ${msg}`);
+        }
+
+        if (liveAcct) {
+          const onChain = new Map(liveAcct.positions.map((p) => [p.coin, p]));
+          for (const p of [...positions]) {
+            const real = onChain.get(p.coin);
+            if (!real || real.side !== p.side) {
+              const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+              const pnl = p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
+              await supabaseAdmin.from("paper_positions").update({
+                status: "closed", exit_price: mark, exit_reason: "reconciled",
+                pnl, closed_at: new Date().toISOString(),
+              }).eq("id", p.id);
+              positions = positions.filter((x) => x.id !== p.id);
+              await log(s.user_id, "warn",
+                `Reconciled ${p.coin}: no matching live position on Hyperliquid, marked closed.`, { live: true });
+              continue;
+            }
+            // Trust the exchange for size and entry (partial fills, manual adds).
+            if (Math.abs(real.size - p.size) > p.size * 0.01 || Math.abs(real.entryPrice - p.entry_price) > p.entry_price * 0.001) {
+              p.size = real.size;
+              p.entry_price = real.entryPrice;
+              p.notional = real.size * real.entryPrice;
+              await supabaseAdmin.from("paper_positions")
+                .update({ size: p.size, entry_price: p.entry_price, notional: p.notional }).eq("id", p.id);
+            }
+          }
+          const untracked = liveAcct.positions.filter((p) => !positions.some((x) => x.coin === p.coin));
+          if (untracked.length) notes.push(`untracked live positions: ${untracked.map((p) => p.coin).join(", ")}`);
+        }
+      }
 
       // ---- 1. Manage open positions: trail, then exit ----
       let realised = 0;
@@ -176,13 +219,37 @@ export async function runTradingCycle(): Promise<CycleReport> {
         const reason = exitReasonFor(p.side, mark, p.stop_loss, p.take_profit);
         if (!reason) continue;
 
+        let exitPrice = mark;
+        let exitSize = p.size;
+
         if (isLive && creds) {
           const asset = (await assets()).get(p.coin);
           if (!asset) { report.errors.push(`${p.coin}: unknown asset`); continue; }
           try {
-            await marketOrder(creds, asset, {
-              isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 0.6,
+            const fill = await marketOrder(creds, asset, {
+              isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1,
             });
+            if (fill.size <= 0) {
+              await log(s.user_id, "warn", `Live close for ${p.coin} did not fill — retrying next cycle.`);
+              continue;
+            }
+            exitPrice = fill.avgPrice || mark;
+            exitSize = fill.size;
+            if (exitSize < p.size * 0.99) {
+              // Partial close: bank the closed slice, keep the remainder open.
+              const remaining = p.size - exitSize;
+              const partialPnl = p.side === "long"
+                ? (exitPrice - p.entry_price) * exitSize
+                : (p.entry_price - exitPrice) * exitSize;
+              p.size = remaining;
+              p.notional = remaining * p.entry_price;
+              await supabaseAdmin.from("paper_positions")
+                .update({ size: remaining, notional: p.notional }).eq("id", p.id);
+              await log(s.user_id, "trade",
+                `LIVE PARTIAL CLOSE ${p.coin} ${exitSize} @ ${exitPrice.toFixed(6)} · PnL ${partialPnl >= 0 ? "+" : ""}${partialPnl.toFixed(2)} USDC`,
+                { agent: "server", live: true });
+              continue;
+            }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             report.errors.push(`close ${p.coin}: ${msg}`);
@@ -191,23 +258,27 @@ export async function runTradingCycle(): Promise<CycleReport> {
           }
         }
 
-        const pnl = p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
+        const pnl = p.side === "long"
+          ? (exitPrice - p.entry_price) * exitSize
+          : (p.entry_price - exitPrice) * exitSize;
         realised += pnl;
         await supabaseAdmin.from("paper_positions").update({
-          status: "closed", exit_price: mark, exit_reason: reason, pnl, closed_at: new Date().toISOString(),
+          status: "closed", exit_price: exitPrice, exit_reason: reason, pnl, closed_at: new Date().toISOString(),
         }).eq("id", p.id);
         positions = positions.filter((x) => x.id !== p.id);
         report.closed++;
         await log(s.user_id, "trade",
-          `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · ${reason}`,
+          `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${exitPrice.toFixed(6)} · PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · ${reason}`,
           { agent: "server", reason, live: isLive });
       }
 
-      if (realised !== 0) {
+      // The simulated paper balance must never move on live trades.
+      if (realised !== 0 && !isLive) {
         await supabaseAdmin.from("bot_settings")
           .update({ paper_equity: +s.paper_equity + realised }).eq("user_id", s.user_id);
         s.paper_equity = +s.paper_equity + realised;
       }
+
 
       // ---- 2. Equity snapshot ----
       let unrealised = 0;
