@@ -151,6 +151,8 @@ export class PaperEngine {
   }
 
   private tick() {
+    // Never manage positions or write snapshots while the account is live.
+    if (this.isLive()) return;
     // Reset day start at UTC midnight
     const dayStart = new Date().setUTCHours(0, 0, 0, 0);
     if (dayStart !== this.dayStartTs) {
