@@ -35,9 +35,16 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     if (!userId) return;
     let cancelled = false;
     const load = async () => {
-      const { data } = await supabase.from("bot_settings").select("*").eq("user_id", userId).maybeSingle();
+      let { data } = await supabase.from("bot_settings").select("*").eq("user_id", userId).maybeSingle();
+      if (!data) {
+        // No settings row yet (new or reset account) — create defaults so the UI can render.
+        const ins = await supabase.from("bot_settings").insert({ user_id: userId }).select().maybeSingle();
+        if (ins.error) { if (!cancelled) toast.error(ins.error.message); return; }
+        data = ins.data;
+      }
       if (!cancelled && data) setSettings(prev => (prev && JSON.stringify(prev) === JSON.stringify(data) ? prev : (data as any)));
     };
+
     load();
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
