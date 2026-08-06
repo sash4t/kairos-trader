@@ -84,8 +84,15 @@ export class PaperEngine {
     this.dayStartEquity = settings.paper_equity;
   }
 
+  /** The browser engine simulates fills; it must never touch a live account. */
+  private isLive() { return this.settings.mode === "live"; }
+
   async start() {
     if (this.running) return;
+    if (this.isLive()) {
+      this.log("info", "Live mode — browser engine stays idle; the server agent handles live trading.");
+      return;
+    }
     this.running = true;
     this.log("info", "Engine starting (paper mode)");
     await this.syncPositions();
@@ -120,7 +127,16 @@ export class PaperEngine {
     this.log("info", "Engine stopped");
   }
 
-  updateSettings(s: Settings) { this.settings = s; }
+  updateSettings(s: Settings) {
+    const wasLive = this.settings.mode === "live";
+    this.settings = s;
+    if (s.mode === "live" && this.running) {
+      this.log("warn", "Switched to live mode — browser engine stopped; the server agent owns live trading.");
+      this.stop();
+    } else if (wasLive && s.mode === "paper" && !this.running) {
+      this.start().catch(err => this.log("error", err.message));
+    }
+  }
 
   getPositions() { return this.positions; }
   getMids() { return this.mids; }
@@ -144,6 +160,8 @@ export class PaperEngine {
   }
 
   private tick() {
+    // Never manage positions or write snapshots while the account is live.
+    if (this.isLive()) return;
     // Reset day start at UTC midnight
     const dayStart = new Date().setUTCHours(0, 0, 0, 0);
     if (dayStart !== this.dayStartTs) {
@@ -205,6 +223,7 @@ export class PaperEngine {
       const unreal = eq - this.startEquity;
       supabase.from("equity_snapshots").insert({
         user_id: this.userId, equity: eq, realized_pnl: 0, unrealized_pnl: unreal,
+        mode: "paper",
       }).then(() => {});
     }
   }
@@ -286,6 +305,12 @@ export class PaperEngine {
   }
 
   private async closePosition(p: OpenPosition, price: number, exitReason: string) {
+    // A live row mirrors a real Hyperliquid position. Marking it "closed" here would
+    // leave the exchange position open while the app thinks it's flat — refuse.
+    if (this.isLive()) {
+      this.log("error", `Refused to close ${p.coin} from the browser: live positions must be closed by the server agent via a real order.`);
+      return;
+    }
     const pnl = this.unrealizedPnl(p, price);
     this.positions = this.positions.filter(x => x.id !== p.id);
     this.startEquity += pnl; // realise
@@ -296,6 +321,10 @@ export class PaperEngine {
   }
 
   async flattenAll(reason: string) {
+    if (this.isLive()) {
+      this.log("error", "Refused to flatten from the browser in live mode — engage the kill switch so the server agent closes positions with real orders.");
+      return;
+    }
     for (const p of [...this.positions]) {
       const m = this.mid(p.coin) ?? p.entry_price;
       await this.closePosition(p, m, reason);

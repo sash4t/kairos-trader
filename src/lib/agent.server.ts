@@ -232,6 +232,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       await supabaseAdmin.from("equity_snapshots").insert({
         user_id: s.user_id, equity: equityNow,
         realized_pnl: realised, unrealized_pnl: unrealised,
+        mode: isLive ? "live" : "paper",
       });
 
       // ---- 3. Look for new entries ----
@@ -334,8 +335,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
 
       // ---- 4. Daily loss circuit breaker ----
       const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+      // Only compare against snapshots from the SAME mode — a paper balance must
+      // never be measured against a live account balance (or vice versa).
       const { data: firstSnap } = await supabaseAdmin
         .from("equity_snapshots").select("equity").eq("user_id", s.user_id)
+        .eq("mode", isLive ? "live" : "paper")
         .gte("ts", dayStart.toISOString()).order("ts", { ascending: true }).limit(1);
       const startEq = firstSnap?.[0] ? +firstSnap[0].equity : equityNow;
       const nowEq = equityNow;
