@@ -278,6 +278,8 @@ export class PaperEngine {
       if (!sig.side) continue;
       const threshold = Math.max(this.settings.min_confidence, MODE_MIN_CONFIDENCE[this.settings.strategy_mode]);
       if (sig.confidence < threshold) continue;
+      if (this.positions.some(p => p.coin === meta.name)) continue; // opened meanwhile
+      held.add(meta.name);
       await this.tryOpen(sig, meta);
     }
   }
