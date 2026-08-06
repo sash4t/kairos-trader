@@ -80,6 +80,14 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   };
 
   const killSwitch = async () => {
+    if (settings?.mode === "live") {
+      // Live positions exist on the exchange — only real reduce-only orders can flatten them.
+      const res = await flattenLive();
+      await saveSettings({ bot_enabled: false, kill_switch_engaged: true });
+      if (res.errors.length) toast.error(`Closed ${res.closed} live position(s); errors: ${res.errors.join("; ")}`);
+      else toast.warning(`Kill switch engaged. ${res.closed} live position(s) market-closed.`);
+      return;
+    }
     if (!engineRef.current) return;
     await engineRef.current.flattenAll("kill_switch");
     await saveSettings({ bot_enabled: false, kill_switch_engaged: true });
