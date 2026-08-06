@@ -232,6 +232,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       await supabaseAdmin.from("equity_snapshots").insert({
         user_id: s.user_id, equity: equityNow,
         realized_pnl: realised, unrealized_pnl: unrealised,
+        mode: isLive ? "live" : "paper",
       });
 
       // ---- 3. Look for new entries ----
