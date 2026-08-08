@@ -240,18 +240,28 @@ function Dashboard() {
                 const mark = +(mids[p.coin] ?? p.entry_price);
                 const pnl = p.side === "long" ? (mark - +p.entry_price) * +p.size : (+p.entry_price - mark) * +p.size;
                 const margin = +p.notional / Math.max(1, +p.leverage);
+                const dir = p.side === "long" ? 1 : -1;
+                const pricePct = ((mark - +p.entry_price) / +p.entry_price) * 100 * dir;
+                const stopPct = ((+p.stop_loss - +p.entry_price) / +p.entry_price) * 100 * dir;
                 return (
                   <tr key={p.id} className="border-b border-panel-border/50 mono">
                     <td className="py-2">{p.coin}</td>
                     <td className={`text-right ${pnl >= 0 ? "text-bull" : "text-bear"}`}>
                       <span className="font-semibold">{pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}</span>
-                      <span className="ml-1 text-xs opacity-70">({pnl >= 0 ? "+" : ""}{(margin > 0 ? (pnl / margin) * 100 : 0).toFixed(1)}%)</span>
+                      <span className="ml-1 text-xs opacity-70" title="Return on margin (leveraged)">({pnl >= 0 ? "+" : ""}{(margin > 0 ? (pnl / margin) * 100 : 0).toFixed(1)}% ROE)</span>
                     </td>
                     <td className={p.side === "long" ? "text-bull" : "text-bear"}>{p.side.toUpperCase()}</td>
                     <td className="text-right">{(+p.entry_price).toFixed(6)}</td>
-                    <td className="text-right">{mark.toFixed(6)}</td>
+                    <td className="text-right">
+                      {mark.toFixed(6)}
+                      <span className={`ml-1 text-xs ${pricePct >= 0 ? "text-bull" : "text-bear"}`}>({pricePct >= 0 ? "+" : ""}{pricePct.toFixed(2)}%)</span>
+                    </td>
                     <td className="text-right">{(+p.size).toFixed(4)}</td>
-                    <td className="text-right text-xs text-muted-foreground">{(+p.stop_loss).toFixed(4)} / {(+p.take_profit).toFixed(4)}</td>
+                    <td className="text-right text-xs text-muted-foreground">
+                      {(+p.stop_loss).toFixed(6)} / {(+p.take_profit).toFixed(6)}
+                      <div className="opacity-70">stop at {stopPct.toFixed(2)}%</div>
+                    </td>
+
                   </tr>
                 );
               })}
