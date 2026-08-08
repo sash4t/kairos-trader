@@ -206,17 +206,24 @@ function Dashboard() {
                       <span className="mono truncate text-sm font-semibold">{p.coin}</span>
                       <span className={`mono ml-2 text-xs font-semibold ${p.side === "long" ? "text-bull" : "text-bear"}`}>{p.side.toUpperCase()}</span>
                     </div>
-                    <div className={`mono shrink-0 text-sm font-semibold ${pnl >= 0 ? "text-bull" : "text-bear"}`}>
+                    <div className={`mono shrink-0 text-right text-sm font-semibold ${pnl >= 0 ? "text-bull" : "text-bear"}`}>
                       {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
-                      <span className="ml-1 text-xs opacity-70">({pnl >= 0 ? "+" : ""}{(margin > 0 ? (pnl / margin) * 100 : 0).toFixed(1)}%)</span>
+                      <span className="ml-1 text-xs opacity-70" title="Return on margin (leveraged)">({pnl >= 0 ? "+" : ""}{(margin > 0 ? (pnl / margin) * 100 : 0).toFixed(1)}% ROE)</span>
                     </div>
                   </div>
                   <div className="mono mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
                     <div className="flex justify-between"><span className="text-muted-foreground">Entry</span><span>{(+p.entry_price).toFixed(6)}</span></div>
                     <div className="flex justify-between"><span className="text-muted-foreground">Mark</span><span>{mark.toFixed(6)}</span></div>
-                    <div className="flex justify-between"><span className="text-muted-foreground">SL</span><span className="text-bear">{(+p.stop_loss).toFixed(4)}</span></div>
-                    <div className="flex justify-between"><span className="text-muted-foreground">TP</span><span className="text-bull">{(+p.take_profit).toFixed(4)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">SL</span><span className="text-bear">{(+p.stop_loss).toFixed(6)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">TP</span><span className="text-bull">{(+p.take_profit).toFixed(6)}</span></div>
+                    <div className="col-span-2 flex justify-between text-muted-foreground">
+                      <span>Price vs entry</span>
+                      <span className={pricePct >= 0 ? "text-bull" : "text-bear"}>
+                        {pricePct >= 0 ? "+" : ""}{pricePct.toFixed(2)}% · stop at {stopPct.toFixed(2)}%
+                      </span>
+                    </div>
                   </div>
+
                 </div>
               );
             })}
