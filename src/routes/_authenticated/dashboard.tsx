@@ -199,6 +199,9 @@ function Dashboard() {
               const mark = +(mids[p.coin] ?? p.entry_price);
               const pnl = p.side === "long" ? (mark - +p.entry_price) * +p.size : (+p.entry_price - mark) * +p.size;
               const margin = +p.notional / Math.max(1, +p.leverage);
+              const dir = p.side === "long" ? 1 : -1;
+              const pricePct = ((mark - +p.entry_price) / +p.entry_price) * 100 * dir;
+              const stopPct = ((+p.stop_loss - +p.entry_price) / +p.entry_price) * 100 * dir;
               return (
                 <div key={p.id} className="rounded-md border border-panel-border p-3">
                   <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
