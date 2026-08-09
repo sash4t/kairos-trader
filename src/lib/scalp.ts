@@ -1,18 +1,11 @@
 import { evaluateSignal, STRATEGY_PARAMS, type Bar } from "./strategy";
-import { evaluateTrendBotSignal, TRENDBOT_PARAMS, TRENDBOT_STRATEGY_KEY } from "./trendbotStrategy";
+import { evaluateTrendBotSignal, TRENDBOT_STRATEGY_KEY } from "./trendbotStrategy";
 
 export type ScalpSide = "long" | "short";
 export type StrategyKey = "bollinger_breakout" | typeof TRENDBOT_STRATEGY_KEY;
 
 export interface ScalpSignal {
-  coin: string;
-  side: ScalpSide | null;
-  family: string;
-  confidence: number;
-  reasons: string[];
-  price: number;
-  atrPct: number;
-  indicators: Record<string, number>;
+  coin: string; side: ScalpSide | null; family: string; confidence: number; reasons: string[]; price: number; atrPct: number; indicators: Record<string, number>;
 }
 
 export const STRATEGY_OPTIONS = [
@@ -21,27 +14,11 @@ export const STRATEGY_OPTIONS = [
 ] as const;
 
 export function evaluateScalp(coin: string, bars: Bar[], strategyKey: StrategyKey = "bollinger_breakout"): ScalpSignal {
-  const isTrendBot = strategyKey === TRENDBOT_STRATEGY_KEY;
-  const sig = isTrendBot ? evaluateTrendBotSignal(coin, bars) : evaluateSignal(coin, bars);
-  return {
-    coin,
-    side: sig.side,
-    family: sig.side ? strategyKey : "none",
-    confidence: sig.confidence,
-    reasons: sig.reasons,
-    price: sig.price,
-    atrPct: sig.indicators["atrPct"] ?? 0,
-    indicators: sig.indicators,
-  };
+  const sig = strategyKey === TRENDBOT_STRATEGY_KEY ? evaluateTrendBotSignal(coin, bars) : evaluateSignal(coin, bars);
+  return { coin, side: sig.side, family: sig.side ? strategyKey : "none", confidence: sig.confidence, reasons: sig.reasons, price: sig.price, atrPct: sig.indicators["atrPct"] ?? 0, indicators: sig.indicators };
 }
 
-export const DEFAULT_EXITS = {
-  tpPct: STRATEGY_PARAMS.tpPct,
-  slPct: STRATEGY_PARAMS.slPct,
-  trailActivatePct: STRATEGY_PARAMS.trailActivatePct,
-  trailDistPct: STRATEGY_PARAMS.trailDistPct,
-};
-
+export const DEFAULT_EXITS = { tpPct: STRATEGY_PARAMS.tpPct, slPct: STRATEGY_PARAMS.slPct, trailActivatePct: STRATEGY_PARAMS.trailActivatePct, trailDistPct: STRATEGY_PARAMS.trailDistPct };
 export interface ExitParams { tpPct: number; slPct: number; trailActivatePct: number; trailDistPct: number }
 export interface TrailUpdate { stopLoss: number; trailHigh: number; changed: boolean }
 
@@ -59,12 +36,7 @@ export function updateTrail(side: ScalpSide, entry: number, mark: number, stopLo
 export function exitReasonFor(side: ScalpSide, mark: number, stopLoss: number, takeProfit: number, entry?: number): string | null {
   const inProfit = entry != null && (side === "long" ? stopLoss > entry : stopLoss < entry);
   const stopLabel = inProfit ? "trailing_stop" : "stop_loss";
-  if (side === "long") {
-    if (mark <= stopLoss) return stopLabel;
-    if (mark >= takeProfit) return "take_profit";
-  } else {
-    if (mark >= stopLoss) return stopLabel;
-    if (mark <= takeProfit) return "take_profit";
-  }
+  if (side === "long") { if (mark <= stopLoss) return stopLabel; if (mark >= takeProfit) return "take_profit"; }
+  else { if (mark >= stopLoss) return stopLabel; if (mark <= takeProfit) return "take_profit"; }
   return null;
 }
