@@ -130,8 +130,16 @@ export class PaperEngine {
 
   updateSettings(s: Settings) {
     const wasLive = this.settings.mode === "live";
+    // A balance change that isn't a trade (paper reset, manual edit) must move
+    // the baseline too, otherwise the breaker reads it as a huge daily loss.
+    if (s.paper_equity !== this.settings.paper_equity) {
+      const delta = s.paper_equity - this.settings.paper_equity;
+      this.startEquity += delta;
+      this.dayStartEquity += delta;
+    }
     this.settings = s;
     if (s.mode === "live" && this.running) {
+
       this.log("warn", "Switched to live mode — browser engine stopped; the server agent owns live trading.");
       this.stop();
     } else if (wasLive && s.mode === "paper" && !this.running) {
