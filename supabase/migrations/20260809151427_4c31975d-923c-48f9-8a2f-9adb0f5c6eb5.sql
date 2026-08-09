@@ -1,0 +1,1 @@
+update public.bot_settings set bot_enabled = true, kill_switch_engaged = false;

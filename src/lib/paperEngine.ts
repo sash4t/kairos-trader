@@ -130,8 +130,20 @@ export class PaperEngine {
 
   updateSettings(s: Settings) {
     const wasLive = this.settings.mode === "live";
+    // A balance change that isn't a trade (paper reset, manual edit, deposit)
+    // must move the baseline too, otherwise the breaker reads the jump as a
+    // huge daily loss. Only large discontinuities qualify — small deltas are
+    // realised P&L written by the server agent and must stay in the day's P&L.
+    const prevEq = this.settings.paper_equity;
+    const delta = s.paper_equity - prevEq;
+    if (prevEq > 0 && Math.abs(delta) > prevEq * 0.2) {
+      this.startEquity += delta;
+      this.dayStartEquity += delta;
+    }
+
     this.settings = s;
     if (s.mode === "live" && this.running) {
+
       this.log("warn", "Switched to live mode — browser engine stopped; the server agent owns live trading.");
       this.stop();
     } else if (wasLive && s.mode === "paper" && !this.running) {

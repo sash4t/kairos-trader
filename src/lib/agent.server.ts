@@ -423,17 +423,22 @@ export async function runTradingCycle(): Promise<CycleReport> {
       }
 
       // ---- 4. Daily loss circuit breaker ----
+      // Measure the day by ACTUAL trading P&L (closed trades today + open
+      // unrealised), never by comparing equity snapshots. Snapshot baselines
+      // break whenever the balance changes for a non-trading reason (paper
+      // reset, deposit/withdrawal, allocation change) and would trip the kill
+      // switch on a jump that lost no money.
       const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
-      // Only compare against snapshots from the SAME mode — a paper balance must
-      // never be measured against a live account balance (or vice versa).
-      const { data: firstSnap } = await supabaseAdmin
-        .from("equity_snapshots").select("equity").eq("user_id", s.user_id)
-        .eq("mode", isLive ? "live" : "paper")
-        .gte("ts", dayStart.toISOString()).order("ts", { ascending: true }).limit(1);
-      const startEq = firstSnap?.[0] ? +firstSnap[0].equity : equityNow;
-      const nowEq = equityNow;
-      const dayPct = ((nowEq - startEq) / (startEq || 1)) * 100;
+      const { data: closedToday } = await supabaseAdmin
+        .from("paper_positions").select("pnl")
+        .eq("user_id", s.user_id).eq("status", "closed")
+        .gte("closed_at", dayStart.toISOString());
+      const realisedToday = (closedToday ?? []).reduce((sum, r) => sum + (r.pnl == null ? 0 : +r.pnl), 0);
+      const dayPnl = realisedToday + unrealised;
+      const startEq = equityNow - dayPnl;
+      const dayPct = startEq > 0 ? (dayPnl / startEq) * 100 : 0;
       if (equityIsReal && dayPct <= -Math.abs(+s.daily_loss_pct)) {
+
         await supabaseAdmin.from("bot_settings")
           .update({ bot_enabled: false, kill_switch_engaged: true }).eq("user_id", s.user_id);
         await log(s.user_id, "warn", `Daily loss limit hit (${dayPct.toFixed(2)}%). Agent stopped.`);
