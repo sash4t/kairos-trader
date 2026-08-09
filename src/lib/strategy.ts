@@ -23,23 +23,30 @@ export function candlesToBars(cs: Candle[]): Bar[] {
   return cs.map(c => ({ t: c.t, o: +c.o, h: +c.h, l: +c.l, c: +c.c, v: +c.v }));
 }
 
-/** Validated parameters — see the backtest note under evaluateSignal. */
+/** Current parameters — see the backtest note under evaluateSignal. */
 export const STRATEGY_PARAMS = {
   interval: "1h",
   bbPeriod: 20,
-  bbK: 2.5,
+  bbK: 2.0,
   trendPeriod: 200,
   atrMinPct: 0.5,
   atrMaxPct: 6,
-  tpPct: 3,
-  slPct: 2,
-  trailActivatePct: 0.5,
-  trailDistPct: 0.3,
+  tpPct: 12,
+  slPct: 1.5,
+  trailActivatePct: 1.5,
+  trailDistPct: 1.2,
   maxHoldBars: 24,
 } as const;
 
 /**
  * Bollinger band breakout with an SMA200 trend filter, on 1-hour bars.
+ *
+ * NOTE: the parameters above were updated after the audit (2.0σ band, 12%
+ * target, 1.5% stop, trail 1.2% armed at +1.5%, 3 positions per sector). The
+ * Aug 2026 backtest below was run on the OLD 2.5σ / 3% TP / 2% SL / 0.3%
+ * trail configuration, so its numbers do NOT describe the current settings.
+ * Treat them as historical context only and forward-test on paper before
+ * drawing any conclusion about the live edge.
  *
  * Backtest (Aug 2026, top 20 Hyperliquid perps by volume, ~40 days of 1h bars,
  * 0.16% round-trip cost = taker fees + slippage, no intrabar lookahead):
@@ -51,8 +58,8 @@ export const STRATEGY_PARAMS = {
  *
  * Entry: close breaks above the upper band (or below the lower band) while
  * price is on the trend side of SMA200 and RSI confirms direction.
- * Exit: fixed 3% target, 2% stop, trail 0.3% behind the best price once the
- * trade is 0.5% in profit — the trail supplies almost all of the edge.
+ * Exit: fixed 12% target, 1.5% stop, trail 1.2% behind the best price once the
+ * trade is 1.5% in profit — the trail supplies almost all of the edge.
  */
 export function evaluateSignal(coin: string, bars: Bar[]): Signal {
   const P = STRATEGY_PARAMS;
