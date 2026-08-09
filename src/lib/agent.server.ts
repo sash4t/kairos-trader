@@ -338,7 +338,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
 
           // Correlation guard
           const b = bucket(sig.coin);
-          if (positions.filter((p) => bucket(p.coin) === b).length >= 2) continue;
+          if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
 
           // Exposure guard — shrink the trade into the remaining headroom
           // instead of skipping it, so a small cap still allows one position.

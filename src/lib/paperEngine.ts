@@ -303,7 +303,7 @@ export class PaperEngine {
     // correlation guard
     const b = bucket(sig.coin);
     const bucketCount = this.positions.filter(p => bucket(p.coin) === b).length;
-    if (bucketCount >= 2) { this.log("info", `Skip ${sig.coin}: correlation bucket ${b} full`); return; }
+    if (bucketCount >= 3) { this.log("info", `Skip ${sig.coin}: correlation bucket ${b} full`); return; }
 
     const equity = this.currentEquity();
     const notionalCap = equity * (this.settings.position_size_pct / 100) * Math.min(this.settings.max_leverage, meta.maxLeverage);

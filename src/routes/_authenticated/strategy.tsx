@@ -90,11 +90,18 @@ function Strategy() {
           <NumField label="Max exposure" value={settings.max_exposure_pct} onChange={v => saveSettings({ max_exposure_pct: Math.min(100, Math.max(5, v)) })} step={5} suffix="% equity" />
           <NumField label="Max positions" value={settings.max_positions} onChange={v => saveSettings({ max_positions: Math.min(10, Math.max(1, Math.round(v))) })} step={1} />
           <NumField label="Daily loss limit" value={settings.daily_loss_pct} onChange={v => saveSettings({ daily_loss_pct: Math.min(20, Math.max(1, v)) })} step={0.5} suffix="%" />
-          <NumField label="Min signal confidence" value={settings.min_confidence} onChange={v => saveSettings({ min_confidence: Math.min(100, Math.max(50, v)) })} step={5} suffix="%" />
+          <div className="space-y-1.5">
+            <NumField label="Min signal confidence" value={settings.min_confidence} onChange={v => saveSettings({ min_confidence: Math.min(100, Math.max(50, v)) })} step={5} suffix="%" />
+            <p className="text-xs text-muted-foreground">Works together with the trading mode above — the higher of the two values is used.</p>
+          </div>
         </div>
       </div>
 
       <div className="panel p-4 sm:p-5 space-y-5">
+        <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+          ⚠️ These exit rules apply to the <strong>browser paper engine only</strong> (active when the server agent is off).
+          When the 24/7 server agent is running, configure exits in Settings → Autonomous agent panel instead.
+        </div>
         <div className="text-sm font-semibold">Exit rules</div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
           <label className="block">
@@ -120,18 +127,18 @@ function Strategy() {
       <div className="panel p-4 sm:p-5 text-xs text-muted-foreground space-y-2">
         <div className="mono uppercase tracking-widest text-warning">Strategy summary</div>
         <p>
-          <strong>Bollinger breakout in trend</strong> on <strong>1-hour</strong> bars. Entry when price closes beyond the <strong>2.5σ Bollinger band (20)</strong> on the trend side of the <strong>SMA 200</strong>, with RSI confirming direction and an ATR floor of 0.5% to skip dead markets. Exit on a fixed 3% target or 2% stop, with a 0.3% trailing stop armed once the trade is 0.5% in profit — the trail produces most of the edge. Correlation guard caps 2 positions per sector.
+          <strong>Bollinger breakout in trend</strong> on <strong>1-hour</strong> bars. Entry when price closes beyond the <strong>2.0σ Bollinger band (20)</strong> on the trend side of the <strong>SMA 200</strong>, with RSI confirming direction and an ATR floor of 0.5% to skip dead markets. Exit on a fixed 12% target or 1.5% stop, with a 1.2% trailing stop armed once the trade is 1.5% in profit — the trail produces most of the edge. Correlation guard caps 3 positions per sector.
         </p>
         <p className="mono text-bull">
-          Backtest — top 20 Hyperliquid perps, ~40 days of 1h bars, taker fees and slippage
-          included (0.16% round trip), no intrabar lookahead: <strong>329 trades · 80% win rate ·
-          profit factor 1.72 · +10.3% · 0.9% max drawdown</strong>. Walk-forward split stayed
-          profitable in both halves (PF 1.85 / 1.60), and 16 of 20 coins were net positive.
+          Historical backtest (old 2.5σ / 3% TP / 2% SL / 0.3% trail settings) — top 20 Hyperliquid
+          perps, ~40 days of 1h bars, taker fees and slippage included (0.16% round trip), no
+          intrabar lookahead: <strong>329 trades · 80% win rate · profit factor 1.72 · +10.3% ·
+          0.9% max drawdown</strong>.
         </p>
         <p>
-          Caveat: one month of data across a single market regime is a short sample, and large-cap
-          majors (BTC, ETH, BNB) lost money in the test. Forward-test on paper before committing
-          size.
+          Caveat: the parameters above have since been re-tuned, so those backtest numbers no longer
+          describe the current configuration. One month of data across a single market regime is also
+          a short sample. Forward-test on paper before committing size.
         </p>
 
       </div>
