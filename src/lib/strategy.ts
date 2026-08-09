@@ -10,7 +10,7 @@ export const MODE_MIN_CONFIDENCE: Record<StrategyMode, number> = {
 export interface Signal {
   coin: string;
   side: "long" | "short" | null;
-  confidence: number;      // 0-100
+  confidence: number;
   reasons: string[];
   price: number;
   atrValue: number;
@@ -38,29 +38,7 @@ export const STRATEGY_PARAMS = {
   maxHoldBars: 24,
 } as const;
 
-/**
- * Bollinger band breakout with an SMA200 trend filter, on 1-hour bars.
- *
- * NOTE: the parameters above were updated after the audit (2.0σ band, 12%
- * target, 1.5% stop, trail 1.2% armed at +1.5%, 3 positions per sector). The
- * Aug 2026 backtest below was run on the OLD 2.5σ / 3% TP / 2% SL / 0.3%
- * trail configuration, so its numbers do NOT describe the current settings.
- * Treat them as historical context only and forward-test on paper before
- * drawing any conclusion about the live edge.
- *
- * Backtest (Aug 2026, top 20 Hyperliquid perps by volume, ~40 days of 1h bars,
- * 0.16% round-trip cost = taker fees + slippage, no intrabar lookahead):
- *   329 trades · 80% win rate · profit factor 1.72 · +10.3% on 10% risk sizing
- *   · 0.9% max drawdown. Walk-forward split: PF 1.85 (first half) / 1.60
- *   (second half). Raising the ATR floor to 0.5% lifts PF to 1.89.
- * 16 of 20 coins were profitable; large-cap majors (BTC/ETH/BNB) were the
- * losers — they rarely travel far enough past the band for the trail to pay.
- *
- * Entry: close breaks above the upper band (or below the lower band) while
- * price is on the trend side of SMA200 and RSI confirms direction.
- * Exit: fixed 12% target, 1.5% stop, trail 1.2% behind the best price once the
- * trade is 1.5% in profit — the trail supplies almost all of the edge.
- */
+/** Bollinger breakout with an SMA200 trend filter, on 1-hour bars. */
 export function evaluateSignal(coin: string, bars: Bar[]): Signal {
   const P = STRATEGY_PARAMS;
   const empty: Signal = { coin, side: null, confidence: 0, reasons: [], price: 0, atrValue: 0, indicators: {} };
@@ -69,14 +47,12 @@ export function evaluateSignal(coin: string, bars: Bar[]): Signal {
   const closes = bars.map(b => b.c);
   const vols = bars.map(b => b.v);
   const price = last(closes)!;
-
   const bb = bollinger(closes, P.bbPeriod, P.bbK);
   const trend = sma(closes, P.trendPeriod);
   const rs = rsi(closes, 14);
   const md = macd(closes);
   const at = atr(bars, 14);
   const e50 = ema(closes, 50);
-
   const upper = last(bb.upper)!, lower = last(bb.lower)!, mid = last(bb.mid)!, width = last(bb.width)!;
   const sma200 = last(trend)!;
   const rsiV = last(rs)!;
@@ -84,20 +60,13 @@ export function evaluateSignal(coin: string, bars: Bar[]): Signal {
   const atrV = last(at)!;
   const atrPct = (atrV / price) * 100;
   const avgVol = vols.slice(-21, -1).reduce((a, b) => a + b, 0) / 20;
-  const lastVol = last(vols)!;
-  const volX = lastVol / (avgVol || 1);
-
+  const volX = last(vols)! / (avgVol || 1);
   const indicators = { bbUpper: upper, bbLower: lower, bbMid: mid, bbWidth: width, sma200, ema50: last(e50)!, rsi: rsiV, macdHist, atrPct, volX };
-
   if (!isFinite(upper) || !isFinite(sma200) || !isFinite(atrV)) return { ...empty, price, atrValue: atrV, indicators };
-
-  if (atrPct < P.atrMinPct || atrPct > P.atrMaxPct) {
-    return { ...empty, price, atrValue: atrV, indicators, reasons: [`ATR% ${atrPct.toFixed(2)} outside ${P.atrMinPct}–${P.atrMaxPct} band`] };
-  }
+  if (atrPct < P.atrMinPct || atrPct > P.atrMaxPct) return { ...empty, price, atrValue: atrV, indicators, reasons: [`ATR% ${atrPct.toFixed(2)} outside ${P.atrMinPct}–${P.atrMaxPct} band`] };
 
   let side: "long" | "short" | null = null;
   const reasons: string[] = [];
-
   if (price > sma200 && price >= upper && rsiV > 50) {
     side = "long";
     reasons.push(`Closed above ${P.bbK}σ Bollinger band (${upper.toFixed(4)})`, `Above SMA200 (${sma200.toFixed(4)})`, `RSI ${rsiV.toFixed(1)}`);
@@ -105,10 +74,8 @@ export function evaluateSignal(coin: string, bars: Bar[]): Signal {
     side = "short";
     reasons.push(`Closed below ${P.bbK}σ Bollinger band (${lower.toFixed(4)})`, `Below SMA200 (${sma200.toFixed(4)})`, `RSI ${rsiV.toFixed(1)}`);
   }
-
   if (!side) return { ...empty, price, atrValue: atrV, indicators, reasons: ["No Bollinger breakout in trend direction"] };
 
-  // Confidence: base + confluence. Tuned so a clean setup lands near 75–90.
   let confidence = 60;
   const stretch = side === "long" ? (price - upper) / (atrV || 1e-9) : (lower - price) / (atrV || 1e-9);
   if (stretch > 0.1) { confidence += 8; reasons.push(`${stretch.toFixed(2)} ATR beyond the band`); }
@@ -116,20 +83,12 @@ export function evaluateSignal(coin: string, bars: Bar[]): Signal {
   if (side === "long" ? macdHist > 0 : macdHist < 0) { confidence += 10; reasons.push("MACD histogram confirms"); }
   if (side === "long" ? rsiV > 58 && rsiV < 80 : rsiV < 42 && rsiV > 20) { confidence += 7; reasons.push("RSI in momentum zone"); }
   if (side === "long" ? price > last(e50)! : price < last(e50)!) { confidence += 5; reasons.push("On trend side of EMA50"); }
-
   return { coin, side, confidence: Math.min(95, confidence), reasons, price, atrValue: atrV, indicators };
 }
 
-
-
-// Simple sector correlation buckets — avoid stacking correlated trades.
 const CORRELATION_BUCKETS: Record<string, string> = {
-  BTC: "btc", ETH: "eth",
-  SOL: "l1", AVAX: "l1", NEAR: "l1", APT: "l1", SUI: "l1", SEI: "l1", TIA: "l1", INJ: "l1",
-  ARB: "l2", OP: "l2", MATIC: "l2", STRK: "l2",
-  DOGE: "meme", SHIB: "meme", PEPE: "meme", WIF: "meme", BONK: "meme", FLOKI: "meme",
+  BTC: "btc", ETH: "eth", SOL: "l1", AVAX: "l1", NEAR: "l1", APT: "l1", SUI: "l1", SEI: "l1", TIA: "l1", INJ: "l1",
+  ARB: "l2", OP: "l2", MATIC: "l2", STRK: "l2", DOGE: "meme", SHIB: "meme", PEPE: "meme", WIF: "meme", BONK: "meme", FLOKI: "meme",
   LINK: "defi", UNI: "defi", AAVE: "defi", MKR: "defi", CRV: "defi", COMP: "defi",
 };
-export function bucket(coin: string): string {
-  return CORRELATION_BUCKETS[coin] ?? "other";
-}
+export function bucket(coin: string): string { return CORRELATION_BUCKETS[coin] ?? "other"; }
