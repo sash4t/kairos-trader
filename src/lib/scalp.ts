@@ -2,10 +2,8 @@ import { evaluateSignal, STRATEGY_PARAMS, type Bar } from "./strategy";
 
 /**
  * Signal wrapper for the always-on agent.
- *
- * Now backed by the validated Bollinger(20, 2.5σ) breakout + SMA200 trend
- * filter on 1-hour bars — see evaluateSignal in strategy.ts for the backtest.
- * Exits are a fixed 3% target and 2% stop with a 0.3% trail armed at +0.5%.
+ * Backed by the TrendBot EMA + RSI + MACD confirmation strategy on 1-hour
+ * Hyperliquid perpetual bars, mirrored for long and short entries.
  */
 export type ScalpSide = "long" | "short";
 
@@ -25,11 +23,11 @@ export function evaluateScalp(coin: string, bars: Bar[]): ScalpSignal {
   return {
     coin,
     side: sig.side,
-    family: sig.side ? "bb_breakout" : "none",
+    family: sig.side ? "trendbot_momentum" : "none",
     confidence: sig.confidence,
     reasons: sig.reasons,
     price: sig.price,
-    atrPct: (sig.indicators["atrPct"] as number) ?? 0,
+    atrPct: sig.indicators["atrPct"] ?? 0,
     indicators: sig.indicators,
   };
 }
@@ -42,15 +40,15 @@ export const DEFAULT_EXITS = {
 };
 
 export interface ExitParams {
-  tpPct: number;          // fixed take-profit, e.g. 2
-  slPct: number;          // initial stop, e.g. 1
-  trailActivatePct: number; // arm trailing once unrealised gain reaches this, e.g. 1
-  trailDistPct: number;   // trail this far behind the best price, e.g. 0.5
+  tpPct: number;
+  slPct: number;
+  trailActivatePct: number;
+  trailDistPct: number;
 }
 
 export interface TrailUpdate { stopLoss: number; trailHigh: number; changed: boolean }
 
-/** Ratchet a trailing stop. Returns the new stop and best-price watermark. */
+/** Ratchet a trailing stop in the correct direction for long or short perps. */
 export function updateTrail(
   side: ScalpSide, entry: number, mark: number, stopLoss: number,
   trailHigh: number | null, p: ExitParams,
@@ -69,11 +67,6 @@ export function updateTrail(
   return { stopLoss: stop, trailHigh: best, changed: stop !== stopLoss || best !== trailHigh };
 }
 
-/**
- * Decide whether an open position must be closed at the current mark.
- * A stop that has been trailed into profit (past entry) exits as `trailing_stop`,
- * not `stop_loss` — otherwise winning trades look like stop-outs.
- */
 export function exitReasonFor(
   side: ScalpSide, mark: number, stopLoss: number, takeProfit: number, entry?: number,
 ): string | null {
@@ -88,4 +81,3 @@ export function exitReasonFor(
   }
   return null;
 }
-
