@@ -1,5 +1,10 @@
 import { fetchCandles, fetchMetaAndCtxs, subscribeAllMids, type AssetCtx, type AssetMeta } from "./hyperliquid";
-import { candlesToBars, evaluateSignal, bucket, type Signal, type Bar, MODE_MIN_CONFIDENCE, type StrategyMode } from "./strategy";
+import { candlesToBars, bucket, type Bar, type StrategyMode } from "./strategy";
+import {
+  DEFAULT_TRENDLINE_CONFIG, TIMEFRAME_MS, ladderFor, evaluateTrendline, currentSafetyLine,
+  ratchetSafetyStop, safetyExitReason, sizeFromRisk, clampRiskPct,
+  type Timeframe, type TrendlineConfig, type TrendlineSignal,
+} from "./trendline";
 import { supabase } from "@/integrations/supabase/client";
 
 export interface Settings {
@@ -30,6 +35,10 @@ export interface Settings {
   trail_dist_pct: number;
   last_cycle_at: string | null;
   last_cycle_note: string | null;
+  strategy_key?: string;
+  trendline_risk_pct?: number;
+  execution_timeframe?: string;
+  safety_buffer_pct?: number;
   /** Max USD of the real account the bot may size positions from in live mode (0 = whole account). */
   live_max_alloc_usd: number;
 }
@@ -43,7 +52,7 @@ export interface OpenPosition {
   leverage: number;
   entry_price: number;
   stop_loss: number;
-  take_profit: number;
+  take_profit: number | null;
   trail_high: number | null;
   confidence: number;
 }
@@ -52,11 +61,9 @@ type Log = (level: "info" | "warn" | "error" | "trade", msg: string, meta?: any)
 
 // Backtested (3mo, BTC/SOL/ARB/LINK/DOGE): 1h bars materially outperform 15m —
 // 15m churns (1217 trades, PF 0.66) while 1h fresh-cross entries yield PF 1.78.
-const CANDLE_INTERVAL = "1h";
-const CANDLE_MS = 60 * 60 * 1000;
-const BARS_NEEDED = 220;
+const LADDER_BARS = 300;
 
-interface CoinCache { bars: Bar[]; lastFetch: number; nextEval: number }
+interface CoinCache { ladder: Partial<Record<Timeframe, Bar[]>>; lastFetch: number; nextEval: number }
 
 export class PaperEngine {
   private userId: string;
@@ -114,7 +121,7 @@ export class PaperEngine {
     this.positions = (openPos ?? []).map(p => ({
       id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional,
       leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss,
-      take_profit: +p.take_profit, trail_high: p.trail_high != null ? +p.trail_high : null,
+      take_profit: p.take_profit == null ? null : +p.take_profit, trail_high: p.trail_high != null ? +p.trail_high : null,
       confidence: +p.confidence,
     }));
     this.log("info", `Synced ${this.positions.length} open paper position(s)`);
@@ -195,39 +202,16 @@ export class PaperEngine {
     // Manage each open position
     for (const p of [...this.positions]) {
       const m = this.mid(p.coin); if (m == null) continue;
-      // trailing
-      if (this.settings.trailing_enabled) {
-        if (p.side === "long") {
-          const th = p.trail_high == null ? p.entry_price : Math.max(p.trail_high, m);
-          if (th !== p.trail_high) {
-            p.trail_high = th;
-            const r = p.entry_price - p.stop_loss;
-            if (m > p.entry_price + r) {
-              const newSl = Math.max(p.stop_loss, th - r);
-              if (newSl > p.stop_loss) { p.stop_loss = newSl; this.persistPositionUpdate(p); }
-            }
-          }
-        } else {
-          const th = p.trail_high == null ? p.entry_price : Math.min(p.trail_high, m);
-          if (th !== p.trail_high) {
-            p.trail_high = th;
-            const r = p.stop_loss - p.entry_price;
-            if (m < p.entry_price - r) {
-              const newSl = Math.min(p.stop_loss, th + r);
-              if (newSl < p.stop_loss) { p.stop_loss = newSl; this.persistPositionUpdate(p); }
-            }
-          }
-        }
-      }
-      // SL / TP — a stop trailed past entry is a trailing-stop exit, not a loss
+      // The Safety Line (recomputed on each eval cycle) is the stop. Here we
+      // only enforce it — a trendline position has no fixed take-profit.
       if (p.side === "long") {
-        const label = p.stop_loss > p.entry_price ? "trailing_stop" : "stop_loss";
-        if (m <= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
-        else if (m >= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
+        const label = safetyExitReason("long", p.entry_price, m, p.stop_loss);
+        if (label) this.closePosition(p, m, label).catch(() => {});
+        else if (p.take_profit != null && m >= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
       } else {
-        const label = p.stop_loss < p.entry_price ? "trailing_stop" : "stop_loss";
-        if (m >= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
-        else if (m <= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
+        const label = safetyExitReason("short", p.entry_price, m, p.stop_loss);
+        if (label) this.closePosition(p, m, label).catch(() => {});
+        else if (p.take_profit != null && m <= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
       }
     }
 
@@ -259,15 +243,50 @@ export class PaperEngine {
     }
   }
 
+  private cfg(): TrendlineConfig {
+    return { ...DEFAULT_TRENDLINE_CONFIG, safetyBufferPct: +(this.settings.safety_buffer_pct ?? DEFAULT_TRENDLINE_CONFIG.safetyBufferPct) };
+  }
+  private execTf(): Timeframe {
+    const tf = (this.settings.execution_timeframe ?? "1h") as Timeframe;
+    return TIMEFRAME_MS[tf] ? tf : "1h";
+  }
+
+  /** Confirmed bars for the full Monthly → … → execution ladder (in-progress candle dropped). */
+  private async loadLadder(coin: string): Promise<Partial<Record<Timeframe, Bar[]>>> {
+    const out: Partial<Record<Timeframe, Bar[]>> = {};
+    for (const tf of ladderFor(this.execTf())) {
+      try {
+        const end = Date.now();
+        const cs = await fetchCandles(coin, tf, end - LADDER_BARS * TIMEFRAME_MS[tf], end);
+        const bars = candlesToBars(cs).slice(0, -1);
+        if (bars.length) out[tf] = bars;
+      } catch { /* symbol has no history at this timeframe */ }
+    }
+    return out;
+  }
+
   private async runEvalCycle() {
-    // scan up to 8 coins per cycle prioritising liquid ones without positions
+    const cfg = this.cfg();
+    const execTf = this.execTf();
+
+    // 1) Maintain open positions: re-derive the Safety Line and ratchet stops.
+    for (const p of [...this.positions]) {
+      const mark = this.mid(p.coin); if (mark == null) continue;
+      const ladder = await this.loadLadder(p.coin);
+      const { state } = evaluateTrendline({ coin: p.coin, barsByTimeframe: ladder, execution: execTf, cfg });
+      const safety = currentSafetyLine(state, p.side, Date.now(), mark);
+      const r = ratchetSafetyStop({ side: p.side, entry: p.entry_price, currentStop: p.stop_loss, safetyLineValue: safety, bufferPct: cfg.safetyBufferPct });
+      if (r.changed) { p.stop_loss = r.stop; this.persistPositionUpdate(p); this.log("info", `Safety Line trail ${p.coin} → stop ${r.stop.toPrecision(6)}`); }
+    }
+
+    // 2) Scan for new Action Line breaks.
     const held = new Set(this.positions.map(p => p.coin));
     const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
-
     const scored = this.meta
       .map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
       .filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED_COINS.has(x.meta.name))
-      .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
+      .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm)
+      .slice(0, 40);
 
     for (const { meta } of scored) {
       if (this.positions.length >= this.settings.max_positions) break;
@@ -275,65 +294,51 @@ export class PaperEngine {
       const now = Date.now();
       const cached = this.cache.get(meta.name);
       if (cached && now < cached.nextEval) continue;
-      // fetch/refresh candles (throttled)
-      let bars: Bar[] | undefined = cached?.bars;
-      if (!bars || now - (cached?.lastFetch ?? 0) > 5 * 60 * 1000) {
-        try {
-          const end = now;
-          const start = end - BARS_NEEDED * CANDLE_MS;
-          const cs = await fetchCandles(meta.name, CANDLE_INTERVAL, start, end);
-          bars = candlesToBars(cs);
-          this.cache.set(meta.name, { bars, lastFetch: now, nextEval: now + 30_000 });
-        } catch { continue; }
+      let ladder = cached?.ladder;
+      if (!ladder || now - (cached?.lastFetch ?? 0) > 5 * 60 * 1000) {
+        ladder = await this.loadLadder(meta.name);
+        this.cache.set(meta.name, { ladder, lastFetch: now, nextEval: now + 60_000 });
       }
-      if (!bars || bars.length < BARS_NEEDED) continue;
-      const sig = evaluateSignal(meta.name, bars);
-      this.cache.get(meta.name)!.nextEval = now + 60_000;
-      if (!sig.side) continue;
-      const threshold = Math.max(this.settings.min_confidence, MODE_MIN_CONFIDENCE[this.settings.strategy_mode]);
-      if (sig.confidence < threshold) continue;
-      if (this.positions.some(p => p.coin === meta.name)) continue; // opened meanwhile
+      const { signal } = evaluateTrendline({ coin: meta.name, barsByTimeframe: ladder, execution: execTf, cfg });
+      this.cache.get(meta.name)!.nextEval = Date.now() + 60_000;
+      if (!signal.side || signal.initialStop == null) continue;
+      if (this.positions.some(p => p.coin === meta.name)) continue;
       held.add(meta.name);
-      await this.tryOpen(sig, meta);
+      await this.tryOpen(signal, meta);
     }
   }
 
-  private async tryOpen(sig: Signal, meta: AssetMeta) {
-    const side = sig.side!; // caller ensured non-null
-    // correlation guard
+  private async tryOpen(sig: TrendlineSignal, meta: AssetMeta) {
+    const side = sig.side!;
     const b = bucket(sig.coin);
-    const bucketCount = this.positions.filter(p => bucket(p.coin) === b).length;
-    if (bucketCount >= 3) { this.log("info", `Skip ${sig.coin}: correlation bucket ${b} full`); return; }
+    if (this.positions.filter(p => bucket(p.coin) === b).length >= 3) { this.log("info", `Skip ${sig.coin}: correlation bucket ${b} full`); return; }
 
     const equity = this.currentEquity();
-    const notionalCap = equity * (this.settings.position_size_pct / 100) * Math.min(this.settings.max_leverage, meta.maxLeverage);
-    // check exposure
+    const leverageCap = Math.min(this.settings.max_leverage, meta.maxLeverage);
     const currentExposure = this.positions.reduce((s, p) => s + p.notional, 0);
-    if (currentExposure + notionalCap > equity * (this.settings.max_exposure_pct / 100) * this.settings.max_leverage) {
-      this.log("info", `Skip ${sig.coin}: portfolio exposure would exceed limit`); return;
-    }
+    const headroom = equity * (this.settings.max_exposure_pct / 100) * this.settings.max_leverage - currentExposure;
+    if (headroom <= 0) { this.log("info", `Skip ${sig.coin}: portfolio exposure would exceed limit`); return; }
 
-    const leverage = Math.min(this.settings.max_leverage, meta.maxLeverage);
-    const size = notionalCap / sig.price;
-    const stopDist = this.settings.sl_type === "atr"
-      ? sig.atrValue * this.settings.sl_atr_mult
-      : sig.price * (this.settings.sl_fixed_pct / 100);
-    const sl = side === "long" ? sig.price - stopDist : sig.price + stopDist;
-    const tp = side === "long" ? sig.price + stopDist * this.settings.tp_rr : sig.price - stopDist * this.settings.tp_rr;
+    const riskPct = clampRiskPct(+(this.settings.trendline_risk_pct ?? 1));
+    const stop = sig.initialStop!;
+    const sized = sizeFromRisk({ equity, riskPct, entry: sig.price, stop, szDecimals: meta.szDecimals, maxLeverage: leverageCap, maxNotional: headroom });
+    if (!sized.ok) { this.log("info", `Skip ${sig.coin}: ${sized.reason}`); return; }
 
     const reason = `${side.toUpperCase()} ${sig.coin} — ${sig.reasons.join(" + ")}`;
     const { data, error } = await supabase.from("paper_positions").insert({
-      user_id: this.userId, coin: sig.coin, side, size, notional: size * sig.price,
-      leverage, entry_price: sig.price, stop_loss: sl, take_profit: tp,
-      confidence: sig.confidence, reason, indicators: sig.indicators,
+      user_id: this.userId, coin: sig.coin, side, size: sized.size, notional: sized.notional,
+      leverage: sized.leverage, entry_price: sig.price, stop_loss: stop, take_profit: null,
+      confidence: sig.confidence, reason, indicators: sig.detail as never,
+      safety_line: sig.safetyLine?.value ?? null, action_line: sig.actionLine?.value ?? null,
+      timeframe: sig.timeframe, initial_stop: stop, risk_pct: riskPct,
     }).select().single();
     if (error || !data) { this.log("error", `Failed to open ${sig.coin}: ${error?.message}`); return; }
     this.positions.push({
-      id: data.id, coin: sig.coin, side, size, notional: size * sig.price,
-      leverage, entry_price: sig.price, stop_loss: sl, take_profit: tp,
+      id: data.id, coin: sig.coin, side, size: sized.size, notional: sized.notional,
+      leverage: sized.leverage, entry_price: sig.price, stop_loss: stop, take_profit: null,
       trail_high: null, confidence: sig.confidence,
     });
-    this.log("trade", `OPEN ${reason} @ ${sig.price.toFixed(6)} · SL ${sl.toFixed(6)} · TP ${tp.toFixed(6)} · conf ${sig.confidence}`);
+    this.log("trade", `OPEN ${reason} @ ${sig.price.toPrecision(6)} · stop ${stop.toPrecision(6)} · risk ${riskPct}% · size ${sized.size}`);
   }
 
   private async closePosition(p: OpenPosition, price: number, exitReason: string) {

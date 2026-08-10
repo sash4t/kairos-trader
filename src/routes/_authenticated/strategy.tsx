@@ -125,23 +125,32 @@ function Strategy() {
       </div>
 
       <div className="panel p-4 sm:p-5 text-xs text-muted-foreground space-y-2">
-        <div className="mono uppercase tracking-widest text-warning">Strategy summary</div>
+        <div className="mono uppercase tracking-widest text-warning">Strategy summary — Trendline Price Action</div>
         <p>
-          <strong>Bollinger breakout in trend</strong> on <strong>1-hour</strong> bars. Entry when price closes beyond the <strong>2.0σ Bollinger band (20)</strong> on the trend side of the <strong>SMA 200</strong>, with RSI confirming direction and an ATR floor of 0.5% to skip dead markets. Exit on a fixed 12% target or 1.5% stop, with a 1.2% trailing stop armed once the trade is 1.5% in profit — the trail produces most of the edge. Correlation guard caps 3 positions per sector.
-        </p>
-        <p className="mono text-bull">
-          Historical backtest (old 2.5σ / 3% TP / 2% SL / 0.3% trail settings) — top 20 Hyperliquid
-          perps, ~40 days of 1h bars, taker fees and slippage included (0.16% round trip), no
-          intrabar lookahead: <strong>329 trades · 80% win rate · profit factor 1.72 · +10.3% ·
-          0.9% max drawdown</strong>.
+          <strong>Pure price action. No indicators.</strong> The only analytical tool is trend lines, built
+          top-down: <strong>Monthly → Weekly → Daily → 4H → 1H</strong> (continuing below 1H when a lower
+          execution timeframe is configured). Bullish lines connect higher lows and slope up; bearish lines
+          connect lower highs and slope down. Point B of each line becomes point A of the next, and higher
+          timeframe structure is kept as context rather than discarded.
         </p>
         <p>
-          Caveat: the parameters above have since been re-tuned, so those backtest numbers no longer
-          describe the current configuration. One month of data across a single market regime is also
-          a short sample. Forward-test on paper before committing size.
+          <strong>Action Line:</strong> a confirmed execution-timeframe candle <em>close</em> through a line —
+          never a wick. A break of a <span className="text-bear">bearish</span> line goes <strong>long</strong>;
+          a break of a <span className="text-bull">bullish</span> line goes <strong>short</strong>. Higher
+          timeframes never veto direction; price decides.
         </p>
-
+        <p>
+          <strong>Safety Line:</strong> always the opposing trend line, and it <em>is</em> the stop. The stop
+          ratchets with the safety line as structure evolves and is never widened — long stops only rise, short
+          stops only fall. There is <strong>no fixed take-profit</strong>.
+        </p>
+        <p>
+          <strong>Risk:</strong> 1% of equity per trade by default (0.25–2%), sized from the entry-to-safety-stop
+          distance, so leverage never changes account risk. One position per symbol; correlation cap of 3 per
+          sector. Old breaks that already happened never re-trigger after a restart.
+        </p>
       </div>
+
 
 
     </div>
