@@ -25,7 +25,7 @@ interface Settings {
   ai_review_enabled: boolean; scalp_enabled: boolean; scalp_tp_pct: number; scalp_sl_pct: number;
   trail_activate_pct: number; trail_dist_pct: number; max_positions: number; max_leverage: number;
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
-  paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: StrategyKey;
+  paper_equity: number; mode: string; live_max_alloc_usd: number; tp_rr: number; strategy_key?: StrategyKey;
 }
 interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number; trail_high: number | null; confidence: number }
 
@@ -149,7 +149,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
 async function reviewSignal(sig: ScalpSignal, ctx: AssetCtx, positions: string[], exits: ExitParams) {
   const schema = z.object({ approve: z.boolean(), reason: z.string().max(240), risk: z.enum(["low", "medium", "high"]) });
   try {
-    const provider = createLovableAiGatewayProvider();
+    const provider = createLovableAiGatewayProvider(process.env["LOVABLE_API_KEY"] ?? "");
     const model = provider("google/gemini-2.5-flash");
     const result = await generateObject({ model, schema, prompt: `You are a strict risk reviewer for a Hyperliquid perpetual futures bot. Review this deterministic price-action signal. Do not invent data. Signal: ${JSON.stringify(sig)}. Market context: ${JSON.stringify(ctx)}. Open positions: ${JSON.stringify(positions)}. Exit parameters: ${JSON.stringify(exits)}. Approve only if the setup is coherent and risk is acceptable. Never override the strategy direction.` });
     return result.object;
