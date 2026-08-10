@@ -1,4 +1,4 @@
-import { atr, bollinger, ema, last, macd, rsi, sma } from "./indicators";
+import { atr, ema, last, macd, rsi, sma } from "./indicators";
 import type { Candle } from "./hyperliquid";
 
 export type StrategyMode = "conservative" | "balanced" | "aggressive";
@@ -15,6 +15,8 @@ export interface Signal {
   price: number;
   atrValue: number;
   indicators: Record<string, number>;
+  actionLine?: number;
+  safetyLine?: number;
 }
 
 export interface Bar { t: number; o: number; h: number; l: number; c: number; v: number }
@@ -23,67 +25,186 @@ export function candlesToBars(cs: Candle[]): Bar[] {
   return cs.map(c => ({ t: c.t, o: +c.o, h: +c.h, l: +c.l, c: +c.c, v: +c.v }));
 }
 
-/** Current parameters — see the backtest note under evaluateSignal. */
+/**
+ * Trend-line price-action strategy translated from the supplied transcript.
+ * Discretionary charting rules are made deterministic with confirmed swing pivots.
+ */
 export const STRATEGY_PARAMS = {
   interval: "1h",
-  bbPeriod: 20,
-  bbK: 2.0,
-  trendPeriod: 200,
-  atrMinPct: 0.5,
+  pivotStrength: 3,
+  pivotSearch: 80,
+  minTouches: 2,
+  lineToleranceAtr: 0.12,
+  atrPeriod: 14,
+  atrMinPct: 0.05,
   atrMaxPct: 6,
-  tpPct: 12,
-  slPct: 1.5,
-  trailActivatePct: 1.5,
-  trailDistPct: 1.2,
-  maxHoldBars: 24,
+  maxHoldBars: 0,
+  tpPct: 100,
+  slPct: 0,
+  trailActivatePct: 0,
+  trailDistPct: 0,
 } as const;
 
-/** Bollinger breakout with an SMA200 trend filter, on 1-hour bars. */
-export function evaluateSignal(coin: string, bars: Bar[]): Signal {
-  const P = STRATEGY_PARAMS;
-  const empty: Signal = { coin, side: null, confidence: 0, reasons: [], price: 0, atrValue: 0, indicators: {} };
-  if (bars.length < P.trendPeriod + 10) return empty;
+export const TRENDLINE_STRATEGY_KEY = "trendline_price_action" as const;
 
+interface Pivot { i: number; price: number }
+interface TrendLine { i1: number; p1: number; i2: number; p2: number; slope: number; touches: number; valueAt: (i: number) => number }
+
+function pivotLows(bars: Bar[], strength: number): Pivot[] {
+  const out: Pivot[] = [];
+  for (let i = strength; i < bars.length - strength; i++) {
+    let ok = true;
+    for (let j = 1; j <= strength; j++) {
+      if (bars[i].l >= bars[i - j].l || bars[i].l >= bars[i + j].l) { ok = false; break; }
+    }
+    if (ok) out.push({ i, price: bars[i].l });
+  }
+  return out;
+}
+
+function pivotHighs(bars: Bar[], strength: number): Pivot[] {
+  const out: Pivot[] = [];
+  for (let i = strength; i < bars.length - strength; i++) {
+    let ok = true;
+    for (let j = 1; j <= strength; j++) {
+      if (bars[i].h <= bars[i - j].h || bars[i].h <= bars[i + j].h) { ok = false; break; }
+    }
+    if (ok) out.push({ i, price: bars[i].h });
+  }
+  return out;
+}
+
+function buildLine(bars: Bar[], a: Pivot, b: Pivot, support: boolean, tolerance: number): TrendLine | null {
+  if (b.i <= a.i) return null;
+  const slope = (b.price - a.price) / (b.i - a.i);
+  if (support && slope <= 0) return null;
+  if (!support && slope >= 0) return null;
+  const valueAt = (i: number) => a.price + slope * (i - a.i);
+  let touches = 0;
+  for (let i = a.i; i <= b.i; i++) {
+    const line = valueAt(i);
+    const distance = support ? bars[i].l - line : line - bars[i].h;
+    if (distance < -tolerance) return null;
+    if (Math.abs(distance) <= tolerance) touches++;
+  }
+  if (touches < STRATEGY_PARAMS.minTouches) return null;
+  return { i1: a.i, p1: a.price, i2: b.i, p2: b.price, slope, touches, valueAt };
+}
+
+function findBestLine(bars: Bar[], pivots: Pivot[], support: boolean, currentIndex: number, tolerance: number): TrendLine | null {
+  const usable = pivots.filter(p => p.i < currentIndex).slice(-STRATEGY_PARAMS.pivotSearch);
+  if (usable.length < 2) return null;
+  let best: TrendLine | null = null;
+  const latest = usable[usable.length - 1];
+  for (let j = usable.length - 2; j >= 0; j--) {
+    const candidate = buildLine(bars, usable[j], latest, support, tolerance);
+    if (!candidate) continue;
+    if (!best || candidate.touches > best.touches || (candidate.touches === best.touches && candidate.i1 > best.i1)) best = candidate;
+  }
+  return best;
+}
+
+/** Returns the current bullish support and bearish resistance trend lines. */
+export function getTrendlineState(bars: Bar[]): { support: TrendLine | null; resistance: TrendLine | null; atrValue: number } {
+  const at = atr(bars, STRATEGY_PARAMS.atrPeriod);
+  const atrValue = last(at) ?? 0;
+  const tolerance = atrValue * STRATEGY_PARAMS.lineToleranceAtr;
+  return {
+    support: findBestLine(bars, pivotLows(bars, STRATEGY_PARAMS.pivotStrength), true, bars.length, tolerance),
+    resistance: findBestLine(bars, pivotHighs(bars, STRATEGY_PARAMS.pivotStrength), false, bars.length, tolerance),
+    atrValue,
+  };
+}
+
+/**
+ * Long = break above resistance. Short = break below support. The opposing
+ * trend line is required as the safety line and becomes the structure stop.
+ */
+export function evaluateSignal(coin: string, bars: Bar[]): Signal {
+  const empty: Signal = { coin, side: null, confidence: 0, reasons: [], price: 0, atrValue: 0, indicators: {} };
+  const minBars = Math.max(80, STRATEGY_PARAMS.pivotStrength * 2 + 20);
+  if (bars.length < minBars) return empty;
+
+  const closed = bars.slice(0, -1);
   const closes = bars.map(b => b.c);
   const vols = bars.map(b => b.v);
-  const price = last(closes)!;
-  const bb = bollinger(closes, P.bbPeriod, P.bbK);
-  const trend = sma(closes, P.trendPeriod);
+  const price = closes.at(-1)!;
+  const previous = closes.at(-2)!;
+  const at = atr(bars, STRATEGY_PARAMS.atrPeriod);
+  const atrValue = last(at)!;
+  const atrPct = (atrValue / price) * 100;
   const rs = rsi(closes, 14);
   const md = macd(closes);
-  const at = atr(bars, 14);
+  const e20 = ema(closes, 20);
   const e50 = ema(closes, 50);
-  const upper = last(bb.upper)!, lower = last(bb.lower)!, mid = last(bb.mid)!, width = last(bb.width)!;
-  const sma200 = last(trend)!;
-  const rsiV = last(rs)!;
-  const macdHist = last(md.hist)!;
-  const atrV = last(at)!;
-  const atrPct = (atrV / price) * 100;
+  const trend = sma(closes, 200);
   const avgVol = vols.slice(-21, -1).reduce((a, b) => a + b, 0) / 20;
   const volX = last(vols)! / (avgVol || 1);
-  const indicators = { bbUpper: upper, bbLower: lower, bbMid: mid, bbWidth: width, sma200, ema50: last(e50)!, rsi: rsiV, macdHist, atrPct, volX };
-  if (!isFinite(upper) || !isFinite(sma200) || !isFinite(atrV)) return { ...empty, price, atrValue: atrV, indicators };
-  if (atrPct < P.atrMinPct || atrPct > P.atrMaxPct) return { ...empty, price, atrValue: atrV, indicators, reasons: [`ATR% ${atrPct.toFixed(2)} outside ${P.atrMinPct}–${P.atrMaxPct} band`] };
+  const state = getTrendlineState(closed);
+  const support = state.support;
+  const resistance = state.resistance;
+  const supportNow = support?.valueAt(closed.length);
+  const resistanceNow = resistance?.valueAt(closed.length);
+  const supportPrev = support?.valueAt(closed.length - 1);
+  const resistancePrev = resistance?.valueAt(closed.length - 1);
+  const rsiV = last(rs)!;
+  const macdHist = last(md.hist)!;
+  const indicators = {
+    supportLine: supportNow ?? NaN,
+    resistanceLine: resistanceNow ?? NaN,
+    supportTouches: support?.touches ?? 0,
+    resistanceTouches: resistance?.touches ?? 0,
+    atrPct,
+    rsi: rsiV,
+    macdHist,
+    ema20: last(e20)!,
+    ema50: last(e50)!,
+    sma200: last(trend)!,
+    volX,
+  };
+
+  if (!isFinite(price) || !isFinite(atrValue) || atrPct < STRATEGY_PARAMS.atrMinPct || atrPct > STRATEGY_PARAMS.atrMaxPct) {
+    return { ...empty, price, atrValue, indicators, reasons: [`ATR% ${atrPct.toFixed(2)} outside ${STRATEGY_PARAMS.atrMinPct}–${STRATEGY_PARAMS.atrMaxPct} band`] };
+  }
+
+  const brokeResistance = !!resistance && resistancePrev != null && resistanceNow != null && previous <= resistancePrev && price > resistanceNow;
+  const brokeSupport = !!support && supportPrev != null && supportNow != null && previous >= supportPrev && price < supportNow;
 
   let side: "long" | "short" | null = null;
+  let actionLine: number | undefined;
+  let safetyLine: number | undefined;
   const reasons: string[] = [];
-  if (price > sma200 && price >= upper && rsiV > 50) {
-    side = "long";
-    reasons.push(`Closed above ${P.bbK}σ Bollinger band (${upper.toFixed(4)})`, `Above SMA200 (${sma200.toFixed(4)})`, `RSI ${rsiV.toFixed(1)}`);
-  } else if (price < sma200 && price <= lower && rsiV < 50) {
-    side = "short";
-    reasons.push(`Closed below ${P.bbK}σ Bollinger band (${lower.toFixed(4)})`, `Below SMA200 (${sma200.toFixed(4)})`, `RSI ${rsiV.toFixed(1)}`);
-  }
-  if (!side) return { ...empty, price, atrValue: atrV, indicators, reasons: ["No Bollinger breakout in trend direction"] };
 
-  let confidence = 60;
-  const stretch = side === "long" ? (price - upper) / (atrV || 1e-9) : (lower - price) / (atrV || 1e-9);
-  if (stretch > 0.1) { confidence += 8; reasons.push(`${stretch.toFixed(2)} ATR beyond the band`); }
-  if (volX > 1.2) { confidence += 10; reasons.push(`Volume ${volX.toFixed(2)}x average`); }
-  if (side === "long" ? macdHist > 0 : macdHist < 0) { confidence += 10; reasons.push("MACD histogram confirms"); }
-  if (side === "long" ? rsiV > 58 && rsiV < 80 : rsiV < 42 && rsiV > 20) { confidence += 7; reasons.push("RSI in momentum zone"); }
-  if (side === "long" ? price > last(e50)! : price < last(e50)!) { confidence += 5; reasons.push("On trend side of EMA50"); }
-  return { coin, side, confidence: Math.min(95, confidence), reasons, price, atrValue: atrV, indicators };
+  if (brokeResistance && supportNow != null) {
+    side = "long";
+    actionLine = resistanceNow;
+    safetyLine = supportNow;
+    reasons.push(`Closed above descending resistance trend line (${resistanceNow.toFixed(6)})`, `Safety line is rising support (${supportNow.toFixed(6)})`, `${resistance.touches} resistance touches`);
+  } else if (brokeSupport && resistanceNow != null) {
+    side = "short";
+    actionLine = supportNow;
+    safetyLine = resistanceNow;
+    reasons.push(`Closed below rising support trend line (${supportNow.toFixed(6)})`, `Safety line is falling resistance (${resistanceNow.toFixed(6)})`, `${support.touches} support touches`);
+  }
+
+  if (!side || safetyLine == null || !isFinite(safetyLine)) {
+    return { ...empty, price, atrValue, indicators, reasons: ["No confirmed trend-line action break with an opposing safety line"] };
+  }
+
+  const momentumConfirmed = side === "long"
+    ? price > e20.at(-1)! && e20.at(-1)! > e50.at(-1)! && macdHist > 0
+    : price < e20.at(-1)! && e20.at(-1)! < e50.at(-1)! && macdHist < 0;
+  if (momentumConfirmed) reasons.push("Momentum confirms the break");
+  if (volX > 1.2) reasons.push(`Volume ${volX.toFixed(2)}x average`);
+  reasons.push(`ATR ${atrPct.toFixed(2)}% volatility filter passed`);
+
+  let confidence = 70;
+  if (momentumConfirmed) confidence += 12;
+  if (volX > 1.2) confidence += 8;
+  if (side === "long" ? rsiV > 50 : rsiV < 50) confidence += 5;
+  if (support?.touches >= 3 || resistance?.touches >= 3) confidence += 5;
+
+  return { coin, side, confidence: Math.min(95, confidence), reasons, price, atrValue, indicators, actionLine, safetyLine };
 }
 
 const CORRELATION_BUCKETS: Record<string, string> = {
