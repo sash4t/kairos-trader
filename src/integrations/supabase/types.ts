@@ -64,6 +64,7 @@ export type Database = {
           sl_atr_mult: number
           sl_fixed_pct: number
           sl_type: string
+          strategy_key: string
           strategy_mode: string
           tp_rr: number
           trail_activate_pct: number
@@ -94,6 +95,7 @@ export type Database = {
           sl_atr_mult?: number
           sl_fixed_pct?: number
           sl_type?: string
+          strategy_key?: string
           strategy_mode?: string
           tp_rr?: number
           trail_activate_pct?: number
@@ -124,6 +126,7 @@ export type Database = {
           sl_atr_mult?: number
           sl_fixed_pct?: number
           sl_type?: string
+          strategy_key?: string
           strategy_mode?: string
           tp_rr?: number
           trail_activate_pct?: number

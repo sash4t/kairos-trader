@@ -152,7 +152,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
 }
 
 async function reviewSignal(sig: ScalpSignal, ctx: AssetCtx, openPositions: string[], exits: ExitParams) {
-  const provider = createLovableAiGatewayProvider();
+  const provider = createLovableAiGatewayProvider(process.env['LOVABLE_API_KEY']!);
   const prompt = `You are the final risk reviewer for a Hyperliquid perpetual futures bot. Review this ${sig.side?.toUpperCase()} signal. Signal: ${JSON.stringify(sig)}. Asset context: ${JSON.stringify(ctx)}. Open positions: ${openPositions.join(", ") || "none"}. Exits: ${JSON.stringify(exits)}. Approve only if the setup is coherent, liquid, and not obviously overextended. Do not invent data.`;
   try {
     const result = await generateObject({ model: provider("openai/gpt-5-mini"), schema: z.object({ approve: z.boolean(), reason: z.string(), risk: z.enum(["low", "medium", "high"]) }), prompt });
