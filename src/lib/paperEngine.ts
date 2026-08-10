@@ -1,5 +1,10 @@
 import { fetchCandles, fetchMetaAndCtxs, subscribeAllMids, type AssetCtx, type AssetMeta } from "./hyperliquid";
-import { candlesToBars, evaluateSignal, bucket, type Signal, type Bar, MODE_MIN_CONFIDENCE, type StrategyMode } from "./strategy";
+import { candlesToBars, bucket, type Bar, type StrategyMode } from "./strategy";
+import {
+  DEFAULT_TRENDLINE_CONFIG, TIMEFRAME_MS, ladderFor, evaluateTrendline, currentSafetyLine,
+  ratchetSafetyStop, safetyExitReason, sizeFromRisk, clampRiskPct,
+  type Timeframe, type TrendlineConfig, type TrendlineSignal,
+} from "./trendline";
 import { supabase } from "@/integrations/supabase/client";
 
 export interface Settings {
@@ -30,6 +35,10 @@ export interface Settings {
   trail_dist_pct: number;
   last_cycle_at: string | null;
   last_cycle_note: string | null;
+  strategy_key?: string;
+  trendline_risk_pct?: number;
+  execution_timeframe?: string;
+  safety_buffer_pct?: number;
   /** Max USD of the real account the bot may size positions from in live mode (0 = whole account). */
   live_max_alloc_usd: number;
 }
@@ -43,7 +52,7 @@ export interface OpenPosition {
   leverage: number;
   entry_price: number;
   stop_loss: number;
-  take_profit: number;
+  take_profit: number | null;
   trail_high: number | null;
   confidence: number;
 }
@@ -52,11 +61,9 @@ type Log = (level: "info" | "warn" | "error" | "trade", msg: string, meta?: any)
 
 // Backtested (3mo, BTC/SOL/ARB/LINK/DOGE): 1h bars materially outperform 15m —
 // 15m churns (1217 trades, PF 0.66) while 1h fresh-cross entries yield PF 1.78.
-const CANDLE_INTERVAL = "1h";
-const CANDLE_MS = 60 * 60 * 1000;
-const BARS_NEEDED = 220;
+const LADDER_BARS = 300;
 
-interface CoinCache { bars: Bar[]; lastFetch: number; nextEval: number }
+interface CoinCache { ladder: Partial<Record<Timeframe, Bar[]>>; lastFetch: number; nextEval: number }
 
 export class PaperEngine {
   private userId: string;
@@ -114,7 +121,7 @@ export class PaperEngine {
     this.positions = (openPos ?? []).map(p => ({
       id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional,
       leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss,
-      take_profit: +p.take_profit, trail_high: p.trail_high != null ? +p.trail_high : null,
+      take_profit: p.take_profit == null ? null : +p.take_profit, trail_high: p.trail_high != null ? +p.trail_high : null,
       confidence: +p.confidence,
     }));
     this.log("info", `Synced ${this.positions.length} open paper position(s)`);
@@ -195,39 +202,16 @@ export class PaperEngine {
     // Manage each open position
     for (const p of [...this.positions]) {
       const m = this.mid(p.coin); if (m == null) continue;
-      // trailing
-      if (this.settings.trailing_enabled) {
-        if (p.side === "long") {
-          const th = p.trail_high == null ? p.entry_price : Math.max(p.trail_high, m);
-          if (th !== p.trail_high) {
-            p.trail_high = th;
-            const r = p.entry_price - p.stop_loss;
-            if (m > p.entry_price + r) {
-              const newSl = Math.max(p.stop_loss, th - r);
-              if (newSl > p.stop_loss) { p.stop_loss = newSl; this.persistPositionUpdate(p); }
-            }
-          }
-        } else {
-          const th = p.trail_high == null ? p.entry_price : Math.min(p.trail_high, m);
-          if (th !== p.trail_high) {
-            p.trail_high = th;
-            const r = p.stop_loss - p.entry_price;
-            if (m < p.entry_price - r) {
-              const newSl = Math.min(p.stop_loss, th + r);
-              if (newSl < p.stop_loss) { p.stop_loss = newSl; this.persistPositionUpdate(p); }
-            }
-          }
-        }
-      }
-      // SL / TP — a stop trailed past entry is a trailing-stop exit, not a loss
+      // The Safety Line (recomputed on each eval cycle) is the stop. Here we
+      // only enforce it — a trendline position has no fixed take-profit.
       if (p.side === "long") {
-        const label = p.stop_loss > p.entry_price ? "trailing_stop" : "stop_loss";
-        if (m <= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
-        else if (m >= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
+        const label = safetyExitReason("long", p.entry_price, m, p.stop_loss);
+        if (label) this.closePosition(p, m, label).catch(() => {});
+        else if (p.take_profit != null && m >= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
       } else {
-        const label = p.stop_loss < p.entry_price ? "trailing_stop" : "stop_loss";
-        if (m >= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
-        else if (m <= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
+        const label = safetyExitReason("short", p.entry_price, m, p.stop_loss);
+        if (label) this.closePosition(p, m, label).catch(() => {});
+        else if (p.take_profit != null && m <= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
       }
     }
 
