@@ -1,4 +1,4 @@
-import { evaluateSignal, STRATEGY_PARAMS, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
+import { evaluateMultiTimeframeSignal, STRATEGY_PARAMS, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
 import { evaluateTrendBotSignal, TRENDBOT_STRATEGY_KEY } from "./trendbotStrategy";
 
 export type ScalpSide = "long" | "short";
@@ -10,16 +10,29 @@ export interface ScalpSignal {
 }
 
 export const STRATEGY_OPTIONS = [
-  { key: TRENDLINE_STRATEGY_KEY, name: "Trendline Price Action", description: "Top-down trend lines; trade breaks of the action line and exit when the opposing safety line is violated." },
+  { key: TRENDLINE_STRATEGY_KEY, name: "Trendline Price Action", description: "Top-down trend lines: Daily → 4H → 1H. Daily sets the major bias, 4H confirms it, and 1H provides the action-line break." },
   { key: TRENDBOT_STRATEGY_KEY, name: "TrendBot Momentum", description: "EMA20/50 + RSI14 + MACD momentum, long and short." },
 ] as const;
 
+function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
+  const groups = new Map<number, Bar>();
+  for (const b of bars) {
+    const key = Math.floor(b.t / intervalMs) * intervalMs;
+    const existing = groups.get(key);
+    if (!existing) groups.set(key, { t:key, o:b.o, h:b.h, l:b.l, c:b.c, v:b.v });
+    else { existing.h=Math.max(existing.h,b.h); existing.l=Math.min(existing.l,b.l); existing.c=b.c; existing.v+=b.v; }
+  }
+  return [...groups.values()].sort((a,b)=>a.t-b.t);
+}
+
 export function evaluateScalp(coin: string, bars: Bar[], strategyKey: StrategyKey = TRENDLINE_STRATEGY_KEY): ScalpSignal {
-  const sig = strategyKey === TRENDBOT_STRATEGY_KEY ? evaluateTrendBotSignal(coin, bars) : evaluateSignal(coin, bars);
+  const sig = strategyKey === TRENDBOT_STRATEGY_KEY
+    ? evaluateTrendBotSignal(coin, bars)
+    : evaluateMultiTimeframeSignal(coin, aggregateBars(bars, 24 * 60 * 60 * 1000), aggregateBars(bars, 4 * 60 * 60 * 1000), bars);
   return { coin, side: sig.side, family: strategyKey, confidence: sig.confidence, reasons: sig.reasons, price: sig.price, atrPct: sig.indicators["atrPct"] ?? 0, indicators: sig.indicators, actionLine: sig.actionLine, safetyLine: sig.safetyLine };
 }
 
-export const DEFAULT_EXITS = { tpPct: STRATEGY_PARAMS.tpPct, slPct: STRATEGY_PARAMS.slPct, trailActivatePct: STRATEGY_PARAMS.trailActivatePct, trailDistPct: STRATEGY_PARAMS.trailDistPct };
+export const DEFAULT_EXITS = { tpPct: 100, slPct: 0, trailActivatePct: 0, trailDistPct: 0 };
 export interface ExitParams { tpPct: number; slPct: number; trailActivatePct: number; trailDistPct: number }
 export interface TrailUpdate { stopLoss: number; trailHigh: number; changed: boolean }
 
