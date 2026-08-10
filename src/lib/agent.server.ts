@@ -69,7 +69,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
     const notes: string[] = [];
     try {
       const isLive = s.mode === "live";
-      const strategyKey: StrategyKey = s.strategy_key === "trendbot_momentum" ? "trendbot_momentum" : "bollinger_breakout";
+      const strategyKey: StrategyKey = s.strategy_key === "trendbot_momentum" ? "trendbot_momentum" : "trendline_price_action";
       if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
       let canTrade = !isLive || !!creds;
       const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
@@ -129,36 +129,32 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (s.ai_review_enabled) { verdict = await reviewSignal(sig, target.ctx, positions.map((p) => `${p.side} ${p.coin}`), exits); await log(s.user_id, "ai", `${verdict.approve ? "APPROVED" : "VETOED"} ${sig.side.toUpperCase()} ${sig.coin} — ${verdict.reason}`, { signal: sig, verdict }); if (!verdict.approve) { report.vetoed++; continue; } }
           const quote = mids[sig.coin] ? +mids[sig.coin] : sig.price; let entry = quote; let size = notional / quote;
           const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")} · AI: ${verdict.reason}`;
-          if (isLive && creds) { const asset = (await assets()).get(sig.coin); if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; } size = Number(size.toFixed(asset.szDecimals)); if (size <= 0 || size * quote < 10) { notes.push(`${sig.coin}: below $10 minimum order`); continue; } try { await setLeverage(creds, asset, leverage); const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, slippagePct: 0.6 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live order for ${sig.coin} did not fill — skipped.`); continue; } size = fill.size; entry = fill.avgPrice || quote; } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live order failed for ${sig.coin}: ${msg}`); continue; } }
-          const sl = sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
-          const tp = sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
-          const { data: inserted, error } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators }).select().single();
-          if (error || !inserted) { report.errors.push(error?.message ?? "insert failed"); continue; }
-          positions.push({ id: inserted.id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, trail_high: null, confidence: sig.confidence }); held.add(sig.coin); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${reason} @ ${entry.toFixed(6)} · SL ${sl.toFixed(6)} · TP ${tp.toFixed(6)}`, { agent: "server", live: isLive });
+          if (isLive && creds) { const asset = (await assets()).get(sig.coin); if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; } size = Number(size.toFixed(asset.szDecimals)); if (size <= 0) continue; try { await setLeverage(creds, asset, leverage); const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; } entry = fill.avgPrice || quote; size = fill.size; } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; } }
+          const stopDist = isLive && sig.safetyLine ? Math.abs(entry - sig.safetyLine) : entry * (+s.scalp_sl_pct / 100);
+          const sl = sig.side === "long" ? entry - stopDist : entry + stopDist;
+          const tp = sig.side === "long" ? entry + stopDist * Math.max(1, +s.tp_rr || 2) : entry - stopDist * Math.max(1, +s.tp_rr || 2);
+          const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators });
+          if (insErr) { report.errors.push(`record ${sig.coin}: ${insErr.message}`); continue; }
+          positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, trail_high: entry, confidence: sig.confidence }); held.add(sig.coin); report.opened++;
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · ${reason}`, { agent: "server", live: isLive, signal: sig, safetyLine: sig.safetyLine, actionLine: sig.actionLine });
         }
       }
-      const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
-      const { data: closedToday } = await supabaseAdmin.from("paper_positions").select("pnl").eq("user_id", s.user_id).eq("status", "closed").gte("closed_at", dayStart.toISOString());
-      const realisedToday = (closedToday ?? []).reduce((sum, r) => sum + (r.pnl == null ? 0 : +r.pnl), 0); const dayPnl = realisedToday + unrealised; const startEq = equityNow - dayPnl; const dayPct = startEq > 0 ? (dayPnl / startEq) * 100 : 0;
-      if (equityIsReal && dayPct <= -Math.abs(+s.daily_loss_pct)) {
-        await supabaseAdmin.from("bot_settings").update({ bot_enabled: false, kill_switch_engaged: true }).eq("user_id", s.user_id); await log(s.user_id, "warn", `Daily loss limit hit (${dayPct.toFixed(2)}%). Agent stopped.`); notes.push("daily loss limit — agent stopped");
-        if (isLive && creds) for (const p of [...positions]) { const asset = (await assets()).get(p.coin); const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price; if (!asset) continue; try { const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 }); if (fill.size <= 0) continue; const px = fill.avgPrice || mark; const pnl = p.side === "long" ? (px - p.entry_price) * fill.size : (p.entry_price - px) * fill.size; await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: px, exit_reason: "daily loss limit", pnl, closed_at: new Date().toISOString() }).eq("id", p.id); positions = positions.filter((x) => x.id !== p.id); report.closed++; await log(s.user_id, "trade", `LIVE FLATTEN ${p.coin} @ ${px.toFixed(6)} · daily loss limit`, { live: true }); } catch (err) { report.errors.push(`flatten ${p.coin}: ${err instanceof Error ? err.message : String(err)}`); } }
-      }
-      await supabaseAdmin.from("bot_settings").update({ last_cycle_at: new Date().toISOString(), last_cycle_note: notes.length ? notes.join(" · ") : `strategy=${strategyKey} · scanned ${report.scanned}` }).eq("user_id", s.user_id);
-    } catch (err) { report.errors.push(`${s.user_id}: ${err instanceof Error ? err.message : String(err)}`); await log(s.user_id, "error", `Agent cycle failed: ${err instanceof Error ? err.message : String(err)}`); }
+      const note = notes.length ? notes.join(" · ") : `cycle complete · strategy ${strategyKey}`;
+      await supabaseAdmin.from("bot_settings").update({ last_cycle_at: new Date().toISOString(), last_cycle_note: note }).eq("user_id", s.user_id);
+    } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`${s.user_id}: ${msg}`); await log(s.user_id, "error", `Trading cycle failed: ${msg}`); }
   }
   return report;
 }
 
-async function reviewSignal(sig: ScalpSignal, ctx: AssetCtx, openPositions: string[], exits: ExitParams) {
-  const provider = createLovableAiGatewayProvider(process.env['LOVABLE_API_KEY']!);
-  const prompt = `You are the final risk reviewer for a Hyperliquid perpetual futures bot. Review this ${sig.side?.toUpperCase()} signal. Signal: ${JSON.stringify(sig)}. Asset context: ${JSON.stringify(ctx)}. Open positions: ${openPositions.join(", ") || "none"}. Exits: ${JSON.stringify(exits)}. Approve only if the setup is coherent, liquid, and not obviously overextended. Do not invent data.`;
+async function reviewSignal(sig: ScalpSignal, ctx: AssetCtx, positions: string[], exits: ExitParams) {
+  const schema = z.object({ approve: z.boolean(), reason: z.string().max(240), risk: z.enum(["low", "medium", "high"]) });
   try {
-    const result = await generateObject({ model: provider("openai/gpt-5-mini"), schema: z.object({ approve: z.boolean(), reason: z.string(), risk: z.enum(["low", "medium", "high"]) }), prompt });
+    const provider = createLovableAiGatewayProvider();
+    const model = provider("google/gemini-2.5-flash");
+    const result = await generateObject({ model, schema, prompt: `You are a strict risk reviewer for a Hyperliquid perpetual futures bot. Review this deterministic price-action signal. Do not invent data. Signal: ${JSON.stringify(sig)}. Market context: ${JSON.stringify(ctx)}. Open positions: ${JSON.stringify(positions)}. Exit parameters: ${JSON.stringify(exits)}. Approve only if the setup is coherent and risk is acceptable. Never override the strategy direction.` });
     return result.object;
   } catch (err) {
-    if (err instanceof NoObjectGeneratedError) return { approve: true, reason: "AI review unavailable — fail-open to deterministic strategy", risk: "unknown" as const };
-    throw err;
+    if (err instanceof NoObjectGeneratedError) return { approve: false, reason: "AI review unavailable; fail closed", risk: "high" as const };
+    return { approve: false, reason: `AI review error: ${err instanceof Error ? err.message : String(err)}`, risk: "high" as const };
   }
 }
