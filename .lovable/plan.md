@@ -11,7 +11,16 @@ Replace the current partial trend-line code with one deterministic, pure price-a
 - `paper_positions.take_profit` is `numeric NOT NULL`, so a TP is always written.
 - No test runner is installed (no vitest in `package.json`).
 
+## Step 0: repair the current build
+
+The repo does not typecheck right now, independent of this work:
+- `src/lib/agent.server.ts:135` reads `s.tp_rr`, which is not declared on the local `Settings` interface (that line goes away anyway once fixed TP is removed).
+- `src/lib/agent.server.ts:152` calls `createLovableAiGatewayProvider()` with no arguments while the helper requires 1-3.
+
+Both get fixed first so the build is green before the engine swap starts.
+
 ## New engine: `src/lib/trendline/`
+
 
 Pure, dependency-free modules so both paper and live import identical logic.
 
