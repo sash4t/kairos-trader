@@ -1,5 +1,5 @@
 import { useBot } from "@/lib/botContext";
-import { Bot, BrainCircuit, Clock, Zap } from "lucide-react";
+import { Bot, Clock, Zap } from "lucide-react";
 
 function Toggle({ on, onChange, label, desc }: { on: boolean; onChange: (v: boolean) => void; label: string; desc: string }) {
   return (
@@ -67,18 +67,12 @@ export function AgentPanel() {
           desc="Requires the bot to be enabled and the kill switch reset."
         />
         <Toggle
-          on={settings.ai_review_enabled}
-          onChange={(v) => saveSettings({ ai_review_enabled: v })}
-          label="AI signal reviewer"
-          desc="Every candidate entry is approved or vetoed by AI, with the reason logged."
-        />
-        <Toggle
           on={settings.scalp_enabled}
           onChange={(v) => saveSettings({ scalp_enabled: v })}
           label="Quick-trade scanning"
           desc="Off = manage open trades only, take no new entries."
         />
-        <div className="flex items-center gap-2 rounded-md border border-panel-border bg-background p-3 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 rounded-md border border-panel-border bg-background p-3 text-xs text-muted-foreground sm:col-span-2">
           <Clock className="h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0">
             {last ? <>Last cycle {ageSec}s ago · <span className="mono">{settings.last_cycle_note ?? ""}</span></> : "No cycle recorded yet"}
@@ -99,11 +93,6 @@ export function AgentPanel() {
           Walk-forward tested on 19 perps over 52 days of 15m bars: none of 192 quick-trade configurations were profitable in
           all four folds after 0.13% round-trip costs. Keep this on paper until your own forward results say otherwise.
         </span>
-      </div>
-
-      <div className="flex items-start gap-2 text-xs text-muted-foreground">
-        <BrainCircuit className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        <span>AI verdicts appear in the event log tagged <span className="mono">ai</span>. If the reviewer errors, the trade is skipped rather than taken.</span>
       </div>
     </div>
   );
