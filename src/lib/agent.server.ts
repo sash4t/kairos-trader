@@ -2,26 +2,14 @@ import { NoObjectGeneratedError, generateObject } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 import { candlesToBars, bucket, type Bar } from "./strategy";
-import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
-import { normalizeStrategyKey, PURE_PRICE_STRATEGY_KEY, type StrategyKey } from "./strategies";
-import { detectBtcShock, sideToFlatten, DEFAULT_BTC_SHOCK, type ShockDirection } from "./btcShock";
-import { evaluateRoeStop, normalizeMaxRoeLossPct, DEFAULT_MAX_ROE_LOSS_PCT } from "./roeGuard";
-import {
-  DEFAULT_TRENDLINE_CONFIG, TIMEFRAME_MS, ladderFor, evaluateTrendline,
-  currentSafetyLine, ratchetSafetyStop, safetyExitReason, sizeAtMaxLeverage, resolveMaxLeverage,
-  type Timeframe, type TrendlineConfig, type TrendlineSignal,
-} from "./trendline";
+import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal, type StrategyKey } from "./scalp";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
 const INTERVAL = "1h";
 const INTERVAL_MS = 60 * 60 * 1000;
 const BARS = 230;
 const SCAN_PER_CYCLE = 35;
-/** Multi-timeframe scans cost 5 requests per coin, so the trendline strategy scans fewer per cycle. */
-const TRENDLINE_SCAN_PER_CYCLE = 8;
 const MIN_24H_VOLUME = 100_000;
-/** Bars requested per timeframe when building the top-down ladder. */
-const LADDER_BARS = 300;
 
 type Level = "info" | "warn" | "error" | "trade" | "ai";
 async function hl<T>(body: unknown): Promise<T> {
@@ -37,20 +25,9 @@ interface Settings {
   ai_review_enabled: boolean; scalp_enabled: boolean; scalp_tp_pct: number; scalp_sl_pct: number;
   trail_activate_pct: number; trail_dist_pct: number; max_positions: number; max_leverage: number;
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
-  paper_equity: number; mode: string; live_max_alloc_usd: number; tp_rr: number; strategy_key?: string;
-  execution_timeframe?: string; safety_buffer_pct?: number;
-  btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
-  max_roe_loss_pct?: number;
+  paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: StrategyKey;
 }
-interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number | null; trail_high: number | null; confidence: number }
-
-function trendlineCfg(s: Settings): TrendlineConfig {
-  return { ...DEFAULT_TRENDLINE_CONFIG, safetyBufferPct: +(s.safety_buffer_pct ?? DEFAULT_TRENDLINE_CONFIG.safetyBufferPct) };
-}
-function executionTimeframe(s: Settings): Timeframe {
-  const tf = (s.execution_timeframe ?? "1h") as Timeframe;
-  return TIMEFRAME_MS[tf] ? tf : "1h";
-}
+interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number; trail_high: number | null; confidence: number }
 
 /** Runs one full monitor → manage → scan → review → enter cycle for every enabled user. */
 export async function runTradingCycle(): Promise<CycleReport> {
@@ -68,32 +45,23 @@ export async function runTradingCycle(): Promise<CycleReport> {
   const [meta, ctxs] = await hl<[{ universe: AssetMeta[] }, AssetCtx[]]>({ type: "metaAndAssetCtxs" });
   const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
   const liquid = meta.universe.map((m, i) => ({ meta: m, ctx: ctxs[i] })).filter((x) => x.ctx && +x.ctx.dayNtlVlm > MIN_24H_VOLUME && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
+  const minute = Math.floor(Date.now() / 60_000);
+  const offset = (minute * SCAN_PER_CYCLE) % Math.max(1, liquid.length);
+  const scanTargets = Array.from({ length: Math.min(SCAN_PER_CYCLE, liquid.length) }, (_, i) => liquid[(offset + i) % liquid.length]);
   const { readHlCreds, loadAssetIndex, marketOrder, setLeverage, fetchLiveAccount } = await import("./hyperliquidExchange.server");
   const creds = readHlCreds();
   let assetIndex: Awaited<ReturnType<typeof loadAssetIndex>> | null = null;
   const assets = async () => (assetIndex ??= await loadAssetIndex());
   const barCache = new Map<string, Bar[]>();
-  /** Fetch confirmed bars for one coin/interval. The in-progress candle is always dropped (no look-ahead). */
-  const loadInterval = async (coin: string, interval: Timeframe, count: number): Promise<Bar[] | null> => {
-    const key = `${coin}:${interval}`;
-    if (barCache.has(key)) return barCache.get(key)!;
+  const loadBars = async (coin: string): Promise<Bar[] | null> => {
+    if (barCache.has(coin)) return barCache.get(coin)!;
     try {
       const end = Date.now();
-      const candles = await hl<{ t: number; o: string; h: string; l: string; c: string; v: string }[]>({ type: "candleSnapshot", req: { coin, interval, startTime: end - count * TIMEFRAME_MS[interval], endTime: end } });
+      const candles = await hl<{ t: number; o: string; h: string; l: string; c: string; v: string }[]>({ type: "candleSnapshot", req: { coin, interval: INTERVAL, startTime: end - BARS * INTERVAL_MS, endTime: end } });
       const bars = candlesToBars(candles as never).slice(0, -1);
-      barCache.set(key, bars);
+      barCache.set(coin, bars);
       return bars;
     } catch { return null; }
-  };
-  const loadBars = async (coin: string): Promise<Bar[] | null> => loadInterval(coin, INTERVAL as Timeframe, BARS);
-  /** Full Monthly → … → execution ladder for one coin. */
-  const loadLadder = async (coin: string, execution: Timeframe): Promise<Partial<Record<Timeframe, Bar[]>>> => {
-    const out: Partial<Record<Timeframe, Bar[]>> = {};
-    for (const tf of ladderFor(execution)) {
-      const bars = await loadInterval(coin, tf, LADDER_BARS);
-      if (bars && bars.length) out[tf] = bars;
-    }
-    return out;
   };
 
   for (const raw of users) {
@@ -101,15 +69,12 @@ export async function runTradingCycle(): Promise<CycleReport> {
     const notes: string[] = [];
     try {
       const isLive = s.mode === "live";
-      const strategyKey: StrategyKey = normalizeStrategyKey(s.strategy_key);
-      const isTrendline = strategyKey === PURE_PRICE_STRATEGY_KEY;
-      const cfg = trendlineCfg(s);
-      const execTf = executionTimeframe(s);
+      const strategyKey: StrategyKey = s.strategy_key === "trendbot_momentum" ? "trendbot_momentum" : "trendline_price_action";
       if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
       let canTrade = !isLive || !!creds;
       const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
       const { data: openRaw } = await supabaseAdmin.from("paper_positions").select("*").eq("user_id", s.user_id).eq("status", "open");
-      let positions = (openRaw ?? []).map((p) => ({ id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional, leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss, take_profit: p.take_profit == null ? null : +p.take_profit, trail_high: p.trail_high == null ? null : +p.trail_high, confidence: +p.confidence })) as PositionRow[];
+      let positions = (openRaw ?? []).map((p) => ({ id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional, leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss, take_profit: +p.take_profit, trail_high: p.trail_high == null ? null : +p.trail_high, confidence: +p.confidence })) as PositionRow[];
       let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
       if (isLive && creds) {
         try { liveAcct = await fetchLiveAccount(creds.accountAddress); }
@@ -126,182 +91,52 @@ export async function runTradingCycle(): Promise<CycleReport> {
         }
       }
       let realised = 0;
-      // BTC shock protection runs BEFORE ordinary Safety Line processing.
-      let shockDir: ShockDirection | null = null;
-      if (positions.length) {
-        const btcBars = await loadInterval("BTC", "5m", 60);
-        if (btcBars && btcBars.length > 2) {
-          const shock = detectBtcShock(btcBars, { enabled: s.btc_shock_enabled !== false, thresholdPct: +(s.btc_shock_pct ?? DEFAULT_BTC_SHOCK.thresholdPct), windowMin: +(s.btc_shock_window_min ?? DEFAULT_BTC_SHOCK.windowMin) });
-          shockDir = shock.direction;
-          if (shockDir) {
-            notes.push(`BTC shock ${shockDir} ${shock.movePct.toFixed(2)}%`);
-            await log(s.user_id, "warn", `BTC shock ${shockDir} (${shock.movePct.toFixed(2)}% over ${s.btc_shock_window_min ?? DEFAULT_BTC_SHOCK.windowMin}m) — flattening all ${sideToFlatten(shockDir).toUpperCase()} positions.`, { agent: "server", btcShock: shock, live: isLive });
-          }
-        }
-      }
-      const maxRoeLoss = normalizeMaxRoeLossPct(s.max_roe_loss_pct ?? DEFAULT_MAX_ROE_LOSS_PCT);
-      const liveByCoin = new Map((liveAcct?.positions ?? []).map((lp) => [lp.coin, lp]));
       for (const p of [...positions]) {
         const markStr = mids[p.coin]; if (!markStr) continue; const mark = +markStr;
-        // GLOBAL hard ROE stop — runs before strategy stops/trailing and before entries.
-        const livePos = liveByCoin.get(p.coin);
-        const leverage = livePos?.leverage && livePos.leverage > 0 ? livePos.leverage : p.leverage;
-        const marginUsed = livePos ? (livePos.size * livePos.entryPrice) / (leverage || 1) : undefined;
-        const roe = evaluateRoeStop({
-          side: p.side, entry: p.entry_price, mark, leverage, maxRoeLossPct: maxRoeLoss,
-          ...(livePos ? { unrealizedPnl: livePos.unrealizedPnl, marginUsed } : {}),
-        });
-        const forced = roe.triggered
-          ? roe.reason
-          : shockDir && p.side === sideToFlatten(shockDir) ? `btc_shock_${shockDir}` : null;
-        let reason: string | null = forced;
-        if (roe.triggered) await log(s.user_id, "warn", `${roe.message} — flattening ${p.coin}.`, { agent: "server", coin: p.coin, roePct: roe.roePct, leverage, mark, entry: p.entry_price, live: isLive });
-        if (forced) { /* emergency flattening skips trailing work */ }
-        else if (isTrendline) {
-          // The Safety Line is the stop: re-derive it from live structure and
-          // ratchet the stop toward it. It can only ever tighten.
-          const ladder = await loadLadder(p.coin, execTf);
-          const { state } = evaluateTrendline({ coin: p.coin, barsByTimeframe: ladder, execution: execTf, cfg });
-          const safety = currentSafetyLine(state, p.side, Date.now(), mark);
-          const r = ratchetSafetyStop({ side: p.side, entry: p.entry_price, currentStop: p.stop_loss, safetyLineValue: safety, bufferPct: cfg.safetyBufferPct });
-          if (r.changed) {
-            p.stop_loss = r.stop;
-            await supabaseAdmin.from("paper_positions").update({ stop_loss: r.stop, safety_line: safety }).eq("id", p.id);
-            await log(s.user_id, "info", `Safety Line trail ${p.coin}: stop → ${r.stop.toPrecision(6)}`, { agent: "server", coin: p.coin, safetyLine: safety, stop: r.stop });
-          }
-          reason = safetyExitReason(p.side, p.entry_price, mark, p.stop_loss);
-        } else {
-          const t = updateTrail(p.side, p.entry_price, mark, p.stop_loss, p.trail_high, exits);
-          if (t.changed) { p.stop_loss = t.stopLoss; p.trail_high = t.trailHigh; await supabaseAdmin.from("paper_positions").update({ stop_loss: t.stopLoss, trail_high: t.trailHigh }).eq("id", p.id); }
-          reason = exitReasonFor(p.side, mark, p.stop_loss, p.take_profit ?? (p.side === "long" ? Infinity : 0), p.entry_price);
-        }
-        if (!reason) continue;
-
+        const t = updateTrail(p.side, p.entry_price, mark, p.stop_loss, p.trail_high, exits);
+        if (t.changed) { p.stop_loss = t.stopLoss; p.trail_high = t.trailHigh; await supabaseAdmin.from("paper_positions").update({ stop_loss: t.stopLoss, trail_high: t.trailHigh }).eq("id", p.id); }
+        const reason = exitReasonFor(p.side, mark, p.stop_loss, p.take_profit, p.entry_price); if (!reason) continue;
         let exitPrice = mark; let exitSize = p.size;
         if (isLive && creds) { const asset = (await assets()).get(p.coin); if (!asset) { report.errors.push(`${p.coin}: unknown asset`); continue; } try { const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live close for ${p.coin} did not fill — retrying next cycle.`); continue; } exitPrice = fill.avgPrice || mark; exitSize = fill.size; if (exitSize < p.size * 0.99) { const remaining = p.size - exitSize; const partialPnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize; p.size = remaining; p.notional = remaining * p.entry_price; await supabaseAdmin.from("paper_positions").update({ size: remaining, notional: p.notional }).eq("id", p.id); await log(s.user_id, "trade", `LIVE PARTIAL CLOSE ${p.coin} ${exitSize} @ ${exitPrice.toFixed(6)} · PnL ${partialPnl >= 0 ? "+" : ""}${partialPnl.toFixed(2)} USDC`, { agent: "server", live: true }); continue; } } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Live close failed for ${p.coin}: ${msg}`); continue; } }
         const pnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize;
         realised += pnl; await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: exitPrice, exit_reason: reason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id); positions = positions.filter((x) => x.id !== p.id); report.closed++;
-        await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${exitPrice.toFixed(6)} · PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · ${reason}`, { agent: "server", reason, live: isLive, stop: p.stop_loss });
+        await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${exitPrice.toFixed(6)} · PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · ${reason}`, { agent: "server", reason, live: isLive });
       }
       if (realised !== 0 && !isLive) { await supabaseAdmin.from("bot_settings").update({ paper_equity: +s.paper_equity + realised }).eq("user_id", s.user_id); s.paper_equity = +s.paper_equity + realised; }
       let unrealised = 0; for (const p of positions) { const m = mids[p.coin]; if (!m) continue; unrealised += p.side === "long" ? (+m - p.entry_price) * p.size : (p.entry_price - +m) * p.size; }
       let equityNow = +s.paper_equity + unrealised; let equityIsReal = !isLive;
       if (isLive && creds) { try { const acct = await fetchLiveAccount(creds.accountAddress); equityNow = acct.accountValue; unrealised = acct.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0); equityIsReal = true; } catch (err) { notes.push(`live account read failed: ${err instanceof Error ? err.message : String(err)}`); } }
       if (equityIsReal) await supabaseAdmin.from("equity_snapshots").insert({ user_id: s.user_id, equity: equityNow, realized_pnl: realised, unrealized_pnl: unrealised, mode: isLive ? "live" : "paper" });
-
-      const perCycle = isTrendline ? TRENDLINE_SCAN_PER_CYCLE : SCAN_PER_CYCLE;
-      const minute = Math.floor(Date.now() / 60_000);
-      const offset = (minute * perCycle) % Math.max(1, liquid.length);
-      const scanTargets = Array.from({ length: Math.min(perCycle, liquid.length) }, (_, i) => liquid[(offset + i) % liquid.length]);
-
       if (!canTrade) { }
       else if (!s.scalp_enabled) notes.push("scanning paused");
       else if (positions.length >= s.max_positions) notes.push(`at max positions (${positions.length})`);
       else {
         const held = new Set(positions.map((p) => p.coin));
-        const barMs = isTrendline ? TIMEFRAME_MS[execTf] : INTERVAL_MS;
-        const barOpen = new Date(Math.floor(Date.now() / barMs) * barMs).toISOString();
+        const barOpen = new Date(Math.floor(Date.now() / INTERVAL_MS) * INTERVAL_MS).toISOString();
         const { data: recent } = await supabaseAdmin.from("paper_positions").select("coin").eq("user_id", s.user_id).gte("opened_at", barOpen);
         for (const r of recent ?? []) held.add(r.coin);
         for (const target of scanTargets) {
           if (positions.length >= s.max_positions) break;
           if (held.has(target.meta.name)) continue;
-          report.scanned++;
-
-          let side: "long" | "short" | null = null;
-          let signalPrice = 0;
-          let confidence = 0;
-          let reasons: string[] = [];
-          let family = strategyKey as string;
-          let detail: Record<string, unknown> = {};
-          let safetyLine: number | null = null;
-          let actionLine: number | null = null;
-          let trendSig: TrendlineSignal | null = null;
-          let scalpSig: ScalpSignal | null = null;
-
-          if (isTrendline) {
-            const ladder = await loadLadder(target.meta.name, execTf);
-            const { signal } = evaluateTrendline({ coin: target.meta.name, barsByTimeframe: ladder, execution: execTf, cfg });
-            trendSig = signal;
-            if (!signal.side || signal.initialStop == null) continue;
-            side = signal.side; signalPrice = signal.price; confidence = signal.confidence; reasons = signal.reasons;
-            detail = signal.detail; safetyLine = signal.safetyLine?.value ?? null; actionLine = signal.actionLine?.value ?? null;
-          } else {
-            const bars = await loadBars(target.meta.name); if (!bars || bars.length < 210) continue;
-            const sig = evaluateScalp(target.meta.name, bars, strategyKey);
-            scalpSig = sig;
-            if (!sig.side || sig.confidence < +s.min_confidence) continue;
-            side = sig.side; signalPrice = sig.price; confidence = sig.confidence; reasons = sig.reasons;
-            family = sig.family; detail = sig.indicators; safetyLine = sig.safetyLine ?? null; actionLine = sig.actionLine ?? null;
-          }
-          if (!side) continue;
-
-          const b = bucket(target.meta.name); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
+          const bars = await loadBars(target.meta.name); report.scanned++; if (!bars || bars.length < 210) continue;
+          const sig = evaluateScalp(target.meta.name, bars, strategyKey); if (!sig.side || sig.confidence < +s.min_confidence) continue;
+          const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
-          const leverageCap = Math.min(+s.max_leverage, target.meta.maxLeverage);
-          const capNotional = equity * (+s.max_exposure_pct / 100) * +s.max_leverage; const exposure = positions.reduce((sum, p) => sum + p.notional, 0); const headroom = capNotional - exposure;
+          const leverage = Math.min(+s.max_leverage, target.meta.maxLeverage); const capNotional = equity * (+s.max_exposure_pct / 100) * +s.max_leverage; const exposure = positions.reduce((sum, p) => sum + p.notional, 0); const headroom = capNotional - exposure;
           if (headroom <= capNotional * 0.05) { notes.push("exposure cap reached"); break; }
-
+          const notional = Math.min(equity * (+s.position_size_pct / 100) * leverage, headroom);
           let verdict = { approve: true, reason: "AI review disabled", risk: "unknown" as string };
-          if (s.ai_review_enabled) {
-            const forReview = trendSig ?? scalpSig;
-            verdict = await reviewSignal(forReview as never, target.ctx, positions.map((p) => `${p.side} ${p.coin}`), exits);
-            await log(s.user_id, "ai", `${verdict.approve ? "APPROVED" : "VETOED"} ${side.toUpperCase()} ${target.meta.name} — ${verdict.reason}`, { signal: forReview, verdict });
-            if (!verdict.approve) { report.vetoed++; continue; }
-          }
-
-          const quote = mids[target.meta.name] ? +mids[target.meta.name] : signalPrice;
-          let entry = quote;
-          let size: number;
-          let leverage = leverageCap;
-          let initialStop: number;
-          let sl: number;
-          let tp: number | null;
-
-          if (isTrendline && trendSig) {
-            // Pure Price: exchange MAXIMUM leverage for this market — never 1x,
-            // never a fixed % of equity risked. Portfolio exposure headroom,
-            // max positions, daily-loss and kill switch still bound the size.
-            const stopFromSafety = trendSig.initialStop!;
-            const sized = sizeAtMaxLeverage({ equity, entry: quote, stop: stopFromSafety, marketMaxLeverage: target.meta.maxLeverage, szDecimals: target.meta.szDecimals, maxNotional: headroom });
-            if (!sized.ok) { notes.push(`${target.meta.name}: ${sized.reason}`); continue; }
-            size = sized.size; leverage = sized.leverage; initialStop = stopFromSafety; sl = stopFromSafety; tp = null;
-          } else {
-            const notional = Math.min(equity * (+s.position_size_pct / 100) * leverageCap, headroom);
-            size = notional / quote;
-            const stopDist = safetyLine ? Math.abs(quote - safetyLine) : quote * (+s.scalp_sl_pct / 100);
-            sl = side === "long" ? quote - stopDist : quote + stopDist;
-            initialStop = sl;
-            tp = side === "long" ? quote + stopDist * Math.max(1, +s.tp_rr || 2) : quote - stopDist * Math.max(1, +s.tp_rr || 2);
-          }
-
-          const reason = `${side.toUpperCase()} ${target.meta.name} [${family}] — ${reasons.join(" + ")} · AI: ${verdict.reason}`;
-          if (isLive && creds) {
-            const asset = (await assets()).get(target.meta.name); if (!asset) { report.errors.push(`${target.meta.name}: unknown asset`); continue; }
-            size = Number(size.toFixed(asset.szDecimals)); if (size <= 0) continue;
-            try {
-              await setLeverage(creds, asset, leverage);
-              const fill = await marketOrder(creds, asset, { isBuy: side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 });
-              if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${target.meta.name} did not fill.`); continue; }
-              entry = fill.avgPrice || quote; size = fill.size;
-            } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${target.meta.name}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${target.meta.name}: ${msg}`); continue; }
-          }
-
-          const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({
-            user_id: s.user_id, coin: target.meta.name, side, size, notional: size * entry, leverage,
-            entry_price: entry, stop_loss: sl, take_profit: tp, confidence, reason,
-            indicators: detail as never,
-            safety_line: safetyLine, action_line: actionLine,
-            timeframe: isTrendline ? execTf : INTERVAL,
-            initial_stop: initialStop, risk_pct: null,
-          });
-          if (insErr) { report.errors.push(`record ${target.meta.name}: ${insErr.message}`); continue; }
-          positions.push({ id: crypto.randomUUID(), coin: target.meta.name, side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, trail_high: entry, confidence }); held.add(target.meta.name); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${side.toUpperCase()} ${target.meta.name} @ ${entry.toFixed(6)} · size ${size} · stop ${sl.toPrecision(6)} · ${isTrendline ? `leverage ${leverage}x (market max)` : `risk ${+s.position_size_pct}%`} · ${reason}`, {
-            agent: "server", live: isLive, strategy: strategyKey, timeframe: isTrendline ? execTf : INTERVAL,
-            direction: side, entry, initialStop, currentStop: sl, leverage, maxLeverageUsed: isTrendline ? resolveMaxLeverage(target.meta.maxLeverage) : null, size,
-            actionLine, safetyLine, detail,
-          });
+          if (s.ai_review_enabled) { verdict = await reviewSignal(sig, target.ctx, positions.map((p) => `${p.side} ${p.coin}`), exits); await log(s.user_id, "ai", `${verdict.approve ? "APPROVED" : "VETOED"} ${sig.side.toUpperCase()} ${sig.coin} — ${verdict.reason}`, { signal: sig, verdict }); if (!verdict.approve) { report.vetoed++; continue; } }
+          const quote = mids[sig.coin] ? +mids[sig.coin] : sig.price; let entry = quote; let size = notional / quote;
+          const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")} · AI: ${verdict.reason}`;
+          if (isLive && creds) { const asset = (await assets()).get(sig.coin); if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; } size = Number(size.toFixed(asset.szDecimals)); if (size <= 0) continue; try { await setLeverage(creds, asset, leverage); const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; } entry = fill.avgPrice || quote; size = fill.size; } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; } }
+          const stopDist = isLive && sig.safetyLine ? Math.abs(entry - sig.safetyLine) : entry * (+s.scalp_sl_pct / 100);
+          const sl = sig.side === "long" ? entry - stopDist : entry + stopDist;
+          const tp = sig.side === "long" ? entry + stopDist * Math.max(1, +s.tp_rr || 2) : entry - stopDist * Math.max(1, +s.tp_rr || 2);
+          const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators });
+          if (insErr) { report.errors.push(`record ${sig.coin}: ${insErr.message}`); continue; }
+          positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, trail_high: entry, confidence: sig.confidence }); held.add(sig.coin); report.opened++;
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · ${reason}`, { agent: "server", live: isLive, signal: sig, safetyLine: sig.safetyLine, actionLine: sig.actionLine });
         }
       }
       const note = notes.length ? notes.join(" · ") : `cycle complete · strategy ${strategyKey}`;
@@ -311,10 +146,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
   return report;
 }
 
-async function reviewSignal(sig: ScalpSignal | TrendlineSignal, ctx: AssetCtx, positions: string[], exits: ExitParams) {
+async function reviewSignal(sig: ScalpSignal, ctx: AssetCtx, positions: string[], exits: ExitParams) {
   const schema = z.object({ approve: z.boolean(), reason: z.string().max(240), risk: z.enum(["low", "medium", "high"]) });
   try {
-    const provider = createLovableAiGatewayProvider(process.env["LOVABLE_API_KEY"] ?? "");
+    const provider = createLovableAiGatewayProvider();
     const model = provider("google/gemini-2.5-flash");
     const result = await generateObject({ model, schema, prompt: `You are a strict risk reviewer for a Hyperliquid perpetual futures bot. Review this deterministic price-action signal. Do not invent data. Signal: ${JSON.stringify(sig)}. Market context: ${JSON.stringify(ctx)}. Open positions: ${JSON.stringify(positions)}. Exit parameters: ${JSON.stringify(exits)}. Approve only if the setup is coherent and risk is acceptable. Never override the strategy direction.` });
     return result.object;

@@ -1,17 +1,14 @@
 // Technical indicators. All operate on numeric closes / candles.
 
 export function ema(values: number[], period: number): number[] {
-  if (values.length === 0 || period <= 0) return [];
-  const out = Array<number>(values.length).fill(NaN);
-  if (values.length < period) return out;
-  let sum = 0;
-  for (let i = 0; i < period; i++) sum += values[i];
-  let prev = sum / period;
-  out[period - 1] = prev;
+  if (values.length === 0) return [];
   const k = 2 / (period + 1);
-  for (let i = period; i < values.length; i++) {
+  const out: number[] = [];
+  let prev = values[0];
+  out.push(prev);
+  for (let i = 1; i < values.length; i++) {
     prev = values[i] * k + prev * (1 - k);
-    out[i] = prev;
+    out.push(prev);
   }
   return out;
 }
@@ -67,6 +64,7 @@ export function atr(candles: { h: number; l: number; c: number }[], period = 14)
     const c = candles[i];
     trs.push(Math.max(c.h - c.l, Math.abs(c.h - p.c), Math.abs(c.l - p.c)));
   }
+  // Wilder smoothing
   const out: number[] = [];
   if (trs.length < period) return trs.map(() => NaN);
   let sum = 0;
