@@ -137,16 +137,34 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (positions.length >= s.max_positions) break;
           if (held.has(target.meta.name)) continue;
           const hourly = await loadBars(target.meta.name, "1h", BARS); report.scanned++; if (!hourly || hourly.length < 80) continue;
-          const sig: ScalpSignal = evaluateScalp(target.meta.name, hourly, strategyKey);
+          let sig: ScalpSignal;
+          if (strategyKey === "trendbot_momentum") {
+            sig = evaluateScalpMulti(target.meta.name, { daily: hourly, fourHour: hourly, hourly }, strategyKey);
+          } else {
+            // Gen-2 Daily → 4H → 1H needs 80+ real bars on each timeframe; a 1H
+            // window aggregated upward can never satisfy the daily requirement.
+            const daily = await loadBars(target.meta.name, "1d", HTF_BARS);
+            const fourHour = await loadBars(target.meta.name, "4h", HTF_BARS);
+            if (!daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
+            sig = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly }, strategyKey);
+          }
           if (!sig.side || sig.confidence < +s.min_confidence) continue;
           if (shockHitsSide(shockDir, sig.side)) continue;
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
           // Leverage never exceeds the user's configured cap or the exchange maximum.
-          const leverage = Math.min(+s.max_leverage, target.meta.maxLeverage);
-          const capNotional = equity * (+s.max_exposure_pct / 100) * +s.max_leverage; const exposure = positions.reduce((sum, p) => sum + p.notional, 0); const headroom = capNotional - exposure;
-          if (headroom <= capNotional * 0.05) { notes.push("exposure cap reached"); break; }
-          const notional = Math.min(equity * (+s.position_size_pct / 100) * leverage, headroom);
+          const quotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
+          const intent = buildEntryIntent({
+            side: sig.side, price: quotePx, equity,
+            positionSizePct: +s.position_size_pct, maxExposurePct: +s.max_exposure_pct,
+            userMaxLeverage: +s.max_leverage, assetMaxLeverage: target.meta.maxLeverage,
+            currentExposure: positions.reduce((sum, p) => sum + p.notional, 0),
+            slPct: exits.slPct, tpPct: exits.tpPct,
+          });
+          if (!intent.ok) { if (intent.reason === "exposure cap reached") { notes.push("exposure cap reached"); break; } continue; }
+          const leverage = intent.leverage;
+          const notional = intent.notional;
+
           let verdict = { approve: true, reason: "AI review disabled", risk: "unknown" as string };
           if (s.ai_review_enabled) { verdict = await reviewSignal(sig, target.ctx, positions.map((p) => `${p.side} ${p.coin}`), exits); await log(s.user_id, "ai", `${verdict.approve ? "APPROVED" : "VETOED"} ${sig.side.toUpperCase()} ${sig.coin} — ${verdict.reason}`, { signal: sig, verdict }); if (!verdict.approve) { report.vetoed++; continue; } }
           const quote = mids[sig.coin] ? +mids[sig.coin] : sig.price; let entry = quote; let size = notional / quote;
