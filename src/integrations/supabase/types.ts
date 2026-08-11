@@ -72,6 +72,10 @@ export type Database = {
           sl_type: string
           strategy_key: string
           strategy_mode: string
+          tb_pivot_strength: number
+          tb_refresh_min: number
+          tb_risk_pct: number
+          tb_timeframes: string
           tp_rr: number
           trail_activate_pct: number
           trail_dist_pct: number
@@ -110,6 +114,10 @@ export type Database = {
           sl_type?: string
           strategy_key?: string
           strategy_mode?: string
+          tb_pivot_strength?: number
+          tb_refresh_min?: number
+          tb_risk_pct?: number
+          tb_timeframes?: string
           tp_rr?: number
           trail_activate_pct?: number
           trail_dist_pct?: number
@@ -148,6 +156,10 @@ export type Database = {
           sl_type?: string
           strategy_key?: string
           strategy_mode?: string
+          tb_pivot_strength?: number
+          tb_refresh_min?: number
+          tb_risk_pct?: number
+          tb_timeframes?: string
           tp_rr?: number
           trail_activate_pct?: number
           trail_dist_pct?: number
