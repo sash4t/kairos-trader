@@ -143,7 +143,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (shockHitsSide(shockDir, sig.side)) continue;
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
-          const leverage = Math.min(+s.max_leverage, target.meta.maxLeverage); const capNotional = equity * (+s.max_exposure_pct / 100) * +s.max_leverage; const exposure = positions.reduce((sum, p) => sum + p.notional, 0); const headroom = capNotional - exposure;
+          // The trendline strategy sizes at the coin's maximum exchange leverage; other
+          // strategies stay capped by the user's max-leverage setting.
+          const leverage = strategyKey === "trendline_price_action"
+            ? target.meta.maxLeverage
+            : Math.min(+s.max_leverage, target.meta.maxLeverage); const capNotional = equity * (+s.max_exposure_pct / 100) * Math.max(+s.max_leverage, leverage); const exposure = positions.reduce((sum, p) => sum + p.notional, 0); const headroom = capNotional - exposure;
           if (headroom <= capNotional * 0.05) { notes.push("exposure cap reached"); break; }
           const notional = Math.min(equity * (+s.position_size_pct / 100) * leverage, headroom);
           let verdict = { approve: true, reason: "AI review disabled", risk: "unknown" as string };
