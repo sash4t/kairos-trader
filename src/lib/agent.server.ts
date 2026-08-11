@@ -25,7 +25,8 @@ interface Settings {
   ai_review_enabled: boolean; scalp_enabled: boolean; scalp_tp_pct: number; scalp_sl_pct: number;
   trail_activate_pct: number; trail_dist_pct: number; max_positions: number; max_leverage: number;
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
-  paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: StrategyKey;
+  paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: StrategyKey; tp_rr?: number;
+  btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
 }
 interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number; trail_high: number | null; confidence: number }
 
