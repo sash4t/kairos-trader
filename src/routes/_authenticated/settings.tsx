@@ -163,6 +163,21 @@ function SettingsPage() {
 
           <div className="panel p-4 sm:p-5 space-y-4">
             <div>
+              <div className="text-sm font-semibold">Global emergency ROE stop</div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Hard, strategy-independent ceiling on how much a single position may lose. ROE is measured on the margin at the position&apos;s actual leverage —
+                <strong> -1.0 means the position is closed at -1% ROE</strong> (at 10x that is only a 0.1% adverse price move). It applies to all three strategies and runs before
+                every other stop. Existing ATR stops and the Pure Price Safety Line stay active; whichever triggers first closes the trade. This is not position sizing.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <NumField label="Maximum ROE Loss (%)" value={+(settings.max_roe_loss_pct ?? 1)} onChange={v => saveSettings({ max_roe_loss_pct: Math.min(100, Math.max(0.1, v)) })} step={0.1} suffix="% ROE" />
+            </div>
+          </div>
+
+          <div className="panel p-4 sm:p-5 space-y-4">
+
+            <div>
               <div className="text-sm font-semibold">BTC shock protection</div>
               <p className="mt-1 text-xs text-muted-foreground">
                 A sudden BTC drop immediately closes every open <strong>long</strong>; a sudden BTC spike closes every open <strong>short</strong>.
