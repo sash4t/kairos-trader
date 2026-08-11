@@ -14,7 +14,6 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedTradesRouteImport } from './routes/_authenticated/trades'
-import { Route as AuthenticatedStrategyRouteImport } from './routes/_authenticated/strategy'
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
 import { Route as AuthenticatedScannerRouteImport } from './routes/_authenticated/scanner'
 import { Route as AuthenticatedPositionsRouteImport } from './routes/_authenticated/positions'
@@ -47,11 +46,6 @@ const IndexRoute = IndexRouteImport.update({
 const AuthenticatedTradesRoute = AuthenticatedTradesRouteImport.update({
   id: '/trades',
   path: '/trades',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
-const AuthenticatedStrategyRoute = AuthenticatedStrategyRouteImport.update({
-  id: '/strategy',
-  path: '/strategy',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedSettingsRoute = AuthenticatedSettingsRouteImport.update({
@@ -113,7 +107,6 @@ export interface FileRoutesByFullPath {
   '/positions': typeof AuthenticatedPositionsRoute
   '/scanner': typeof AuthenticatedScannerRoute
   '/settings': typeof AuthenticatedSettingsRoute
-  '/strategy': typeof AuthenticatedStrategyRoute
   '/trades': typeof AuthenticatedTradesRoute
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
@@ -129,7 +122,6 @@ export interface FileRoutesByTo {
   '/positions': typeof AuthenticatedPositionsRoute
   '/scanner': typeof AuthenticatedScannerRoute
   '/settings': typeof AuthenticatedSettingsRoute
-  '/strategy': typeof AuthenticatedStrategyRoute
   '/trades': typeof AuthenticatedTradesRoute
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
@@ -147,7 +139,6 @@ export interface FileRoutesById {
   '/_authenticated/positions': typeof AuthenticatedPositionsRoute
   '/_authenticated/scanner': typeof AuthenticatedScannerRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
-  '/_authenticated/strategy': typeof AuthenticatedStrategyRoute
   '/_authenticated/trades': typeof AuthenticatedTradesRoute
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
@@ -165,7 +156,6 @@ export interface FileRouteTypes {
     | '/positions'
     | '/scanner'
     | '/settings'
-    | '/strategy'
     | '/trades'
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
@@ -181,7 +171,6 @@ export interface FileRouteTypes {
     | '/positions'
     | '/scanner'
     | '/settings'
-    | '/strategy'
     | '/trades'
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
@@ -198,7 +187,6 @@ export interface FileRouteTypes {
     | '/_authenticated/positions'
     | '/_authenticated/scanner'
     | '/_authenticated/settings'
-    | '/_authenticated/strategy'
     | '/_authenticated/trades'
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
@@ -252,13 +240,6 @@ declare module '@tanstack/react-router' {
       path: '/trades'
       fullPath: '/trades'
       preLoaderRoute: typeof AuthenticatedTradesRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
-    '/_authenticated/strategy': {
-      id: '/_authenticated/strategy'
-      path: '/strategy'
-      fullPath: '/strategy'
-      preLoaderRoute: typeof AuthenticatedStrategyRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/settings': {
@@ -332,7 +313,6 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedPositionsRoute: typeof AuthenticatedPositionsRoute
   AuthenticatedScannerRoute: typeof AuthenticatedScannerRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
-  AuthenticatedStrategyRoute: typeof AuthenticatedStrategyRoute
   AuthenticatedTradesRoute: typeof AuthenticatedTradesRoute
 }
 
@@ -341,7 +321,6 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedPositionsRoute: AuthenticatedPositionsRoute,
   AuthenticatedScannerRoute: AuthenticatedScannerRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
-  AuthenticatedStrategyRoute: AuthenticatedStrategyRoute,
   AuthenticatedTradesRoute: AuthenticatedTradesRoute,
 }
 
