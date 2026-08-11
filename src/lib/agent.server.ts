@@ -278,13 +278,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
             indicators: detail as never,
             safety_line: safetyLine, action_line: actionLine,
             timeframe: isTrendline ? execTf : INTERVAL,
-            initial_stop: initialStop, risk_pct: isTrendline ? riskPct : null,
+            initial_stop: initialStop, risk_pct: null,
           });
           if (insErr) { report.errors.push(`record ${target.meta.name}: ${insErr.message}`); continue; }
           positions.push({ id: crypto.randomUUID(), coin: target.meta.name, side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, trail_high: entry, confidence }); held.add(target.meta.name); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${side.toUpperCase()} ${target.meta.name} @ ${entry.toFixed(6)} · size ${size} · stop ${sl.toPrecision(6)} · risk ${isTrendline ? riskPct : +s.position_size_pct}% · ${reason}`, {
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${side.toUpperCase()} ${target.meta.name} @ ${entry.toFixed(6)} · size ${size} · stop ${sl.toPrecision(6)} · ${isTrendline ? `leverage ${leverage}x (market max)` : `risk ${+s.position_size_pct}%`} · ${reason}`, {
             agent: "server", live: isLive, strategy: strategyKey, timeframe: isTrendline ? execTf : INTERVAL,
-            direction: side, entry, initialStop, currentStop: sl, riskPct: isTrendline ? riskPct : null, size,
+            direction: side, entry, initialStop, currentStop: sl, leverage, maxLeverageUsed: isTrendline ? resolveMaxLeverage(target.meta.maxLeverage) : null, size,
             actionLine, safetyLine, detail,
           });
         }
