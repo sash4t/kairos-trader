@@ -44,9 +44,19 @@ export function buildLines(
   const pivots = type === "bullish" ? lows : highs;
   if (pivots.length < 2) return [];
 
-  let anchor = pivots.reduce((best, p) =>
+  // The initial anchor is the extreme pivot within the rolling lookback window,
+  // not the all-time extreme of whatever history happened to be loaded.
+  const lookback = Number.isFinite(cfg.anchorLookbackBars) && cfg.anchorLookbackBars > 0
+    ? cfg.anchorLookbackBars
+    : bars.length;
+  const windowStart = Math.max(0, Math.min(endIndex, bars.length - 1) - lookback + 1);
+  const recent = pivots.filter((p) => p.i >= windowStart);
+  const anchorPool = recent.length >= 2 ? recent : pivots;
+
+  let anchor = anchorPool.reduce((best, p) =>
     type === "bullish" ? (p.price < best.price ? p : best) : (p.price > best.price ? p : best),
   );
+
 
   const lines: TrendLine[] = [];
   let guard = 0;

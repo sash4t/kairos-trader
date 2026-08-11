@@ -290,6 +290,39 @@ export type Database = {
         }
         Relationships: []
       }
+      trendline_broken_lines: {
+        Row: {
+          broken_at: string
+          coin: string
+          created_at: string
+          id: string
+          line_id: string
+          strategy_key: string
+          timeframe: string
+          user_id: string
+        }
+        Insert: {
+          broken_at?: string
+          coin: string
+          created_at?: string
+          id?: string
+          line_id: string
+          strategy_key: string
+          timeframe: string
+          user_id: string
+        }
+        Update: {
+          broken_at?: string
+          coin?: string
+          created_at?: string
+          id?: string
+          line_id?: string
+          strategy_key?: string
+          timeframe?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
