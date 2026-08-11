@@ -11,6 +11,7 @@ import { LiveTradingPanel } from "@/components/LiveTradingPanel";
 import { resetPaperAccount } from "@/lib/paper.functions";
 import { Loader2, RotateCcw } from "lucide-react";
 import { STRATEGY_OPTIONS, type StrategyKey } from "@/lib/scalp";
+import { TrendlineBreakPanel } from "@/components/TrendlineBreakPanel";
 
 export const Route = createFileRoute("/_authenticated/settings")({ component: SettingsPage });
 
@@ -93,6 +94,8 @@ function SettingsPage() {
         </div>
         {savingStrategy && <div className="text-xs text-muted-foreground">Saving strategy…</div>}
       </div>
+
+      {strategyKey === "trendline-break" && <TrendlineBreakPanel />}
 
       <div className="panel p-4 sm:p-5 space-y-4">
         <div className="text-sm font-semibold">Hyperliquid wallet address (read-only)</div>
