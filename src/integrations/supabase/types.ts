@@ -45,6 +45,9 @@ export type Database = {
         Row: {
           ai_review_enabled: boolean
           bot_enabled: boolean
+          btc_shock_enabled: boolean
+          btc_shock_pct: number
+          btc_shock_window_min: number
           daily_loss_pct: number
           execution_timeframe: string
           kill_switch_engaged: boolean
@@ -79,6 +82,9 @@ export type Database = {
         Insert: {
           ai_review_enabled?: boolean
           bot_enabled?: boolean
+          btc_shock_enabled?: boolean
+          btc_shock_pct?: number
+          btc_shock_window_min?: number
           daily_loss_pct?: number
           execution_timeframe?: string
           kill_switch_engaged?: boolean
@@ -113,6 +119,9 @@ export type Database = {
         Update: {
           ai_review_enabled?: boolean
           bot_enabled?: boolean
+          btc_shock_enabled?: boolean
+          btc_shock_pct?: number
+          btc_shock_window_min?: number
           daily_loss_pct?: number
           execution_timeframe?: string
           kill_switch_engaged?: boolean
