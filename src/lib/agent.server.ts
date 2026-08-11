@@ -11,11 +11,10 @@ const INTERVAL = "1h";
 const INTERVAL_MS = 60 * 60 * 1000;
 const BARS = 230;
 const HTF_BARS = 240;
-// Process a bounded batch per cycle, but persist the cursor so every eligible
-// pair is visited exactly once per scan pass (subject to eligibility changes).
+// Bounded work per cycle. The cursor below persists between cycles so the
+// entire eligible universe is covered without relying on wall-clock offsets.
 const SCAN_PER_CYCLE = 35;
 const MIN_24H_VOLUME = 100_000;
-const SCAN_CURSOR_KEY = "__scanner__";
 
 type Level = "info" | "warn" | "error" | "trade" | "ai";
 async function hl<T>(body: unknown): Promise<T> {
@@ -33,6 +32,7 @@ interface Settings {
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
   paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: StrategyKey; tp_rr?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
+  last_cycle_note?: string | null;
 }
 interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number; trail_high: number | null; confidence: number }
 
@@ -52,18 +52,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
   const [meta, ctxs] = await hl<[{ universe: AssetMeta[] }, AssetCtx[]]>({ type: "metaAndAssetCtxs" });
   const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
   const liquid = meta.universe.map((m, i) => ({ meta: m, ctx: ctxs[i] })).filter((x) => x.ctx && +x.ctx.dayNtlVlm > MIN_24H_VOLUME && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
-
-  // A stable pair list is created for this cycle. The cursor is persisted in
-  // bot_settings so a restart/redeploy cannot jump back to a time-derived
-  // offset and repeatedly scan the same symbols.
-  const eligibleNames = liquid.map(x => x.meta.name);
-  const scannerState = await supabaseAdmin.from("bot_settings").select("user_id,last_cycle_note").eq("user_id", SCAN_CURSOR_KEY).maybeSingle();
-  let cursor = 0;
-  const cursorMatch = scannerState.data?.last_cycle_note?.match(/scanner_cursor=(\d+)/);
-  if (cursorMatch) cursor = Math.max(0, Math.min(Number(cursorMatch[1]), Math.max(0, eligibleNames.length - 1)));
-  const scanCount = Math.min(SCAN_PER_CYCLE, liquid.length);
-  const scanTargets = Array.from({ length: scanCount }, (_, i) => liquid[(cursor + i) % liquid.length]);
-  const nextCursor = liquid.length ? (cursor + scanCount) % liquid.length : 0;
 
   const { readHlCreds, loadAssetIndex, marketOrder, setLeverage, fetchLiveAccount } = await import("./hyperliquidExchange.server");
   const creds = readHlCreds();
@@ -114,6 +102,18 @@ export async function runTradingCycle(): Promise<CycleReport> {
       }
       const equityNow = isLive && liveAcct ? liveAcct.equity : +s.paper_equity;
       const held = new Set(positions.map(p => p.coin));
+
+      // Each user's cursor is persisted in last_cycle_note. This means a restart,
+      // deploy, or variable cycle timing resumes from the next pair instead of
+      // recomputing a wall-clock offset and repeating/skipping symbols.
+      const eligibleCount = liquid.length;
+      const match = s.last_cycle_note?.match(/scanner_cursor=(\d+)/);
+      const cursor = eligibleCount ? Math.max(0, Math.min(Number(match?.[1] ?? 0), eligibleCount - 1)) : 0;
+      const scanCount = Math.min(SCAN_PER_CYCLE, eligibleCount);
+      const scanTargets = Array.from({ length: scanCount }, (_, i) => liquid[(cursor + i) % eligibleCount]);
+      const nextCursor = eligibleCount ? (cursor + scanCount) % eligibleCount : 0;
+      const scanPass = eligibleCount ? Math.floor(cursor / scanCount) : 0;
+      notes.push(`scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
 
       if (s.scalp_enabled && canTrade && equityNow > 0 && positions.length < +s.max_positions) {
         for (const target of scanTargets) {
