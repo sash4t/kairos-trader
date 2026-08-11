@@ -1,5 +1,6 @@
-import { evaluateMultiTimeframeSignal, STRATEGY_PARAMS, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
+import { evaluateMultiTimeframeSignal, type Bar } from "./strategy";
 import { evaluateTrendBotSignal, TRENDBOT_STRATEGY_KEY } from "./trendbotStrategy";
+import { TRENDLINE_STRATEGY_KEY } from "./trendline/types";
 
 export type ScalpSide = "long" | "short";
 export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDBOT_STRATEGY_KEY;
@@ -10,8 +11,16 @@ export interface ScalpSignal {
 }
 
 export const STRATEGY_OPTIONS = [
-  { key: TRENDLINE_STRATEGY_KEY, name: "Trendline Price Action", description: "Top-down trend lines: Daily → 4H → 1H. Daily sets the major bias, 4H confirms it, and 1H provides the action-line break." },
-  { key: TRENDBOT_STRATEGY_KEY, name: "TrendBot Momentum", description: "EMA20/50 + RSI14 + MACD momentum, long and short." },
+  {
+    key: TRENDLINE_STRATEGY_KEY,
+    name: "Trendline Strategy - Pure Price",
+    description: "Pure price action: Monthly → Weekly → Daily → 4H → 1H top-down trend lines, Action Line breaks and opposing Safety Line trailing stop. No indicators or fixed take-profit.",
+  },
+  {
+    key: TRENDBOT_STRATEGY_KEY,
+    name: "TrendBot Momentum",
+    description: "EMA20/50 + RSI14 + MACD momentum, long and short.",
+  },
 ] as const;
 
 function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
