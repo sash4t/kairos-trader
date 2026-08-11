@@ -1,8 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { useBot } from "@/lib/botContext";
-import { MODE_MIN_CONFIDENCE } from "@/lib/strategy";
 import { TB_DEFAULTS, TB_TIMEFRAMES, parseTimeframes } from "@/lib/strategies/trendlineBreak";
+import { TRENDLINE_STRATEGY_KEY } from "@/lib/strategy";
 
 export const Route = createFileRoute("/_authenticated/strategy")({ component: Strategy });
 
@@ -31,7 +31,8 @@ function Strategy() {
   const { settings, saveSettings } = useBot();
   if (!settings) return <div className="p-8 text-sm text-muted-foreground">Loading strategy settings…</div>;
   const s = settings as any;
-  const isTrendline = s.strategy_key === "trendline-break";
+  const isPriceAction = s.strategy_key === TRENDLINE_STRATEGY_KEY;
+  const isTrendlineBreak = s.strategy_key === "trendline-break";
   const tf = parseTimeframes(s.tb_timeframes);
   const set = (patch: any) => saveSettings(patch);
 
@@ -39,27 +40,34 @@ function Strategy() {
     <div className="space-y-8 p-4 sm:p-6 lg:p-8">
       <div>
         <h1 className="text-xl font-semibold sm:text-2xl">Strategy & risk</h1>
-        <p className="text-sm text-muted-foreground">Select the trading model and configure its risk controls.</p>
+        <p className="text-sm text-muted-foreground">Select the trading model. Only the selected strategy is used for new entries.</p>
       </div>
 
       <section className="panel space-y-4 p-4 sm:p-5">
         <div>
-          <div className="text-sm font-semibold">Selectable strategy</div>
-          <p className="mt-1 text-xs text-muted-foreground">Trendline Price Action is the transcript-based pure price-action strategy. Other legacy strategies remain available only if explicitly retained by your installation.</p>
+          <div className="text-sm font-semibold">Trading strategy</div>
+          <p className="mt-1 text-xs text-muted-foreground">The two trendline strategies are separate engines. Trendline Break is the transcript-based chained-line system; Trendline Price Action is the existing multi-timeframe price-action strategy.</p>
         </div>
-        <button onClick={() => set({ strategy_key: "trendline-break" })}
-          className={`w-full rounded-md border p-4 text-left ${isTrendline ? "border-primary bg-primary/10" : "border-panel-border bg-background hover:bg-accent"}`}>
-          <div className="text-sm font-semibold">Trendline Price Action</div>
-          <div className="mt-1 text-xs text-muted-foreground">Weekly → Daily → 4H → 1H → 30m → 15m · action-line entries · opposing safety-line trailing stop · no indicators required.</div>
-        </button>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <button onClick={() => set({ strategy_key: TRENDLINE_STRATEGY_KEY })}
+            className={`rounded-md border p-4 text-left ${isPriceAction ? "border-primary bg-primary/10" : "border-panel-border bg-background hover:bg-accent"}`}>
+            <div className="text-sm font-semibold">Trendline Price Action</div>
+            <div className="mt-1 text-xs text-muted-foreground">Existing strategy · Weekly → Daily → 4H → 1H context with 15m action trigger and price-action confirmation.</div>
+          </button>
+          <button onClick={() => set({ strategy_key: "trendline-break" })}
+            className={`rounded-md border p-4 text-left ${isTrendlineBreak ? "border-primary bg-primary/10" : "border-panel-border bg-background hover:bg-accent"}`}>
+            <div className="text-sm font-semibold">Trendline Break</div>
+            <div className="mt-1 text-xs text-muted-foreground">Transcript system · chained trendlines · action-line entry · opposing safety-line trailing stop · Weekly → 15m.</div>
+          </button>
+        </div>
       </section>
 
-      {isTrendline && (
+      {isTrendlineBreak && (
         <>
           <section className="panel space-y-5 p-4 sm:p-5">
             <div>
-              <div className="text-sm font-semibold">Trendline cascade</div>
-              <p className="mt-1 text-xs text-muted-foreground">Monthly is intentionally excluded because many Hyperliquid pairs do not have enough monthly history. The default execution timeframe is 15m.</p>
+              <div className="text-sm font-semibold">Trendline Break cascade</div>
+              <p className="mt-1 text-xs text-muted-foreground">Monthly is intentionally excluded because many Hyperliquid pairs do not have enough monthly history. Default execution timeframe is 15m.</p>
             </div>
             <div className="flex flex-wrap gap-2">
               {TB_TIMEFRAMES.map(t => (
@@ -74,18 +82,18 @@ function Strategy() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
               <NumField label="Pivot strength" value={Number(s.tb_pivot_strength ?? TB_DEFAULTS.pivotStrength)} onChange={v => set({ tb_pivot_strength: Math.min(10, Math.max(2, Math.round(v))) })} />
               <NumField label="Risk per trade" value={Number(s.tb_risk_pct ?? TB_DEFAULTS.riskPct)} onChange={v => set({ tb_risk_pct: Math.min(10, Math.max(0.05, v)) })} step={0.25} suffix="% equity" />
-              <NumField label="Position size cap" value={Number(s.tb_position_size_pct ?? TB_DEFAULTS.positionSizePct)} onChange={v => set({ tb_position_size_pct: Math.min(100, Math.max(0.1, v)) } as any)} step={0.5} suffix="% equity" />
+              <NumField label="Position size cap" value={Number(s.tb_position_size_pct ?? TB_DEFAULTS.positionSizePct)} onChange={v => set({ tb_position_size_pct: Math.min(100, Math.max(0.1, v)) })} step={0.5} suffix="% equity" />
               <NumField label="Line refresh" value={Number(s.tb_refresh_min ?? TB_DEFAULTS.refreshMin)} onChange={v => set({ tb_refresh_min: Math.min(1440, Math.max(1, Math.round(v))) })} suffix="minutes" />
             </div>
             <div className="rounded-md border border-panel-border bg-muted/20 p-3 text-xs text-muted-foreground">
-              <strong className="text-foreground">Position sizing:</strong> the bot calculates the size required to risk your configured risk % at the safety-line stop, then caps it at your configured position-size allocation and portfolio exposure limit. This keeps risk and size independently adjustable.
+              <strong className="text-foreground">Position sizing:</strong> size is calculated from the configured risk % and the safety-line stop, then capped by the configured position-size allocation and portfolio exposure limit.
             </div>
           </section>
 
           <section className="panel space-y-5 p-4 sm:p-5">
             <div>
               <div className="text-sm font-semibold">BTC emergency protection</div>
-              <p className="mt-1 text-xs text-muted-foreground">A BTC move against the position is treated as a high-priority portfolio risk event before normal strategy exits.</p>
+              <p className="mt-1 text-xs text-muted-foreground">A BTC move against the position is a high-priority portfolio risk event before normal strategy exits.</p>
             </div>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <label className="flex items-center gap-3 rounded-md border border-panel-border bg-background px-3 py-2">
@@ -96,17 +104,24 @@ function Strategy() {
               <NumField label="BTC shock lookback" value={Number(s.btc_shock_window_min ?? 240)} onChange={v => set({ btc_shock_window_min: Math.min(1440, Math.max(1, Math.round(v))) })} suffix="minutes" />
             </div>
             <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
-              Default: <strong>1.5% within 240 minutes (4 hours)</strong>. The detector uses rolling 1-minute highs/lows, so a 1.5% drop in 15 minutes, 1 hour, 2 hours, 3 hours, or 4 hours can trigger. BTC down closes longs; BTC up closes shorts. Aligned positions remain open.
+              Default: <strong>1.5% within 240 minutes (4 hours)</strong>. The detector uses rolling 1-minute highs/lows. BTC down closes longs; BTC up closes shorts. Aligned positions remain open.
             </div>
           </section>
 
           <section className="panel space-y-3 p-4 sm:p-5">
             <div className="text-sm font-semibold">Leverage</div>
             <div className="rounded-md border border-bear/40 bg-bear/5 p-3 text-xs">
-              <strong>Trendline trades automatically use the maximum leverage supported by each Hyperliquid asset.</strong> The generic Max Leverage setting does not cap this strategy. Leverage changes buying power, not the configured risk budget.
+              <strong>Trendline Break automatically uses the maximum leverage supported by each Hyperliquid asset.</strong> The generic Max Leverage setting does not cap this strategy. Leverage changes buying power, not the configured risk budget.
             </div>
           </section>
         </>
+      )}
+
+      {isPriceAction && (
+        <section className="panel space-y-4 p-4 sm:p-5">
+          <div className="text-sm font-semibold">Trendline Price Action</div>
+          <p className="text-xs text-muted-foreground">This is the existing strategy. Trendline Break is the separate selectable transcript implementation above.</p>
+        </section>
       )}
 
       <section className="panel space-y-5 p-4 sm:p-5">
@@ -119,21 +134,6 @@ function Strategy() {
           <NumField label="Min signal confidence" value={settings.min_confidence} onChange={v => set({ min_confidence: Math.min(100, Math.max(50, v)) })} step={5} suffix="%" />
         </div>
       </section>
-
-      {!isTrendline && (
-        <section className="panel space-y-4 p-4 sm:p-5">
-          <div className="text-sm font-semibold">Legacy strategy mode</div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            {(["conservative", "balanced", "aggressive"] as const).map(m => (
-              <button key={m} onClick={() => set({ strategy_mode: m, min_confidence: MODE_MIN_CONFIDENCE[m] })}
-                className={`rounded-md border p-4 text-left ${settings.strategy_mode === m ? "border-primary bg-primary/10" : "border-panel-border bg-background hover:bg-accent"}`}>
-                <div className="text-sm font-semibold capitalize">{m}</div>
-                <div className="mt-1 text-xs text-muted-foreground">{MODE_MIN_CONFIDENCE[m]}% minimum confidence.</div>
-              </button>
-            ))}
-          </div>
-        </section>
-      )}
     </div>
   );
 }
