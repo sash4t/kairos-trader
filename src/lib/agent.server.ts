@@ -122,10 +122,25 @@ export async function runTradingCycle(): Promise<CycleReport> {
         }
       }
       let realised = 0;
+      // BTC shock protection runs BEFORE ordinary Safety Line processing.
+      let shockDir: ShockDirection | null = null;
+      if (positions.length) {
+        const btcBars = await loadInterval("BTC", "5m", 60);
+        if (btcBars && btcBars.length > 2) {
+          const shock = detectBtcShock(btcBars, { enabled: s.btc_shock_enabled !== false, thresholdPct: +(s.btc_shock_pct ?? DEFAULT_BTC_SHOCK.thresholdPct), windowMin: +(s.btc_shock_window_min ?? DEFAULT_BTC_SHOCK.windowMin) });
+          shockDir = shock.direction;
+          if (shockDir) {
+            notes.push(`BTC shock ${shockDir} ${shock.movePct.toFixed(2)}%`);
+            await log(s.user_id, "warn", `BTC shock ${shockDir} (${shock.movePct.toFixed(2)}% over ${s.btc_shock_window_min ?? DEFAULT_BTC_SHOCK.windowMin}m) — flattening all ${sideToFlatten(shockDir).toUpperCase()} positions.`, { agent: "server", btcShock: shock, live: isLive });
+          }
+        }
+      }
       for (const p of [...positions]) {
         const markStr = mids[p.coin]; if (!markStr) continue; const mark = +markStr;
-        let reason: string | null = null;
-        if (isTrendline) {
+        const forced = shockDir && p.side === sideToFlatten(shockDir) ? `btc_shock_${shockDir}` : null;
+        let reason: string | null = forced;
+        if (forced) { /* emergency directional flattening skips trailing work */ }
+        else if (isTrendline) {
           // The Safety Line is the stop: re-derive it from live structure and
           // ratchet the stop toward it. It can only ever tighten.
           const ladder = await loadLadder(p.coin, execTf);
@@ -144,6 +159,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           reason = exitReasonFor(p.side, mark, p.stop_loss, p.take_profit ?? (p.side === "long" ? Infinity : 0), p.entry_price);
         }
         if (!reason) continue;
+
         let exitPrice = mark; let exitSize = p.size;
         if (isLive && creds) { const asset = (await assets()).get(p.coin); if (!asset) { report.errors.push(`${p.coin}: unknown asset`); continue; } try { const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live close for ${p.coin} did not fill — retrying next cycle.`); continue; } exitPrice = fill.avgPrice || mark; exitSize = fill.size; if (exitSize < p.size * 0.99) { const remaining = p.size - exitSize; const partialPnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize; p.size = remaining; p.notional = remaining * p.entry_price; await supabaseAdmin.from("paper_positions").update({ size: remaining, notional: p.notional }).eq("id", p.id); await log(s.user_id, "trade", `LIVE PARTIAL CLOSE ${p.coin} ${exitSize} @ ${exitPrice.toFixed(6)} · PnL ${partialPnl >= 0 ? "+" : ""}${partialPnl.toFixed(2)} USDC`, { agent: "server", live: true }); continue; } } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Live close failed for ${p.coin}: ${msg}`); continue; } }
         const pnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize;
