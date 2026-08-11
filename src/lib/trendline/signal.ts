@@ -93,8 +93,10 @@ export function evaluateTrendline(input: SignalInput): { signal: TrendlineSignal
     signal: {
       coin, side, timeframe: execution, price,
       actionLine: { type: actionLine.l.type, value: actionLine.v },
+      actionLineId: actionLine.l.id,
       safetyLine: { type: safety.type, value: safetyValue, timeframe: safety.timeframe },
       initialStop,
+
       // Structure quality, not an indicator score.
       confidence: Math.min(95, 60 + actionLine.l.touches * 5 + safety.touches * 5),
       reasons,

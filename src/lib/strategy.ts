@@ -140,10 +140,19 @@ export function evaluateMultiTimeframeSignal(coin: string, daily: Bar[], fourHou
   return { coin, side, confidence:Math.min(98,confidence), reasons, price, atrValue, indicators, actionLine, safetyLine };
 }
 
-/** Backwards-compatible single-timeframe evaluator. */
+/**
+ * @deprecated Fail-closed. It used to feed the SAME bars as Daily, 4H and 1H,
+ * which fabricated multi-timeframe "alignment" out of one timeframe. It now
+ * always returns no signal — use evaluateMultiTimeframeSignal with genuinely
+ * distinct Daily / 4H / 1H series.
+ */
 export function evaluateSignal(coin: string, bars: Bar[]): Signal {
-  return evaluateMultiTimeframeSignal(coin, bars, bars, bars);
+  return {
+    coin, side: null, confidence: 0, price: bars.at(-1)?.c ?? 0, atrValue: 0, indicators: {},
+    reasons: ["evaluateSignal is deprecated: single-timeframe input cannot produce Daily → 4H → 1H alignment"],
+  };
 }
+
 
 const CORRELATION_BUCKETS: Record<string,string> = {
   BTC:"btc",ETH:"eth",SOL:"l1",AVAX:"l1",NEAR:"l1",APT:"l1",SUI:"l1",SEI:"l1",TIA:"l1",INJ:"l1",ARB:"l2",OP:"l2",MATIC:"l2",STRK:"l2",DOGE:"meme",SHIB:"meme",PEPE:"meme",WIF:"meme",BONK:"meme",FLOKI:"meme",LINK:"defi",UNI:"defi",AAVE:"defi",MKR:"defi",CRV:"defi",COMP:"defi",

@@ -38,6 +38,11 @@ export interface TrendlineConfig {
   penetrationTolerancePct: number;
   minTouches: number;
   safetyBufferPct: number;
+  /**
+   * Rolling window (in bars) the FIRST anchor pivot may be chosen from. Without
+   * it the chain always anchors to the all-time extreme of the loaded history.
+   */
+  anchorLookbackBars: number;
 }
 
 export const DEFAULT_TRENDLINE_CONFIG: TrendlineConfig = {
@@ -47,7 +52,9 @@ export const DEFAULT_TRENDLINE_CONFIG: TrendlineConfig = {
   penetrationTolerancePct: 0.35,
   minTouches: 2,
   safetyBufferPct: 0.15,
+  anchorLookbackBars: 200,
 };
+
 
 /** Canonical selectable pure price-action strategy. */
 export const TRENDLINE_STRATEGY_KEY = "trendline_pure_price" as const;
@@ -64,6 +71,9 @@ export interface TrendlineSignal {
   timeframe: Timeframe;
   price: number;
   actionLine: { type: LineType; value: number } | null;
+  /** Id of the broken Action Line, persisted so a break can only ever fire once. */
+  actionLineId?: string | null;
+
   safetyLine: { type: LineType; value: number; timeframe: Timeframe } | null;
   initialStop: number | null;
   confidence: number;

@@ -3,8 +3,9 @@ import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 import { candlesToBars, bucket, type Bar } from "./strategy";
 import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
-import { normalizeStrategyKey, PURE_PRICE_STRATEGY_KEY, type StrategyKey } from "./strategies";
+import { normalizeStrategyKey, PURE_PRICE_STRATEGY_KEY, ADAPTIVE_STRATEGY_KEY, TRENDBOT_MOMENTUM_KEY, type StrategyKey } from "./strategies";
 import { detectBtcShock, sideToFlatten, DEFAULT_BTC_SHOCK, type ShockDirection } from "./btcShock";
+import { checkDailyLoss, isMaxHoldExpired, utcDayStart, DAILY_LOSS_EXIT_REASON, MAX_HOLD_EXIT_REASON } from "./riskGuards";
 import {
   DEFAULT_TRENDLINE_CONFIG, TIMEFRAME_MS, ladderFor, evaluateTrendline,
   currentSafetyLine, ratchetSafetyStop, safetyExitReason, sizeAtMaxLeverage, resolveMaxLeverage,
@@ -15,12 +16,21 @@ const HL_INFO = "https://api.hyperliquid.xyz/info";
 const INTERVAL = "1h";
 const INTERVAL_MS = 60 * 60 * 1000;
 const BARS = 230;
+/**
+ * Adaptive aggregates 1H bars up to Daily and 4H and needs >= 80 bars at each
+ * level, so it gets its own deep history request (80 Daily bars = 1,920 hours).
+ */
+const ADAPTIVE_BARS = 2400;
+const ADAPTIVE_MIN_BARS = 2000;
 const SCAN_PER_CYCLE = 35;
 /** Multi-timeframe scans cost 5 requests per coin, so the trendline strategy scans fewer per cycle. */
 const TRENDLINE_SCAN_PER_CYCLE = 8;
+/** Deep adaptive history is expensive per coin, so fewer coins are scanned per cycle. */
+const ADAPTIVE_SCAN_PER_CYCLE = 12;
 const MIN_24H_VOLUME = 100_000;
 /** Bars requested per timeframe when building the top-down ladder. */
 const LADDER_BARS = 300;
+
 
 type Level = "info" | "warn" | "error" | "trade" | "ai";
 async function hl<T>(body: unknown): Promise<T> {
@@ -40,7 +50,7 @@ interface Settings {
   execution_timeframe?: string; safety_buffer_pct?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
 }
-interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number | null; trail_high: number | null; confidence: number }
+interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number | null; trail_high: number | null; confidence: number; opened_at: number }
 
 function trendlineCfg(s: Settings): TrendlineConfig {
   return { ...DEFAULT_TRENDLINE_CONFIG, safetyBufferPct: +(s.safety_buffer_pct ?? DEFAULT_TRENDLINE_CONFIG.safetyBufferPct) };
@@ -73,7 +83,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
   const barCache = new Map<string, Bar[]>();
   /** Fetch confirmed bars for one coin/interval. The in-progress candle is always dropped (no look-ahead). */
   const loadInterval = async (coin: string, interval: Timeframe, count: number): Promise<Bar[] | null> => {
-    const key = `${coin}:${interval}`;
+    const key = `${coin}:${interval}:${count}`;
     if (barCache.has(key)) return barCache.get(key)!;
     try {
       const end = Date.now();
@@ -83,7 +93,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
       return bars;
     } catch { return null; }
   };
-  const loadBars = async (coin: string): Promise<Bar[] | null> => loadInterval(coin, INTERVAL as Timeframe, BARS);
+  /**
+   * 1H history for the indicator strategies. Adaptive aggregates to Daily/4H and
+   * needs >= 80 bars there, so it requests a much deeper window than TrendBot.
+   */
+  const loadBars = async (coin: string, strategyKey: StrategyKey): Promise<Bar[] | null> =>
+    loadInterval(coin, INTERVAL as Timeframe, strategyKey === ADAPTIVE_STRATEGY_KEY ? ADAPTIVE_BARS : BARS);
+
   /** Full Monthly → … → execution ladder for one coin. */
   const loadLadder = async (coin: string, execution: Timeframe): Promise<Partial<Record<Timeframe, Bar[]>>> => {
     const out: Partial<Record<Timeframe, Bar[]>> = {};
@@ -107,7 +123,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       let canTrade = !isLive || !!creds;
       const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
       const { data: openRaw } = await supabaseAdmin.from("paper_positions").select("*").eq("user_id", s.user_id).eq("status", "open");
-      let positions = (openRaw ?? []).map((p) => ({ id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional, leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss, take_profit: p.take_profit == null ? null : +p.take_profit, trail_high: p.trail_high == null ? null : +p.trail_high, confidence: +p.confidence })) as PositionRow[];
+      let positions = (openRaw ?? []).map((p) => ({ id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional, leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss, take_profit: p.take_profit == null ? null : +p.take_profit, trail_high: p.trail_high == null ? null : +p.trail_high, confidence: +p.confidence, opened_at: p.opened_at ? new Date(p.opened_at).getTime() : Date.now() })) as PositionRow[];
       let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
       if (isLive && creds) {
         try { liveAcct = await fetchLiveAccount(creds.accountAddress); }
@@ -124,6 +140,66 @@ export async function runTradingCycle(): Promise<CycleReport> {
         }
       }
       let realised = 0;
+
+      /** Single exit path: live closes always go out as reduce-only market orders first. */
+      const closeOne = async (p: PositionRow, reason: string): Promise<boolean> => {
+        const markStr = mids[p.coin];
+        const mark = markStr ? +markStr : p.entry_price;
+        let exitPrice = mark; let exitSize = p.size;
+        if (isLive && creds) {
+          const asset = (await assets()).get(p.coin);
+          if (!asset) { report.errors.push(`${p.coin}: unknown asset`); return false; }
+          try {
+            const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 });
+            if (fill.size <= 0) { await log(s.user_id, "warn", `Live close for ${p.coin} did not fill — retrying next cycle.`); return false; }
+            exitPrice = fill.avgPrice || mark; exitSize = fill.size;
+            if (exitSize < p.size * 0.99) {
+              const remaining = p.size - exitSize;
+              const partialPnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize;
+              p.size = remaining; p.notional = remaining * p.entry_price;
+              await supabaseAdmin.from("paper_positions").update({ size: remaining, notional: p.notional }).eq("id", p.id);
+              await log(s.user_id, "trade", `LIVE PARTIAL CLOSE ${p.coin} ${exitSize} @ ${exitPrice.toFixed(6)} · PnL ${partialPnl >= 0 ? "+" : ""}${partialPnl.toFixed(2)} USDC`, { agent: "server", live: true });
+              return false;
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            report.errors.push(`close ${p.coin}: ${msg}`);
+            await log(s.user_id, "error", `Live close failed for ${p.coin}: ${msg}`);
+            return false;
+          }
+        }
+        const pnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize;
+        realised += pnl;
+        await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: exitPrice, exit_reason: reason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id);
+        positions = positions.filter((x) => x.id !== p.id);
+        report.closed++;
+        await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${exitPrice.toFixed(6)} · PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · ${reason}`, { agent: "server", reason, live: isLive, stop: p.stop_loss });
+        return true;
+      };
+
+      // ---- Daily loss circuit breaker (applies to every strategy, both modes) ----
+      const modeName = isLive ? "live" : "paper";
+      const unrealisedNow = () => {
+        if (isLive && liveAcct) return liveAcct.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
+        let u = 0; for (const p of positions) { const m = mids[p.coin]; if (!m) continue; u += p.side === "long" ? (+m - p.entry_price) * p.size : (p.entry_price - +m) * p.size; }
+        return u;
+      };
+      const equityBefore = isLive && liveAcct ? liveAcct.accountValue : +s.paper_equity + unrealisedNow();
+      const { data: baseRows } = await supabaseAdmin.from("equity_snapshots").select("equity")
+        .eq("user_id", s.user_id).eq("mode", modeName)
+        .lte("ts", new Date(utcDayStart()).toISOString())
+        .order("ts", { ascending: false }).limit(1);
+      const dayStartEquity = baseRows && baseRows.length ? +baseRows[0].equity : equityBefore;
+      const dailyGuard = checkDailyLoss(dayStartEquity, equityBefore, +s.daily_loss_pct);
+      if (dailyGuard.breached) {
+        await log(s.user_id, "warn", `Daily loss limit hit (${dailyGuard.dayPnlPct.toFixed(2)}% vs limit ${+s.daily_loss_pct}%) — flattening everything and disabling the bot for today.`, { agent: "server", live: isLive, dayStartEquity, equity: equityBefore, dayPnl: dailyGuard.dayPnl });
+        for (const p of [...positions]) await closeOne(p, DAILY_LOSS_EXIT_REASON);
+        if (!isLive) { await supabaseAdmin.from("bot_settings").update({ paper_equity: +s.paper_equity + realised }).eq("user_id", s.user_id); s.paper_equity = +s.paper_equity + realised; }
+        await supabaseAdmin.from("equity_snapshots").insert({ user_id: s.user_id, equity: isLive ? equityBefore : +s.paper_equity, realized_pnl: realised, unrealized_pnl: 0, mode: modeName });
+        await supabaseAdmin.from("bot_settings").update({ bot_enabled: false, last_cycle_at: new Date().toISOString(), last_cycle_note: `daily loss limit ${dailyGuard.dayPnlPct.toFixed(2)}% — bot disabled` }).eq("user_id", s.user_id);
+        continue;
+      }
+
       // BTC shock protection runs BEFORE ordinary Safety Line processing.
       let shockDir: ShockDirection | null = null;
       if (positions.length) {
@@ -139,9 +215,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
       }
       for (const p of [...positions]) {
         const markStr = mids[p.coin]; if (!markStr) continue; const mark = +markStr;
-        const forced = shockDir && p.side === sideToFlatten(shockDir) ? `btc_shock_${shockDir}` : null;
+        const forced = shockDir && p.side === sideToFlatten(shockDir)
+          ? `btc_shock_${shockDir}`
+          : isMaxHoldExpired(strategyKey, p.opened_at) ? MAX_HOLD_EXIT_REASON : null;
         let reason: string | null = forced;
-        if (forced) { /* emergency directional flattening skips trailing work */ }
+        if (forced) { /* emergency / time-based exits skip trailing work */ }
         else if (isTrendline) {
           // The Safety Line is the stop: re-derive it from live structure and
           // ratchet the stop toward it. It can only ever tighten.
@@ -161,20 +239,16 @@ export async function runTradingCycle(): Promise<CycleReport> {
           reason = exitReasonFor(p.side, mark, p.stop_loss, p.take_profit ?? (p.side === "long" ? Infinity : 0), p.entry_price);
         }
         if (!reason) continue;
-
-        let exitPrice = mark; let exitSize = p.size;
-        if (isLive && creds) { const asset = (await assets()).get(p.coin); if (!asset) { report.errors.push(`${p.coin}: unknown asset`); continue; } try { const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live close for ${p.coin} did not fill — retrying next cycle.`); continue; } exitPrice = fill.avgPrice || mark; exitSize = fill.size; if (exitSize < p.size * 0.99) { const remaining = p.size - exitSize; const partialPnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize; p.size = remaining; p.notional = remaining * p.entry_price; await supabaseAdmin.from("paper_positions").update({ size: remaining, notional: p.notional }).eq("id", p.id); await log(s.user_id, "trade", `LIVE PARTIAL CLOSE ${p.coin} ${exitSize} @ ${exitPrice.toFixed(6)} · PnL ${partialPnl >= 0 ? "+" : ""}${partialPnl.toFixed(2)} USDC`, { agent: "server", live: true }); continue; } } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Live close failed for ${p.coin}: ${msg}`); continue; } }
-        const pnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize;
-        realised += pnl; await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: exitPrice, exit_reason: reason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id); positions = positions.filter((x) => x.id !== p.id); report.closed++;
-        await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${exitPrice.toFixed(6)} · PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · ${reason}`, { agent: "server", reason, live: isLive, stop: p.stop_loss });
+        await closeOne(p, reason);
       }
+
       if (realised !== 0 && !isLive) { await supabaseAdmin.from("bot_settings").update({ paper_equity: +s.paper_equity + realised }).eq("user_id", s.user_id); s.paper_equity = +s.paper_equity + realised; }
       let unrealised = 0; for (const p of positions) { const m = mids[p.coin]; if (!m) continue; unrealised += p.side === "long" ? (+m - p.entry_price) * p.size : (p.entry_price - +m) * p.size; }
       let equityNow = +s.paper_equity + unrealised; let equityIsReal = !isLive;
       if (isLive && creds) { try { const acct = await fetchLiveAccount(creds.accountAddress); equityNow = acct.accountValue; unrealised = acct.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0); equityIsReal = true; } catch (err) { notes.push(`live account read failed: ${err instanceof Error ? err.message : String(err)}`); } }
       if (equityIsReal) await supabaseAdmin.from("equity_snapshots").insert({ user_id: s.user_id, equity: equityNow, realized_pnl: realised, unrealized_pnl: unrealised, mode: isLive ? "live" : "paper" });
 
-      const perCycle = isTrendline ? TRENDLINE_SCAN_PER_CYCLE : SCAN_PER_CYCLE;
+      const perCycle = isTrendline ? TRENDLINE_SCAN_PER_CYCLE : strategyKey === ADAPTIVE_STRATEGY_KEY ? ADAPTIVE_SCAN_PER_CYCLE : SCAN_PER_CYCLE;
       const minute = Math.floor(Date.now() / 60_000);
       const offset = (minute * perCycle) % Math.max(1, liquid.length);
       const scanTargets = Array.from({ length: Math.min(perCycle, liquid.length) }, (_, i) => liquid[(offset + i) % liquid.length]);
@@ -206,19 +280,38 @@ export async function runTradingCycle(): Promise<CycleReport> {
 
           if (isTrendline) {
             const ladder = await loadLadder(target.meta.name, execTf);
-            const { signal } = evaluateTrendline({ coin: target.meta.name, barsByTimeframe: ladder, execution: execTf, cfg });
+            // Restart safety: breaks already consumed on a previous cycle must
+            // never fire again, so their line ids are loaded from the database.
+            const { data: brokenRows } = await supabaseAdmin.from("trendline_broken_lines")
+              .select("line_id").eq("user_id", s.user_id).eq("coin", target.meta.name)
+              .eq("strategy_key", strategyKey).eq("timeframe", execTf);
+            const knownBrokenIds = new Set((brokenRows ?? []).map((r) => r.line_id));
+            const { signal } = evaluateTrendline({ coin: target.meta.name, barsByTimeframe: ladder, execution: execTf, cfg, knownBrokenIds });
             trendSig = signal;
             if (!signal.side || signal.initialStop == null) continue;
+            if (signal.actionLineId) {
+              // Consume the break BEFORE trading so a retry/restart cannot repeat it.
+              const { error: markErr } = await supabaseAdmin.from("trendline_broken_lines").insert({
+                user_id: s.user_id, coin: target.meta.name, strategy_key: strategyKey,
+                timeframe: execTf, line_id: signal.actionLineId,
+              });
+              if (markErr) continue; // unique violation ⇒ already consumed elsewhere
+            }
             side = signal.side; signalPrice = signal.price; confidence = signal.confidence; reasons = signal.reasons;
             detail = signal.detail; safetyLine = signal.safetyLine?.value ?? null; actionLine = signal.actionLine?.value ?? null;
           } else {
-            const bars = await loadBars(target.meta.name); if (!bars || bars.length < 210) continue;
+            const bars = await loadBars(target.meta.name, strategyKey);
+            // Adaptive aggregates to Daily/4H and needs >= 80 bars there; the
+            // requirement is never weakened, insufficient history just skips.
+            const minBars = strategyKey === ADAPTIVE_STRATEGY_KEY ? ADAPTIVE_MIN_BARS : 210;
+            if (!bars || bars.length < minBars) continue;
             const sig = evaluateScalp(target.meta.name, bars, strategyKey);
             scalpSig = sig;
             if (!sig.side || sig.confidence < +s.min_confidence) continue;
             side = sig.side; signalPrice = sig.price; confidence = sig.confidence; reasons = sig.reasons;
             family = sig.family; detail = sig.indicators; safetyLine = sig.safetyLine ?? null; actionLine = sig.actionLine ?? null;
           }
+
           if (!side) continue;
 
           const b = bucket(target.meta.name); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
@@ -279,9 +372,12 @@ export async function runTradingCycle(): Promise<CycleReport> {
             safety_line: safetyLine, action_line: actionLine,
             timeframe: isTrendline ? execTf : INTERVAL,
             initial_stop: initialStop, risk_pct: null,
+            // in-memory row and DB row must agree so restarts keep the trail
+            trail_high: entry,
           });
           if (insErr) { report.errors.push(`record ${target.meta.name}: ${insErr.message}`); continue; }
-          positions.push({ id: crypto.randomUUID(), coin: target.meta.name, side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, trail_high: entry, confidence }); held.add(target.meta.name); report.opened++;
+          positions.push({ id: crypto.randomUUID(), coin: target.meta.name, side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, trail_high: entry, confidence, opened_at: Date.now() }); held.add(target.meta.name); report.opened++;
+
           await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${side.toUpperCase()} ${target.meta.name} @ ${entry.toFixed(6)} · size ${size} · stop ${sl.toPrecision(6)} · ${isTrendline ? `leverage ${leverage}x (market max)` : `risk ${+s.position_size_pct}%`} · ${reason}`, {
             agent: "server", live: isLive, strategy: strategyKey, timeframe: isTrendline ? execTf : INTERVAL,
             direction: side, entry, initialStop, currentStop: sl, leverage, maxLeverageUsed: isTrendline ? resolveMaxLeverage(target.meta.maxLeverage) : null, size,

@@ -8,6 +8,8 @@ import {
 import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
 import { normalizeStrategyKey, PURE_PRICE_STRATEGY_KEY, type StrategyKey } from "./strategies";
 import { detectBtcShock, sideToFlatten, DEFAULT_BTC_SHOCK, type ShockDirection } from "./btcShock";
+import { checkDailyLoss, isMaxHoldExpired, DAILY_LOSS_EXIT_REASON, MAX_HOLD_EXIT_REASON } from "./riskGuards";
+
 import { supabase } from "@/integrations/supabase/client";
 
 export interface Settings {
@@ -61,7 +63,10 @@ export interface OpenPosition {
   take_profit: number | null;
   trail_high: number | null;
   confidence: number;
+  /** epoch ms — required for TrendBot's max-hold time exit */
+  opened_at: number;
 }
+
 
 type Log = (level: "info" | "warn" | "error" | "trade", msg: string, meta?: any) => void;
 
@@ -129,7 +134,7 @@ export class PaperEngine {
       id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional,
       leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss,
       take_profit: p.take_profit == null ? null : +p.take_profit, trail_high: p.trail_high != null ? +p.trail_high : null,
-      confidence: +p.confidence,
+      confidence: +p.confidence, opened_at: p.opened_at ? new Date(p.opened_at).getTime() : Date.now(),
     }));
     this.log("info", `Synced ${this.positions.length} open paper position(s)`);
   }
@@ -196,14 +201,14 @@ export class PaperEngine {
       this.dayStartEquity = this.currentEquity();
     }
 
-    // Daily circuit breaker
+    // Daily circuit breaker (shared guard — 0/invalid limit means disabled)
     const eq = this.currentEquity();
-    const dayPnl = eq - this.dayStartEquity;
-    const dayPnlPct = (dayPnl / this.dayStartEquity) * 100;
-    if (dayPnlPct <= -this.settings.daily_loss_pct && this.settings.bot_enabled) {
-      this.log("warn", `Daily loss limit hit (${dayPnlPct.toFixed(2)}%). Flattening & disabling bot.`);
-      this.flattenAll("daily_loss_limit").catch(() => {});
+    const guard = checkDailyLoss(this.dayStartEquity, eq, this.settings.daily_loss_pct);
+    if (guard.breached && this.settings.bot_enabled) {
+      this.log("warn", `Daily loss limit hit (${guard.dayPnlPct.toFixed(2)}%). Flattening & disabling bot.`);
+      this.flattenAll(DAILY_LOSS_EXIT_REASON).catch(() => {});
       supabase.from("bot_settings").update({ bot_enabled: false }).eq("user_id", this.userId).then(() => {});
+      return;
     }
 
     // Manage each open position
@@ -214,6 +219,12 @@ export class PaperEngine {
         this.closePosition(p, m, `btc_shock_${this.shockDir}`).catch(() => {});
         continue;
       }
+      // TrendBot only: force-close after TRENDBOT_PARAMS.maxHoldBars 1H bars.
+      if (isMaxHoldExpired(this.strategyKey(), p.opened_at)) {
+        this.closePosition(p, m, MAX_HOLD_EXIT_REASON).catch(() => {});
+        continue;
+      }
+
       if (this.isPure()) {
         // The Safety Line (recomputed on each eval cycle) IS the stop, and
         // Pure Price has no fixed take-profit.
@@ -412,7 +423,7 @@ export class PaperEngine {
     if (error || !data) { this.log("error", `Failed to open ${sig.coin}: ${error?.message}`); return; }
     this.positions.push({
       id: data.id, coin: sig.coin, side, size, notional: size * sig.price, leverage,
-      entry_price: sig.price, stop_loss: stop, take_profit: tp, trail_high: sig.price, confidence: sig.confidence,
+      entry_price: sig.price, stop_loss: stop, take_profit: tp, trail_high: sig.price, confidence: sig.confidence, opened_at: Date.now(),
     });
     this.log("trade", `OPEN ${reason} @ ${sig.price.toPrecision(6)} · stop ${stop.toPrecision(6)} · tp ${tp.toPrecision(6)} · size ${size}`);
   }
@@ -440,12 +451,14 @@ export class PaperEngine {
       confidence: sig.confidence, reason, indicators: sig.detail as never,
       safety_line: sig.safetyLine?.value ?? null, action_line: sig.actionLine?.value ?? null,
       timeframe: sig.timeframe, initial_stop: stop, risk_pct: null,
+      trail_high: sig.price,
     }).select().single();
     if (error || !data) { this.log("error", `Failed to open ${sig.coin}: ${error?.message}`); return; }
     this.positions.push({
+
       id: data.id, coin: sig.coin, side, size: sized.size, notional: sized.notional,
       leverage: sized.leverage, entry_price: sig.price, stop_loss: stop, take_profit: null,
-      trail_high: null, confidence: sig.confidence,
+      trail_high: sig.price, confidence: sig.confidence, opened_at: Date.now(),
     });
     this.log("trade", `OPEN ${reason} @ ${sig.price.toPrecision(6)} · stop ${stop.toPrecision(6)} · leverage ${sized.leverage}x (market max) · size ${sized.size}`);
   }

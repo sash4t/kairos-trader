@@ -50,14 +50,25 @@ export function rsi(closes: number[], period = 14): number[] {
   return out;
 }
 
+/**
+ * MACD. The signal EMA is computed only over the defined part of the MACD line
+ * (the slow EMA warmup leaves leading NaNs), then re-aligned, so warmup never
+ * produces a NaN-poisoned signal or a histogram that looks like momentum.
+ */
 export function macd(closes: number[], fast = 12, slow = 26, signal = 9) {
   const ef = ema(closes, fast);
   const es = ema(closes, slow);
-  const line = closes.map((_, i) => ef[i] - es[i]);
-  const sig = ema(line, signal);
-  const hist = line.map((v, i) => v - sig[i]);
+  const line = closes.map((_, i) => (isFinite(ef[i]) && isFinite(es[i]) ? ef[i] - es[i] : NaN));
+  const firstValid = line.findIndex((v) => isFinite(v));
+  const sig = Array<number>(line.length).fill(NaN);
+  if (firstValid >= 0) {
+    const tail = ema(line.slice(firstValid), signal);
+    for (let i = 0; i < tail.length; i++) sig[firstValid + i] = tail[i];
+  }
+  const hist = line.map((v, i) => (isFinite(v) && isFinite(sig[i]) ? v - sig[i] : NaN));
   return { line, signal: sig, hist };
 }
+
 
 export function atr(candles: { h: number; l: number; c: number }[], period = 14): number[] {
   const trs: number[] = [];
