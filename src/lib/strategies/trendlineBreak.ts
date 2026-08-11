@@ -239,12 +239,12 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
   if (exec.down.freshBreak && exec.down.value != null) {
     side = "long";
     actionLine = exec.down.value;
-    safety = pickSafety(levels, "long", price);
+    safety = safetyLineFor(levels, "long", price);
     reasons.push(`${exec.timeframe} close above the downward trendline — downtrend broken`);
   } else if (exec.up.freshBreak && exec.up.value != null) {
     side = "short";
     actionLine = exec.up.value;
-    safety = pickSafety(levels, "short", price);
+    safety = safetyLineFor(levels, "short", price);
     reasons.push(`${exec.timeframe} close below the upward trendline — uptrend broken`);
   } else {
     return { ...base, indicators, reasons: [`No ${exec.timeframe} trendline break`] };
@@ -266,7 +266,7 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
 }
 
 /** Opposing active line on the correct side of price, nearest timeframe first. */
-function pickSafety(levels: TbCascadeLevel[], side: "long" | "short", price: number): number | undefined {
+export function safetyLineFor(levels: TbCascadeLevel[], side: "long" | "short", price: number): number | undefined {
   for (let i = levels.length - 1; i >= 0; i--) {
     const state = side === "long" ? levels[i].up : levels[i].down;
     const v = state.value;
