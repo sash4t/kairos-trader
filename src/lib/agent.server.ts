@@ -87,7 +87,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       if (s.btc_shock_enabled !== false) {
         const win = Math.max(1, Math.round(+(s.btc_shock_window_min ?? 15)));
         shockMove = await btcMove(win);
-        shockDir = shockDirection(shockMove, +(s.btc_shock_pct ?? 1.5));
+        shockDir = shockDirection(shockMove, +(s.btc_shock_pct ?? 2.0));
         if (shockDir) { notes.push(`BTC shock ${shockDir} ${shockMove!.toFixed(2)}% / ${win}m`); await log(s.user_id, "warn", `BTC shock detected: ${shockMove!.toFixed(2)}% over ${win}m — flattening ${shockDir === "down" ? "longs" : "shorts"} and pausing opposing entries.`, { shockDir, shockMove, windowMin: win }); }
       }
       const { data: openRaw } = await supabaseAdmin.from("paper_positions").select("*").eq("user_id", s.user_id).eq("status", "open");

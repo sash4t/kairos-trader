@@ -188,7 +188,7 @@ export class PaperEngine {
     if (this.settings.btc_shock_enabled === false) { this.shockDir = null; return; }
     const win = Math.max(1, Math.round(Number(this.settings.btc_shock_window_min ?? 15)));
     const move = await fetchBtcMovePct(win);
-    const dir = shockDirection(move, Number(this.settings.btc_shock_pct ?? 1.5));
+    const dir = shockDirection(move, Number(this.settings.btc_shock_pct ?? 2.0));
     if (dir && dir !== this.shockDir) {
       this.log("warn", `BTC shock ${dir} ${move!.toFixed(2)}% over ${win}m — closing ${dir === "down" ? "longs" : "shorts"}.`);
     }
