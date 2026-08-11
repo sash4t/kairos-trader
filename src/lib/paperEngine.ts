@@ -317,6 +317,8 @@ export class PaperEngine {
   private async runEvalCycle() {
     const cfg = this.cfg();
     const execTf = this.execTf();
+    await this.refreshBtcShock();
+    if (!this.isPure()) { await this.runIndicatorCycle(); return; }
 
     // 1) Maintain open positions: re-derive the Safety Line and ratchet stops.
     for (const p of [...this.positions]) {
@@ -357,20 +359,78 @@ export class PaperEngine {
     }
   }
 
+  /** Entry scan for the two indicator strategies (Adaptive Trend Momentum, TrendBot). */
+  private async runIndicatorCycle() {
+    const key = this.strategyKey();
+    const held = new Set(this.positions.map(p => p.coin));
+    const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
+    const scored = this.meta
+      .map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
+      .filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED_COINS.has(x.meta.name))
+      .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm)
+      .slice(0, 40);
+
+    for (const { meta } of scored) {
+      if (this.positions.length >= this.settings.max_positions) break;
+      if (held.has(meta.name)) continue;
+      const bars = await this.loadBars(meta.name);
+      if (!bars || bars.length < 210) continue;
+      const sig = evaluateScalp(meta.name, bars, key);
+      if (!sig.side || sig.confidence < this.settings.min_confidence) continue;
+      if (this.positions.some(p => p.coin === meta.name)) continue;
+      held.add(meta.name);
+      await this.tryOpenIndicator(sig, meta);
+    }
+  }
+
+  private async tryOpenIndicator(sig: ScalpSignal, meta: AssetMeta) {
+    const side = sig.side!;
+    const b = bucket(sig.coin);
+    if (this.positions.filter(p => bucket(p.coin) === b).length >= 3) { this.log("info", `Skip ${sig.coin}: correlation bucket ${b} full`); return; }
+
+    const equity = this.currentEquity();
+    const leverage = Math.min(this.settings.max_leverage, meta.maxLeverage);
+    const currentExposure = this.positions.reduce((s, p) => s + p.notional, 0);
+    const headroom = equity * (this.settings.max_exposure_pct / 100) * this.settings.max_leverage - currentExposure;
+    if (headroom <= 0) { this.log("info", `Skip ${sig.coin}: portfolio exposure would exceed limit`); return; }
+
+    const notional = Math.min(equity * (this.settings.position_size_pct / 100) * leverage, headroom);
+    const size = Number((notional / sig.price).toFixed(meta.szDecimals));
+    if (!(size > 0)) { this.log("info", `Skip ${sig.coin}: size rounds to zero`); return; }
+    const stopDist = sig.price * (this.settings.scalp_sl_pct / 100);
+    const stop = side === "long" ? sig.price - stopDist : sig.price + stopDist;
+    const tpDist = sig.price * (this.settings.scalp_tp_pct / 100);
+    const tp = side === "long" ? sig.price + tpDist : sig.price - tpDist;
+
+    const reason = `${side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")}`;
+    const { data, error } = await supabase.from("paper_positions").insert({
+      user_id: this.userId, coin: sig.coin, side, size, notional: size * sig.price,
+      leverage, entry_price: sig.price, stop_loss: stop, take_profit: tp,
+      confidence: sig.confidence, reason, indicators: sig.indicators as never,
+      timeframe: "1h", initial_stop: stop,
+    }).select().single();
+    if (error || !data) { this.log("error", `Failed to open ${sig.coin}: ${error?.message}`); return; }
+    this.positions.push({
+      id: data.id, coin: sig.coin, side, size, notional: size * sig.price, leverage,
+      entry_price: sig.price, stop_loss: stop, take_profit: tp, trail_high: sig.price, confidence: sig.confidence,
+    });
+    this.log("trade", `OPEN ${reason} @ ${sig.price.toPrecision(6)} · stop ${stop.toPrecision(6)} · tp ${tp.toPrecision(6)} · size ${size}`);
+  }
+
   private async tryOpen(sig: TrendlineSignal, meta: AssetMeta) {
     const side = sig.side!;
     const b = bucket(sig.coin);
     if (this.positions.filter(p => bucket(p.coin) === b).length >= 3) { this.log("info", `Skip ${sig.coin}: correlation bucket ${b} full`); return; }
 
     const equity = this.currentEquity();
-    const leverageCap = Math.min(this.settings.max_leverage, meta.maxLeverage);
     const currentExposure = this.positions.reduce((s, p) => s + p.notional, 0);
     const headroom = equity * (this.settings.max_exposure_pct / 100) * this.settings.max_leverage - currentExposure;
     if (headroom <= 0) { this.log("info", `Skip ${sig.coin}: portfolio exposure would exceed limit`); return; }
 
-    const riskPct = clampRiskPct(+(this.settings.trendline_risk_pct ?? 1));
+    // Pure Price uses the market's MAXIMUM Hyperliquid leverage, not 1x and not
+    // a 1%-of-equity risk budget. Exposure headroom still bounds the notional.
     const stop = sig.initialStop!;
-    const sized = sizeFromRisk({ equity, riskPct, entry: sig.price, stop, szDecimals: meta.szDecimals, maxLeverage: leverageCap, maxNotional: headroom });
+    const sized = sizeAtMaxLeverage({ equity, entry: sig.price, stop, marketMaxLeverage: meta.maxLeverage, szDecimals: meta.szDecimals, maxNotional: headroom });
     if (!sized.ok) { this.log("info", `Skip ${sig.coin}: ${sized.reason}`); return; }
 
     const reason = `${side.toUpperCase()} ${sig.coin} — ${sig.reasons.join(" + ")}`;
@@ -379,7 +439,7 @@ export class PaperEngine {
       leverage: sized.leverage, entry_price: sig.price, stop_loss: stop, take_profit: null,
       confidence: sig.confidence, reason, indicators: sig.detail as never,
       safety_line: sig.safetyLine?.value ?? null, action_line: sig.actionLine?.value ?? null,
-      timeframe: sig.timeframe, initial_stop: stop, risk_pct: riskPct,
+      timeframe: sig.timeframe, initial_stop: stop, risk_pct: null,
     }).select().single();
     if (error || !data) { this.log("error", `Failed to open ${sig.coin}: ${error?.message}`); return; }
     this.positions.push({
@@ -387,7 +447,7 @@ export class PaperEngine {
       leverage: sized.leverage, entry_price: sig.price, stop_loss: stop, take_profit: null,
       trail_high: null, confidence: sig.confidence,
     });
-    this.log("trade", `OPEN ${reason} @ ${sig.price.toPrecision(6)} · stop ${stop.toPrecision(6)} · risk ${riskPct}% · size ${sized.size}`);
+    this.log("trade", `OPEN ${reason} @ ${sig.price.toPrecision(6)} · stop ${stop.toPrecision(6)} · leverage ${sized.leverage}x (market max) · size ${sized.size}`);
   }
 
   private async closePosition(p: OpenPosition, price: number, exitReason: string) {
