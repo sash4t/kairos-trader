@@ -3,6 +3,7 @@ import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 import { candlesToBars, bucket, type Bar } from "./strategy";
 import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal, type StrategyKey } from "./scalp";
+import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
 const INTERVAL = "1h";
@@ -65,6 +66,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
     } catch { return null; }
   };
 
+  // BTC shock detector — one fetch per distinct window across all users.
+  const btcMoveCache = new Map<number, number | null>();
+  const btcMove = async (windowMin: number) => {
+    if (!btcMoveCache.has(windowMin)) btcMoveCache.set(windowMin, await fetchBtcMovePct(windowMin));
+    return btcMoveCache.get(windowMin)!;
+  };
+
   for (const raw of users) {
     const s = raw as unknown as Settings;
     const notes: string[] = [];
@@ -74,6 +82,16 @@ export async function runTradingCycle(): Promise<CycleReport> {
       if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
       let canTrade = !isLive || !!creds;
       const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
+      let shockDir: ShockDir = null; let shockMove: number | null = null;
+      if (s.btc_shock_enabled !== false) {
+        const win = Math.max(1, Math.round(+(s.btc_shock_window_min ?? 15)));
+        shockMove = await btcMove(win);
+        shockDir = shockDirection(shockMove, +(s.btc_shock_pct ?? 1.5));
+        if (shockDir) {
+          notes.push(`BTC shock ${shockDir} ${shockMove!.toFixed(2)}% / ${win}m`);
+          await log(s.user_id, "warn", `BTC shock detected: ${shockMove!.toFixed(2)}% over ${win}m — flattening ${shockDir === "down" ? "longs" : "shorts"} and pausing opposing entries.`, { shockDir, shockMove, windowMin: win });
+        }
+      }
       const { data: openRaw } = await supabaseAdmin.from("paper_positions").select("*").eq("user_id", s.user_id).eq("status", "open");
       let positions = (openRaw ?? []).map((p) => ({ id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional, leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss, take_profit: p.take_profit == null ? (p.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY) : +p.take_profit, trail_high: p.trail_high == null ? null : +p.trail_high, confidence: +p.confidence })) as PositionRow[];
       let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
@@ -96,7 +114,8 @@ export async function runTradingCycle(): Promise<CycleReport> {
         const markStr = mids[p.coin]; if (!markStr) continue; const mark = +markStr;
         const t = updateTrail(p.side, p.entry_price, mark, p.stop_loss, p.trail_high, exits);
         if (t.changed) { p.stop_loss = t.stopLoss; p.trail_high = t.trailHigh; await supabaseAdmin.from("paper_positions").update({ stop_loss: t.stopLoss, trail_high: t.trailHigh }).eq("id", p.id); }
-        const reason = exitReasonFor(p.side, mark, p.stop_loss, p.take_profit, p.entry_price); if (!reason) continue;
+        const reason = shockHitsSide(shockDir, p.side) ? "btc_shock" : exitReasonFor(p.side, mark, p.stop_loss, p.take_profit, p.entry_price);
+        if (!reason) continue;
         let exitPrice = mark; let exitSize = p.size;
         if (isLive && creds) { const asset = (await assets()).get(p.coin); if (!asset) { report.errors.push(`${p.coin}: unknown asset`); continue; } try { const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live close for ${p.coin} did not fill — retrying next cycle.`); continue; } exitPrice = fill.avgPrice || mark; exitSize = fill.size; if (exitSize < p.size * 0.99) { const remaining = p.size - exitSize; const partialPnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize; p.size = remaining; p.notional = remaining * p.entry_price; await supabaseAdmin.from("paper_positions").update({ size: remaining, notional: p.notional }).eq("id", p.id); await log(s.user_id, "trade", `LIVE PARTIAL CLOSE ${p.coin} ${exitSize} @ ${exitPrice.toFixed(6)} · PnL ${partialPnl >= 0 ? "+" : ""}${partialPnl.toFixed(2)} USDC`, { agent: "server", live: true }); continue; } } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Live close failed for ${p.coin}: ${msg}`); continue; } }
         const pnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize;
@@ -121,6 +140,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (held.has(target.meta.name)) continue;
           const bars = await loadBars(target.meta.name); report.scanned++; if (!bars || bars.length < 210) continue;
           const sig = evaluateScalp(target.meta.name, bars, strategyKey); if (!sig.side || sig.confidence < +s.min_confidence) continue;
+          if (shockHitsSide(shockDir, sig.side)) continue;
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
           const leverage = Math.min(+s.max_leverage, target.meta.maxLeverage); const capNotional = equity * (+s.max_exposure_pct / 100) * +s.max_leverage; const exposure = positions.reduce((sum, p) => sum + p.notional, 0); const headroom = capNotional - exposure;
