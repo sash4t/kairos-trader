@@ -2,10 +2,12 @@ import { NoObjectGeneratedError, generateObject } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 import { candlesToBars, bucket, type Bar } from "./strategy";
-import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal, type StrategyKey } from "./scalp";
+import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
+import { normalizeStrategyKey, PURE_PRICE_STRATEGY_KEY, type StrategyKey } from "./strategies";
+import { detectBtcShock, sideToFlatten, DEFAULT_BTC_SHOCK, type ShockDirection } from "./btcShock";
 import {
-  DEFAULT_TRENDLINE_CONFIG, TRENDLINE_STRATEGY_KEY, TIMEFRAME_MS, ladderFor, evaluateTrendline,
-  currentSafetyLine, ratchetSafetyStop, safetyExitReason, sizeFromRisk, clampRiskPct,
+  DEFAULT_TRENDLINE_CONFIG, TIMEFRAME_MS, ladderFor, evaluateTrendline,
+  currentSafetyLine, ratchetSafetyStop, safetyExitReason, sizeAtMaxLeverage, resolveMaxLeverage,
   type Timeframe, type TrendlineConfig, type TrendlineSignal,
 } from "./trendline";
 
