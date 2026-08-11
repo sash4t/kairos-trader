@@ -1,9 +1,6 @@
-import { NoObjectGeneratedError, generateObject } from "ai";
-import { z } from "zod";
-import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 import { candlesToBars, bucket, type Bar } from "./strategy";
 import { buildEntryIntent } from "./orderIntent";
-import { evaluateScalpMulti, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal, type StrategyKey } from "./scalp";
+import { evaluateScalpMulti, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
@@ -11,12 +8,10 @@ const INTERVAL = "1h";
 const INTERVAL_MS = 60 * 60 * 1000;
 const BARS = 230;
 const HTF_BARS = 240;
-// Bounded work per cycle. The cursor below persists between cycles so the
-// entire eligible universe is covered without relying on wall-clock offsets.
 const SCAN_PER_CYCLE = 35;
 const MIN_24H_VOLUME = 100_000;
 
-type Level = "info" | "warn" | "error" | "trade" | "ai";
+type Level = "info" | "warn" | "error" | "trade";
 async function hl<T>(body: unknown): Promise<T> {
   const res = await fetch(HL_INFO, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!res.ok) throw new Error(`Hyperliquid ${res.status}`);
@@ -27,16 +22,15 @@ interface AssetCtx { funding: string; openInterest: string; markPx: string; dayN
 export interface CycleReport { users: number; closed: number; opened: number; vetoed: number; scanned: number; errors: string[] }
 interface Settings {
   user_id: string; bot_enabled: boolean; kill_switch_engaged: boolean; server_agent_enabled: boolean;
-  ai_review_enabled: boolean; scalp_enabled: boolean; scalp_tp_pct: number; scalp_sl_pct: number;
+  scalp_enabled: boolean; scalp_tp_pct: number; scalp_sl_pct: number;
   trail_activate_pct: number; trail_dist_pct: number; max_positions: number; max_leverage: number;
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
-  paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: StrategyKey; tp_rr?: number;
+  paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: string; tp_rr?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
   last_cycle_note?: string | null;
 }
 interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number; trail_high: number | null; confidence: number }
 
-/** Runs one full monitor → manage → scan → review → enter cycle for every enabled user. */
 export async function runTradingCycle(): Promise<CycleReport> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const report: CycleReport = { users: 0, closed: 0, opened: 0, vetoed: 0, scanned: 0, errors: [] };
@@ -82,7 +76,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
     const notes: string[] = [];
     try {
       const isLive = s.mode === "live";
-      const strategyKey: StrategyKey = s.strategy_key === "trendbot_momentum" ? "trendbot_momentum" : "trendline_price_action";
       if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
       let canTrade = !isLive || !!creds;
       const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
@@ -103,16 +96,12 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const equityNow = isLive && liveAcct ? liveAcct.equity : +s.paper_equity;
       const held = new Set(positions.map(p => p.coin));
 
-      // Each user's cursor is persisted in last_cycle_note. This means a restart,
-      // deploy, or variable cycle timing resumes from the next pair instead of
-      // recomputing a wall-clock offset and repeating/skipping symbols.
       const eligibleCount = liquid.length;
       const match = s.last_cycle_note?.match(/scanner_cursor=(\d+)/);
       const cursor = eligibleCount ? Math.max(0, Math.min(Number(match?.[1] ?? 0), eligibleCount - 1)) : 0;
       const scanCount = Math.min(SCAN_PER_CYCLE, eligibleCount);
       const scanTargets = Array.from({ length: scanCount }, (_, i) => liquid[(cursor + i) % eligibleCount]);
       const nextCursor = eligibleCount ? (cursor + scanCount) % eligibleCount : 0;
-      const scanPass = eligibleCount ? Math.floor(cursor / scanCount) : 0;
       notes.push(`scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
 
       if (s.scalp_enabled && canTrade && equityNow > 0 && positions.length < +s.max_positions) {
@@ -120,15 +109,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (positions.length >= +s.max_positions) break;
           if (held.has(target.meta.name)) continue;
           const hourly = await loadBars(target.meta.name, "1h", BARS); report.scanned++; if (!hourly || hourly.length < 80) continue;
-          let sig: ScalpSignal;
-          if (strategyKey === "trendbot_momentum") {
-            sig = evaluateScalpMulti(target.meta.name, { daily: hourly, fourHour: hourly, hourly }, strategyKey);
-          } else {
-            const daily = await loadBars(target.meta.name, "1d", HTF_BARS);
-            const fourHour = await loadBars(target.meta.name, "4h", HTF_BARS);
-            if (!daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
-            sig = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly }, strategyKey);
-          }
+          const daily = await loadBars(target.meta.name, "1d", HTF_BARS);
+          const fourHour = await loadBars(target.meta.name, "4h", HTF_BARS);
+          if (!daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
+          const sig: ScalpSignal = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly });
           if (!sig.side || sig.confidence < +s.min_confidence) continue;
           if (shockHitsSide(shockDir, sig.side)) continue;
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
@@ -137,10 +121,8 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const intent = buildEntryIntent({ side: sig.side, price: quotePx, equity, positionSizePct: +s.position_size_pct, maxExposurePct: +s.max_exposure_pct, userMaxLeverage: +s.max_leverage, assetMaxLeverage: target.meta.maxLeverage, currentExposure: positions.reduce((sum, p) => sum + p.notional, 0), slPct: exits.slPct, tpPct: exits.tpPct });
           if (!intent.ok) { if (intent.reason === "exposure cap reached") { notes.push("exposure cap reached"); break; } continue; }
           const leverage = intent.leverage;
-          let verdict = { approve: true, reason: "AI review disabled", risk: "unknown" as string };
-          if (s.ai_review_enabled) { verdict = await reviewSignal(sig, target.ctx, positions.map((p) => `${p.side} ${p.coin}`), exits); await log(s.user_id, "ai", `${verdict.approve ? "APPROVED" : "VETOED"} ${sig.side.toUpperCase()} ${sig.coin} — ${verdict.reason}`, { signal: sig, verdict }); if (!verdict.approve) { report.vetoed++; continue; } }
           const quote = quotePx; let entry = quote; let size = intent.size;
-          const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")} · AI: ${verdict.reason}`;
+          const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")}`;
           if (isLive && creds) { const asset = (await assets()).get(sig.coin); if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; } size = Number(size.toFixed(asset.szDecimals)); if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${asset.szDecimals} decimals.`); continue; } try { await setLeverage(creds, asset, leverage); const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; } entry = fill.avgPrice || quote; size = fill.size; } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; } }
           const sl = sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
           const tp = sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
@@ -150,22 +132,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
           await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · ${reason}`, { agent: "server", live: isLive, signal: sig });
         }
       }
-      const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · strategy ${strategyKey} · scanner_cursor=${nextCursor}`;
+      const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · scanner_cursor=${nextCursor}`;
       await supabaseAdmin.from("bot_settings").update({ last_cycle_at: new Date().toISOString(), last_cycle_note: note }).eq("user_id", s.user_id);
     } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`${s.user_id}: ${msg}`); await log(s.user_id, "error", `Trading cycle failed: ${msg}`); }
   }
   return report;
-}
-
-async function reviewSignal(sig: ScalpSignal, ctx: AssetCtx, positions: string[], exits: ExitParams) {
-  const schema = z.object({ approve: z.boolean(), reason: z.string().max(240), risk: z.enum(["low", "medium", "high"]) });
-  try {
-    const provider = createLovableAiGatewayProvider(process.env["LOVABLE_API_KEY"] ?? "");
-    const model = provider("google/gemini-2.5-flash");
-    const result = await generateObject({ model, schema, prompt: `You are a strict risk reviewer for a Hyperliquid perpetual futures bot. Review this deterministic price-action signal. Do not invent data. Signal: ${JSON.stringify(sig)}. Market context: ${JSON.stringify(ctx)}. Open positions: ${JSON.stringify(positions)}. Exit parameters: ${JSON.stringify(exits)}. Approve only if the setup is coherent and risk is acceptable. Never override the strategy direction.` });
-    return result.object;
-  } catch (err) {
-    if (err instanceof NoObjectGeneratedError) return { approve: false, reason: "AI review unavailable; fail closed", risk: "high" as const };
-    return { approve: false, reason: `AI review error: ${err instanceof Error ? err.message : String(err)}`, risk: "high" as const };
-  }
 }
