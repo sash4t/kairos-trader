@@ -1,0 +1,1 @@
+ALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS max_roe_loss_pct numeric NOT NULL DEFAULT 1.0;

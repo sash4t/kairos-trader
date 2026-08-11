@@ -57,6 +57,7 @@ export type Database = {
           max_exposure_pct: number
           max_leverage: number
           max_positions: number
+          max_roe_loss_pct: number
           min_confidence: number
           mode: string
           paper_equity: number
@@ -94,6 +95,7 @@ export type Database = {
           max_exposure_pct?: number
           max_leverage?: number
           max_positions?: number
+          max_roe_loss_pct?: number
           min_confidence?: number
           mode?: string
           paper_equity?: number
@@ -131,6 +133,7 @@ export type Database = {
           max_exposure_pct?: number
           max_leverage?: number
           max_positions?: number
+          max_roe_loss_pct?: number
           min_confidence?: number
           mode?: string
           paper_equity?: number
