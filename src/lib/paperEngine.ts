@@ -114,7 +114,8 @@ export class PaperEngine {
     this.positions = (openPos ?? []).map(p => ({
       id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional,
       leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss,
-      take_profit: +p.take_profit, trail_high: p.trail_high != null ? +p.trail_high : null,
+      take_profit: p.take_profit != null ? +p.take_profit : Number.POSITIVE_INFINITY * (p.side === "long" ? 1 : -1),
+      trail_high: p.trail_high != null ? +p.trail_high : null,
       confidence: +p.confidence,
     }));
     this.log("info", `Synced ${this.positions.length} open paper position(s)`);
