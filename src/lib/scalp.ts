@@ -1,27 +1,15 @@
 import { evaluateMultiTimeframeSignal, type Bar } from "./strategy";
-import { evaluateTrendBotSignal, TRENDBOT_STRATEGY_KEY } from "./trendbotStrategy";
-import { TRENDLINE_STRATEGY_KEY } from "./trendline/types";
+import { evaluateTrendBotSignal } from "./trendbotStrategy";
+import { ADAPTIVE_STRATEGY_KEY, TRENDBOT_MOMENTUM_KEY, type StrategyKey } from "./strategies";
 
 export type ScalpSide = "long" | "short";
-export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDBOT_STRATEGY_KEY;
+export { STRATEGY_OPTIONS, normalizeStrategyKey, isPurePrice, PURE_PRICE_STRATEGY_KEY, ADAPTIVE_STRATEGY_KEY, TRENDBOT_MOMENTUM_KEY } from "./strategies";
+export type { StrategyKey } from "./strategies";
 
 export interface ScalpSignal {
   coin: string; side: ScalpSide | null; family: string; confidence: number; reasons: string[]; price: number; atrPct: number; indicators: Record<string, number>;
   actionLine?: number; safetyLine?: number;
 }
-
-export const STRATEGY_OPTIONS = [
-  {
-    key: TRENDLINE_STRATEGY_KEY,
-    name: "Trendline Strategy - Pure Price",
-    description: "Pure price action: Monthly → Weekly → Daily → 4H → 1H top-down trend lines, Action Line breaks and opposing Safety Line trailing stop. No indicators or fixed take-profit.",
-  },
-  {
-    key: TRENDBOT_STRATEGY_KEY,
-    name: "TrendBot Momentum",
-    description: "EMA20/50 + RSI14 + MACD momentum, long and short.",
-  },
-] as const;
 
 function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
   const groups = new Map<number, Bar>();
@@ -34,14 +22,15 @@ function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
   return [...groups.values()].sort((a,b)=>a.t-b.t);
 }
 
-export function evaluateScalp(coin: string, bars: Bar[], strategyKey: StrategyKey = TRENDLINE_STRATEGY_KEY): ScalpSignal {
-  const sig = strategyKey === TRENDBOT_STRATEGY_KEY
+/** Indicator-based strategies (Adaptive Trend Momentum and TrendBot Momentum). */
+export function evaluateScalp(coin: string, bars: Bar[], strategyKey: StrategyKey = ADAPTIVE_STRATEGY_KEY): ScalpSignal {
+  const sig = strategyKey === TRENDBOT_MOMENTUM_KEY
     ? evaluateTrendBotSignal(coin, bars)
     : evaluateMultiTimeframeSignal(coin, aggregateBars(bars, 24 * 60 * 60 * 1000), aggregateBars(bars, 4 * 60 * 60 * 1000), bars);
   return { coin, side: sig.side, family: strategyKey, confidence: sig.confidence, reasons: sig.reasons, price: sig.price, atrPct: sig.indicators["atrPct"] ?? 0, indicators: sig.indicators, actionLine: sig.actionLine, safetyLine: sig.safetyLine };
 }
 
-export const DEFAULT_EXITS = { tpPct: 100, slPct: 0, trailActivatePct: 0, trailDistPct: 0 };
+export const DEFAULT_EXITS = { tpPct: 12, slPct: 1.5, trailActivatePct: 1.5, trailDistPct: 1.2 };
 export interface ExitParams { tpPct: number; slPct: number; trailActivatePct: number; trailDistPct: number }
 export interface TrailUpdate { stopLoss: number; trailHigh: number; changed: boolean }
 
