@@ -2,6 +2,11 @@ import { candlesToBars, bucket, type Bar } from "./strategy";
 import { buildEntryIntent } from "./orderIntent";
 import { evaluateScalpMulti, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
+import {
+  TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, buildCascade, evaluateTrendlineBreak,
+  safetyLineFor, safetyStop, riskSize, trailToSafety, safetyBreached,
+  type TbTimeframe, type TbSeries,
+} from "./strategies/trendlineBreak";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
 const INTERVAL = "1h";
@@ -27,6 +32,7 @@ interface Settings {
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
   paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: string; tp_rr?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
+  tb_timeframes?: string; tb_pivot_strength?: number; tb_risk_pct?: number; tb_refresh_min?: number;
   last_cycle_note?: string | null;
 }
 interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number; trail_high: number | null; confidence: number }
@@ -52,11 +58,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
   let assetIndex: Awaited<ReturnType<typeof loadAssetIndex>> | null = null;
   const assets = async () => (assetIndex ??= await loadAssetIndex());
   const barCache = new Map<string, Bar[]>();
-  const loadBars = async (coin: string, interval: "1h" | "4h" | "1d", count: number): Promise<Bar[] | null> => {
+  const loadBars = async (coin: string, interval: "1h" | "4h" | "1d" | TbTimeframe, count: number): Promise<Bar[] | null> => {
     const key = `${coin}:${interval}`;
     if (barCache.has(key)) return barCache.get(key)!;
     try {
-      const intervalMs = interval === "1h" ? 60 * 60 * 1000 : interval === "4h" ? 4 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+      const intervalMs = TB_INTERVAL_MS[interval as TbTimeframe] ?? 60 * 60 * 1000;
       const end = Date.now();
       const candles = await hl<{ t: number; o: string; h: string; l: string; c: string; v: string }[]>({ type: "candleSnapshot", req: { coin, interval, startTime: end - count * intervalMs, endTime: end } });
       const bars = candlesToBars(candles as never).slice(0, -1);
@@ -93,8 +99,54 @@ export async function runTradingCycle(): Promise<CycleReport> {
         try { liveAcct = await fetchLiveAccount(creds.accountAddress); }
         catch (err) { canTrade = false; const msg = err instanceof Error ? err.message : String(err); notes.push(`live account read failed: ${msg}`); await log(s.user_id, "error", `Could not read Hyperliquid account — trading paused this cycle: ${msg}`); }
       }
-      const equityNow = isLive && liveAcct ? liveAcct.equity : +s.paper_equity;
+      const equityNow = isLive && liveAcct ? liveAcct.accountValue : +s.paper_equity;
       const held = new Set(positions.map(p => p.coin));
+
+      // ---------- Trendline Break strategy (independent of other strategies) ----------
+      const isTb = (s.strategy_key ?? "") === TRENDLINE_BREAK_KEY;
+      const tbCfg = { timeframes: parseTimeframes(s.tb_timeframes), pivotStrength: Math.round(+(s.tb_pivot_strength ?? 3)), riskPct: +(s.tb_risk_pct ?? 1) };
+      const loadTbSeries = async (coin: string): Promise<TbSeries> => {
+        const series: TbSeries = {};
+        for (const tf of tbCfg.timeframes) {
+          const bars = await loadBars(coin, tf, 300);
+          if (bars && bars.length >= 30) series[tf] = bars;
+        }
+        return series;
+      };
+      const closeTbPosition = async (p: PositionRow, mark: number, exitReason: string) => {
+        if (isLive && creds) {
+          const asset = (await assets()).get(p.coin);
+          if (!asset) { report.errors.push(`${p.coin}: unknown asset on close`); return; }
+          try { await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 }); }
+          catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Failed to close ${p.coin}: ${msg}`); return; }
+        }
+        const pnl = p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
+        await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: exitReason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id);
+        positions = positions.filter((x) => x.id !== p.id);
+        held.delete(p.coin);
+        report.closed++;
+        await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · ${exitReason} · PnL ${pnl.toFixed(2)}`, { strategy: TRENDLINE_BREAK_KEY });
+      };
+
+      if (isTb && canTrade) {
+        for (const p of [...positions]) {
+          const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+          if (shockHitsSide(shockDir, p.side)) { await closeTbPosition(p, mark, "btc_shock"); continue; }
+          const series = await loadTbSeries(p.coin);
+          const levels = buildCascade(series, tbCfg.timeframes, tbCfg.pivotStrength);
+          const safety = safetyLineFor(levels, p.side, mark);
+          if (safety != null) {
+            // Price closed back through the safety line -> exit at market.
+            if (safetyBreached(p.side, mark, safety)) { await closeTbPosition(p, mark, "safety_line"); continue; }
+            const next = trailToSafety(p.side, p.stop_loss, safety);
+            if (next !== p.stop_loss) {
+              p.stop_loss = next;
+              await supabaseAdmin.from("paper_positions").update({ stop_loss: next, safety_line: safety }).eq("id", p.id);
+            }
+          }
+          if (p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss) await closeTbPosition(p, mark, "safety_stop");
+        }
+      }
 
       const eligibleCount = liquid.length;
       const match = s.last_cycle_note?.match(/scanner_cursor=(\d+)/);
@@ -108,27 +160,53 @@ export async function runTradingCycle(): Promise<CycleReport> {
         for (const target of scanTargets) {
           if (positions.length >= +s.max_positions) break;
           if (held.has(target.meta.name)) continue;
-          const hourly = await loadBars(target.meta.name, "1h", BARS); report.scanned++; if (!hourly || hourly.length < 80) continue;
-          const daily = await loadBars(target.meta.name, "1d", HTF_BARS);
-          const fourHour = await loadBars(target.meta.name, "4h", HTF_BARS);
-          if (!daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
-          const sig: ScalpSignal = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly });
+          let sig: ScalpSignal;
+          let tbSafety: number | undefined;
+          let tbTimeframe: string | undefined;
+          if (isTb) {
+            const series = await loadTbSeries(target.meta.name); report.scanned++;
+            if (Object.keys(series).length < tbCfg.timeframes.length) continue;
+            const tb = evaluateTrendlineBreak(target.meta.name, series, tbCfg);
+            tbSafety = tb.safetyLine; tbTimeframe = tb.timeframe;
+            sig = { coin: tb.coin, side: tb.side, family: TRENDLINE_BREAK_KEY, confidence: tb.confidence, reasons: tb.reasons, price: tb.price, atrPct: 0, indicators: tb.indicators, actionLine: tb.actionLine, safetyLine: tb.safetyLine };
+          } else {
+            const hourly = await loadBars(target.meta.name, "1h", BARS); report.scanned++; if (!hourly || hourly.length < 80) continue;
+            const daily = await loadBars(target.meta.name, "1d", HTF_BARS);
+            const fourHour = await loadBars(target.meta.name, "4h", HTF_BARS);
+            if (!daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
+            sig = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly });
+          }
           if (!sig.side || sig.confidence < +s.min_confidence) continue;
           if (shockHitsSide(shockDir, sig.side)) continue;
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
           const quotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
-          const intent = buildEntryIntent({ side: sig.side, price: quotePx, equity, positionSizePct: +s.position_size_pct, maxExposurePct: +s.max_exposure_pct, userMaxLeverage: +s.max_leverage, assetMaxLeverage: target.meta.maxLeverage, currentExposure: positions.reduce((sum, p) => sum + p.notional, 0), slPct: exits.slPct, tpPct: exits.tpPct });
-          if (!intent.ok) { if (intent.reason === "exposure cap reached") { notes.push("exposure cap reached"); break; } continue; }
-          const leverage = intent.leverage;
-          const quote = quotePx; let entry = quote; let size = intent.size;
+          let leverage: number; let size: number; let tbStop = 0;
+          if (isTb) {
+            if (tbSafety == null) continue;
+            leverage = Math.max(1, Math.floor(Math.min(+s.max_leverage, target.meta.maxLeverage)));
+            tbStop = safetyStop(sig.side, tbSafety);
+            size = riskSize(equity, tbCfg.riskPct, quotePx, tbStop);
+            const exposureCap = equity * (+s.max_exposure_pct / 100) * leverage;
+            const used = positions.reduce((sum, p) => sum + p.notional, 0);
+            const room = exposureCap - used;
+            if (room <= 0) { notes.push("exposure cap reached"); break; }
+            if (size * quotePx > room) size = room / quotePx;
+            if (!(size > 0) || !Number.isFinite(size)) continue;
+          } else {
+            const intent = buildEntryIntent({ side: sig.side, price: quotePx, equity, positionSizePct: +s.position_size_pct, maxExposurePct: +s.max_exposure_pct, userMaxLeverage: +s.max_leverage, assetMaxLeverage: target.meta.maxLeverage, currentExposure: positions.reduce((sum, p) => sum + p.notional, 0), slPct: exits.slPct, tpPct: exits.tpPct });
+            if (!intent.ok) { if (intent.reason === "exposure cap reached") { notes.push("exposure cap reached"); break; } continue; }
+            leverage = intent.leverage; size = intent.size;
+          }
+          const quote = quotePx; let entry = quote;
           const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")}`;
           if (isLive && creds) { const asset = (await assets()).get(sig.coin); if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; } size = Number(size.toFixed(asset.szDecimals)); if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${asset.szDecimals} decimals.`); continue; } try { await setLeverage(creds, asset, leverage); const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; } entry = fill.avgPrice || quote; size = fill.size; } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; } }
-          const sl = sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
-          const tp = sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
-          const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators });
+          const sl = isTb ? tbStop : sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
+          const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
+          const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: tbStop, risk_pct: tbCfg.riskPct } : {};
+          const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra });
           if (insErr) { report.errors.push(`record ${sig.coin}: ${insErr.message}`); continue; }
-          positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, trail_high: entry, confidence: sig.confidence }); held.add(sig.coin); report.opened++;
+          positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence }); held.add(sig.coin); report.opened++;
           await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · ${reason}`, { agent: "server", live: isLive, signal: sig });
         }
       }

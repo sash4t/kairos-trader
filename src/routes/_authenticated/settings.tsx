@@ -11,6 +11,7 @@ import { LiveTradingPanel } from "@/components/LiveTradingPanel";
 import { resetPaperAccount } from "@/lib/paper.functions";
 import { Loader2, RotateCcw } from "lucide-react";
 import { STRATEGY_OPTIONS, type StrategyKey } from "@/lib/scalp";
+import { TrendlineBreakPanel } from "@/components/TrendlineBreakPanel";
 
 export const Route = createFileRoute("/_authenticated/settings")({ component: SettingsPage });
 
@@ -46,7 +47,11 @@ function SettingsPage() {
     },
   });
 
-  useEffect(() => { if (botSettings?.strategy_key === "trendbot_momentum") setStrategyKey("trendbot_momentum"); else if (botSettings) setStrategyKey("trendline_price_action"); }, [botSettings]);
+  useEffect(() => {
+    const key = botSettings?.strategy_key;
+    if (key && STRATEGY_OPTIONS.some(o => o.key === key)) setStrategyKey(key as StrategyKey);
+    else if (botSettings) setStrategyKey("trendline_price_action");
+  }, [botSettings]);
 
   const saveStrategy = async (next: StrategyKey) => {
     if (!userId) return;
@@ -84,12 +89,13 @@ function SettingsPage() {
             return <button key={option.key} type="button" onClick={() => saveStrategy(option.key)} disabled={savingStrategy} className={`rounded-lg border p-4 text-left transition ${selected ? "border-primary bg-primary/10" : "border-panel-border hover:bg-muted/40"}`}>
               <div className="flex items-center justify-between gap-3"><span className="text-sm font-semibold">{option.name}</span><span className={`h-3 w-3 rounded-full border ${selected ? "border-primary bg-primary" : "border-muted-foreground"}`} /></div>
               <p className="mt-2 text-xs text-muted-foreground">{option.description}</p>
-              {option.key === "trendbot_momentum" && <div className="mt-2 mono text-[10px] uppercase tracking-widest text-primary">Long + Short · Hyperliquid Perps</div>}
             </button>;
           })}
         </div>
         {savingStrategy && <div className="text-xs text-muted-foreground">Saving strategy…</div>}
       </div>
+
+      {strategyKey === "trendline-break" && <TrendlineBreakPanel />}
 
       <div className="panel p-4 sm:p-5 space-y-4">
         <div className="text-sm font-semibold">Hyperliquid wallet address (read-only)</div>
