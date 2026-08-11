@@ -38,6 +38,8 @@ export interface TrendlineConfig {
   penetrationTolerancePct: number;
   minTouches: number;
   safetyBufferPct: number;
+  /** Number of most-recent bars eligible for the initial anchor. */
+  anchorLookbackBars: number;
 }
 
 export const DEFAULT_TRENDLINE_CONFIG: TrendlineConfig = {
@@ -47,6 +49,7 @@ export const DEFAULT_TRENDLINE_CONFIG: TrendlineConfig = {
   penetrationTolerancePct: 0.35,
   minTouches: 2,
   safetyBufferPct: 0.15,
+  anchorLookbackBars: 200,
 };
 
 /** Canonical selectable pure price-action strategy. */
