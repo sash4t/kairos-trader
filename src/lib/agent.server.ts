@@ -2,243 +2,36 @@ import { candlesToBars, bucket, type Bar } from "./strategy";
 import { buildEntryIntent } from "./orderIntent";
 import { evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
-import {
-  TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, buildCascade, evaluateTrendlineBreak,
-  safetyLineFor, safetyStop, riskSize, trailToSafety, safetyBreached,
-  type TbTimeframe, type TbSeries,
-} from "./strategies/trendlineBreak";
-
-const HL_INFO = "https://api.hyperliquid.xyz/info";
-const BARS = 230;
-const HTF_BARS = 240;
-const SCAN_PER_CYCLE = 35;
-const MIN_24H_VOLUME = 100_000;
-
-type Level = "info" | "warn" | "error" | "trade";
-async function hl<T>(body: unknown): Promise<T> {
-  const res = await fetch(HL_INFO, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`Hyperliquid ${res.status}`);
-  return (await res.json()) as T;
-}
-interface AssetMeta { name: string; szDecimals: number; maxLeverage: number }
-interface AssetCtx { funding: string; openInterest: string; markPx: string; dayNtlVlm: string }
-export interface CycleReport { users: number; closed: number; opened: number; vetoed: number; scanned: number; errors: string[] }
-interface Settings {
-  user_id: string; bot_enabled: boolean; kill_switch_engaged: boolean; server_agent_enabled: boolean;
-  scalp_enabled: boolean; scalp_tp_pct: number; scalp_sl_pct: number;
-  trail_activate_pct: number; trail_dist_pct: number; max_positions: number; max_leverage: number;
-  position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
-  paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: string; tp_rr?: number;
-  btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
-  tb_timeframes?: string; tb_pivot_strength?: number; tb_risk_pct?: number; tb_position_size_pct?: number; tb_refresh_min?: number;
-  last_cycle_note?: string | null;
-}
-interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number; trail_high: number | null; confidence: number }
-
-export async function runTradingCycle(): Promise<CycleReport> {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  const report: CycleReport = { users: 0, closed: 0, opened: 0, vetoed: 0, scanned: 0, errors: [] };
-  const { data: users, error: settingsErr } = await supabaseAdmin.from("bot_settings").select("*").eq("server_agent_enabled", true).eq("bot_enabled", true).eq("kill_switch_engaged", false);
-  if (settingsErr) throw new Error(settingsErr.message);
-  if (!users || users.length === 0) return report;
-  report.users = users.length;
-  const log = async (userId: string, level: Level, message: string, meta?: unknown) => {
-    const { error } = await supabaseAdmin.from("bot_events").insert({ user_id: userId, level, message, meta: meta === undefined ? null : (JSON.parse(JSON.stringify(meta)) as never) });
-    if (error) report.errors.push(`log: ${error.message}`);
-  };
-  const mids = await hl<Record<string, string>>({ type: "allMids" });
-  const [meta, ctxs] = await hl<[{ universe: AssetMeta[] }, AssetCtx[]]>({ type: "metaAndAssetCtxs" });
-  const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
-  const liquid = meta.universe.map((m, i) => ({ meta: m, ctx: ctxs[i] })).filter((x) => x.ctx && +x.ctx.dayNtlVlm > MIN_24H_VOLUME && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
-
-  const { readHlCreds, loadAssetIndex, marketOrder, setLeverage, fetchLiveAccount } = await import("./hyperliquidExchange.server");
-  const creds = readHlCreds();
-  let assetIndex: Awaited<ReturnType<typeof loadAssetIndex>> | null = null;
-  const assets = async () => (assetIndex ??= await loadAssetIndex());
-  const barCache = new Map<string, Bar[]>();
-  const loadBars = async (coin: string, interval: "1h" | "4h" | "1d" | TbTimeframe, count: number): Promise<Bar[] | null> => {
-    const key = `${coin}:${interval}`;
-    if (barCache.has(key)) return barCache.get(key)!;
-    try {
-      const intervalMs = TB_INTERVAL_MS[interval as TbTimeframe] ?? 60 * 60 * 1000;
-      const end = Date.now();
-      const candles = await hl<{ t: number; o: string; h: string; l: string; c: string; v: string }[]>({ type: "candleSnapshot", req: { coin, interval, startTime: end - count * intervalMs, endTime: end } });
-      const bars = candlesToBars(candles as never).slice(0, -1);
-      barCache.set(key, bars);
-      return bars;
-    } catch { return null; }
-  };
-
-  for (const raw of users) {
-    const s = raw as unknown as Settings;
-    const notes: string[] = [];
-    try {
-      const isLive = s.mode === "live";
-      if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
-      let canTrade = !isLive || !!creds;
-      const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
-      const shockWindow = Math.max(1, Math.round(+(s.btc_shock_window_min ?? 240)));
-      let shockDir: ShockDir = null; let shockMove: number | null = null;
-      if (s.btc_shock_enabled !== false) {
-        shockMove = await fetchBtcMovePct(shockWindow);
-        shockDir = shockDirection(shockMove, +(s.btc_shock_pct ?? 1.5));
-        if (shockDir) {
-          notes.push(`BTC shock ${shockDir} ${shockMove!.toFixed(2)}% / ${shockWindow}m`);
-          await log(s.user_id, "warn", `BTC shock detected: ${shockMove!.toFixed(2)}% within ${shockWindow}m — flattening ${shockDir === "down" ? "longs" : "shorts"} and pausing opposing entries.`, { shockDir, shockMove, windowMin: shockWindow });
-        }
-      }
-
-      const { data: openRaw } = await supabaseAdmin.from("paper_positions").select("*").eq("user_id", s.user_id).eq("status", "open");
-      let positions = (openRaw ?? []).map((p) => ({ id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional, leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss, take_profit: p.take_profit == null ? (p.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY) : +p.take_profit, trail_high: p.trail_high == null ? null : +p.trail_high, confidence: +p.confidence })) as PositionRow[];
-      let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
-      if (isLive && creds) {
-        try { liveAcct = await fetchLiveAccount(creds.accountAddress); }
-        catch (err) { canTrade = false; const msg = err instanceof Error ? err.message : String(err); notes.push(`live account read failed: ${msg}`); await log(s.user_id, "error", `Could not read Hyperliquid account — trading paused this cycle: ${msg}`); }
-      }
-      const equityNow = isLive && liveAcct ? liveAcct.accountValue : +s.paper_equity;
-      const held = new Set(positions.map(p => p.coin));
-
-      const isTb = (s.strategy_key ?? "") === TRENDLINE_BREAK_KEY;
-      const tbCfg = {
-        timeframes: parseTimeframes(s.tb_timeframes),
-        pivotStrength: Math.round(+(s.tb_pivot_strength ?? 3)),
-        riskPct: +(s.tb_risk_pct ?? 1),
-        positionSizePct: +(s.tb_position_size_pct ?? s.position_size_pct ?? 5),
-      };
-      const loadTbSeries = async (coin: string): Promise<TbSeries> => {
-        const series: TbSeries = {};
-        for (const tf of tbCfg.timeframes) {
-          const bars = await loadBars(coin, tf, 300);
-          if (bars && bars.length >= 30) series[tf] = bars;
-        }
-        return series;
-      };
-      const closeTbPosition = async (p: PositionRow, mark: number, exitReason: string) => {
-        if (isLive && creds) {
-          const asset = (await assets()).get(p.coin);
-          if (!asset) { report.errors.push(`${p.coin}: unknown asset on close`); return; }
-          try { await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 }); }
-          catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Failed to close ${p.coin}: ${msg}`); return; }
-        }
-        const pnl = p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
-        await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: exitReason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id);
-        positions = positions.filter((x) => x.id !== p.id);
-        held.delete(p.coin);
-        report.closed++;
-        await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · ${exitReason} · PnL ${pnl.toFixed(2)}`, { strategy: TRENDLINE_BREAK_KEY });
-      };
-
-      // BTC shock is evaluated before normal safety-line management, so adverse
-      // correlated positions are flattened first.
-      if (canTrade && shockDir) {
-        for (const p of [...positions]) {
-          if (!shockHitsSide(shockDir, p.side)) continue;
-          const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
-          await closeTbPosition(p, mark, "btc_shock");
-        }
-      }
-
-      if (isTb && canTrade) {
-        for (const p of [...positions]) {
-          const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
-          const series = await loadTbSeries(p.coin);
-          const levels = buildCascade(series, tbCfg.timeframes, tbCfg.pivotStrength);
-          const safety = safetyLineFor(levels, p.side, mark);
-          if (safety != null) {
-            if (safetyBreached(p.side, mark, safety)) { await closeTbPosition(p, mark, "safety_line"); continue; }
-            const next = trailToSafety(p.side, p.stop_loss, safety);
-            if (next !== p.stop_loss) {
-              p.stop_loss = next;
-              await supabaseAdmin.from("paper_positions").update({ stop_loss: next, safety_line: safety }).eq("id", p.id);
-            }
-          }
-          if (p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss) await closeTbPosition(p, mark, "safety_stop");
-        }
-      }
-
-      const eligibleCount = liquid.length;
-      const match = s.last_cycle_note?.match(/scanner_cursor=(\d+)/);
-      const cursor = eligibleCount ? Math.max(0, Math.min(Number(match?.[1] ?? 0), eligibleCount - 1)) : 0;
-      const scanCount = Math.min(SCAN_PER_CYCLE, eligibleCount);
-      const scanTargets = Array.from({ length: scanCount }, (_, i) => liquid[(cursor + i) % eligibleCount]);
-      const nextCursor = eligibleCount ? (cursor + scanCount) % eligibleCount : 0;
-      notes.push(`scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
-
-      if (s.scalp_enabled && canTrade && equityNow > 0 && positions.length < +s.max_positions) {
-        for (const target of scanTargets) {
-          if (positions.length >= +s.max_positions) break;
-          if (held.has(target.meta.name)) continue;
-          let sig: ScalpSignal;
-          let tbSafety: number | undefined;
-          let tbTimeframe: string | undefined;
-          if (isTb) {
-            const series = await loadTbSeries(target.meta.name); report.scanned++;
-            if (Object.keys(series).length < tbCfg.timeframes.length) continue;
-            const tb = evaluateTrendlineBreak(target.meta.name, series, tbCfg);
-            tbSafety = tb.safetyLine; tbTimeframe = tb.timeframe;
-            sig = { coin: tb.coin, side: tb.side, family: TRENDLINE_BREAK_KEY, confidence: tb.confidence, reasons: tb.reasons, price: tb.price, atrPct: 0, indicators: tb.indicators, actionLine: tb.actionLine, safetyLine: tb.safetyLine };
-          } else {
-            const hourly = await loadBars(target.meta.name, "1h", BARS); report.scanned++; if (!hourly || hourly.length < 80) continue;
-            const daily = await loadBars(target.meta.name, "1d", HTF_BARS);
-            const fourHour = await loadBars(target.meta.name, "4h", HTF_BARS);
-            if (!daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
-            sig = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly });
-          }
-          if (!sig.side || sig.confidence < +s.min_confidence) continue;
-          if (shockHitsSide(shockDir, sig.side)) continue;
-          const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
-          const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
-          const quotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
-          let leverage: number; let size: number; let tbStop = 0;
-          if (isTb) {
-            if (tbSafety == null) continue;
-            // Trendline trades always use the exchange's maximum leverage. The
-            // risk budget and position-size cap still determine how much capital
-            // is actually deployed; leverage does not increase allowed loss.
-            leverage = Math.max(1, Math.floor(target.meta.maxLeverage));
-            tbStop = safetyStop(sig.side, tbSafety);
-            const riskBasedSize = riskSize(equity, tbCfg.riskPct, quotePx, tbStop);
-            const positionNotionalCap = equity * (tbCfg.positionSizePct / 100) * leverage;
-            const exposureCap = equity * (+s.max_exposure_pct / 100) * leverage;
-            const used = positions.reduce((sum, p) => sum + p.notional, 0);
-            const room = exposureCap - used;
-            if (room <= 0) { notes.push("exposure cap reached"); break; }
-            size = Math.min(riskBasedSize, positionNotionalCap / quotePx, room / quotePx);
-            if (!(size > 0) || !Number.isFinite(size)) continue;
-          } else {
-            const intent = buildEntryIntent({ side: sig.side, price: quotePx, equity, positionSizePct: +s.position_size_pct, maxExposurePct: +s.max_exposure_pct, userMaxLeverage: +s.max_leverage, assetMaxLeverage: target.meta.maxLeverage, currentExposure: positions.reduce((sum, p) => sum + p.notional, 0), slPct: exits.slPct, tpPct: exits.tpPct });
-            if (!intent.ok) { if (intent.reason === "exposure cap reached") { notes.push("exposure cap reached"); break; } continue; }
-            leverage = intent.leverage; size = intent.size;
-          }
-          const quote = quotePx; let entry = quote;
-          const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")}`;
-          if (isLive && creds) {
-            const asset = (await assets()).get(sig.coin);
-            if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; }
-            size = Number(size.toFixed(asset.szDecimals));
-            if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${asset.szDecimals} decimals.`); continue; }
-            try {
-              // Re-read the asset max in case metadata changed between scanner and order.
-              leverage = isTb ? Math.max(1, Math.floor(asset.maxLeverage)) : leverage;
-              await setLeverage(creds, asset, leverage);
-              const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 });
-              if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; }
-              entry = fill.avgPrice || quote; size = fill.size;
-            } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; }
-          }
-          const sl = isTb ? tbStop : sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
-          const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
-          const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: tbStop, risk_pct: tbCfg.riskPct } : {};
-          const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra });
-          if (insErr) { report.errors.push(`record ${sig.coin}: ${insErr.message}`); continue; }
-          positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence });
-          held.add(sig.coin); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isTb ? tbCfg.riskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, leverage });
-        }
-      }
-      const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · scanner_cursor=${nextCursor}`;
-      await supabaseAdmin.from("bot_settings").update({ last_cycle_at: new Date().toISOString(), last_cycle_note: note }).eq("user_id", s.user_id);
-    } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`${s.user_id}: ${msg}`); await log(s.user_id, "error", `Trading cycle failed: ${msg}`); }
-  }
-  return report;
+import { TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, buildCascade, evaluateTrendlineBreak, safetyLineFor, safetyStop, riskSize, trailToSafety, safetyBreached, type TbTimeframe, type TbSeries } from "./strategies/trendlineBreak";
+const HL_INFO="https://api.hyperliquid.xyz/info";
+const BARS=230; const HTF_BARS=240; const WEEKLY_BARS=120; const M15_BARS=500; const SCAN_PER_CYCLE=35; const MIN_24H_VOLUME=100_000;
+type Level="info"|"warn"|"error"|"trade";
+async function hl<T>(body:unknown):Promise<T>{const res=await fetch(HL_INFO,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});if(!res.ok)throw new Error(`Hyperliquid ${res.status}`);return(await res.json())as T;}
+interface AssetMeta{name:string;szDecimals:number;maxLeverage:number} interface AssetCtx{funding:string;openInterest:string;markPx:string;dayNtlVlm:string}
+export interface CycleReport{users:number;closed:number;opened:number;vetoed:number;scanned:number;errors:string[]}
+interface Settings{user_id:string;bot_enabled:boolean;kill_switch_engaged:boolean;server_agent_enabled:boolean;scalp_enabled:boolean;scalp_tp_pct:number;scalp_sl_pct:number;trail_activate_pct:number;trail_dist_pct:number;max_positions:number;max_leverage:number;position_size_pct:number;max_exposure_pct:number;daily_loss_pct:number;min_confidence:number;paper_equity:number;mode:string;live_max_alloc_usd:number;strategy_key?:string;tp_rr?:number;btc_shock_enabled?:boolean;btc_shock_pct?:number;btc_shock_window_min?:number;tb_timeframes?:string;tb_pivot_strength?:number;tb_risk_pct?:number;tb_position_size_pct?:number;tb_refresh_min?:number;last_cycle_note?:string|null}
+interface PositionRow{id:string;coin:string;side:"long"|"short";size:number;notional:number;leverage:number;entry_price:number;stop_loss:number;take_profit:number;trail_high:number|null;confidence:number}
+export async function runTradingCycle():Promise<CycleReport>{
+ const {supabaseAdmin}=await import("@/integrations/supabase/client.server"); const report:CycleReport={users:0,closed:0,opened:0,vetoed:0,scanned:0,errors:[]};
+ const {data:users,error:settingsErr}=await supabaseAdmin.from("bot_settings").select("*").eq("server_agent_enabled",true).eq("bot_enabled",true).eq("kill_switch_engaged",false); if(settingsErr)throw new Error(settingsErr.message); if(!users||users.length===0)return report; report.users=users.length;
+ const log=async(userId:string,level:Level,message:string,meta?:unknown)=>{const{error}=await supabaseAdmin.from("bot_events").insert({user_id:userId,level,message,meta:meta===undefined?null:(JSON.parse(JSON.stringify(meta))as never)});if(error)report.errors.push(`log: ${error.message}`);};
+ const mids=await hl<Record<string,string>>({type:"allMids"}); const[meta,ctxs]=await hl<[{universe:AssetMeta[]},AssetCtx[]]>({type:"metaAndAssetCtxs"}); const EXCLUDED_COINS=new Set(["BTC","ETH"]); const liquid=meta.universe.map((m,i)=>({meta:m,ctx:ctxs[i]})).filter(x=>x.ctx&&+x.ctx.dayNtlVlm>MIN_24H_VOLUME&&!EXCLUDED_COINS.has(x.meta.name)).sort((a,b)=>+b.ctx.dayNtlVlm-+a.ctx.dayNtlVlm);
+ const{readHlCreds,loadAssetIndex,marketOrder,setLeverage,fetchLiveAccount}=await import("./hyperliquidExchange.server"); const creds=readHlCreds(); let assetIndex:Awaited<ReturnType<typeof loadAssetIndex>>|null=null; const assets=async()=>(assetIndex??=await loadAssetIndex()); const barCache=new Map<string,Bar[]>();
+ const loadBars=async(coin:string,interval:"15m"|"1h"|"4h"|"1d"|"1w"|TbTimeframe,count:number):Promise<Bar[]|null=>{const key=`${coin}:${interval}`;if(barCache.has(key))return barCache.get(key)!;try{const intervalMs=interval==="15m"?15*60*1000:interval==="1w"?7*24*60*60*1000:TB_INTERVAL_MS[interval as TbTimeframe]??60*60*1000;const end=Date.now();const candles=await hl<{t:number;o:string;h:string;l:string;c:string;v:string}[]>({type:"candleSnapshot",req:{coin,interval,startTime:end-count*intervalMs,endTime:end}});const bars=candlesToBars(candles as never).slice(0,-1);barCache.set(key,bars);return bars;}catch{return null;}};
+ for(const raw of users){const s=raw as unknown as Settings;const notes:string[]=[];try{const isLive=s.mode==="live";if(isLive&&!creds){notes.push("live mode on but API wallet not configured — no orders sent");await log(s.user_id,"error","Live mode is on but Hyperliquid API credentials are missing.");}let canTrade=!isLive||!!creds;const exits:ExitParams={tpPct:+s.scalp_tp_pct,slPct:+s.scalp_sl_pct,trailActivatePct:+s.trail_activate_pct,trailDistPct:+s.trail_dist_pct};const shockWindow=Math.max(1,Math.round(+(s.btc_shock_window_min??240)));let shockDir:ShockDir=null;let shockMove:number|null=null;if(s.btc_shock_enabled!==false){shockMove=await fetchBtcMovePct(shockWindow);shockDir=shockDirection(shockMove,+(s.btc_shock_pct??1.5));if(shockDir){notes.push(`BTC shock ${shockDir} ${shockMove!.toFixed(2)}% / ${shockWindow}m`);await log(s.user_id,"warn",`BTC shock detected: ${shockMove!.toFixed(2)}% within ${shockWindow}m — flattening ${shockDir==="down"?"longs":"shorts"} and pausing opposing entries.`,{shockDir,shockMove,windowMin:shockWindow});}}
+ const{data:openRaw}=await supabaseAdmin.from("paper_positions").select("*").eq("user_id",s.user_id).eq("status","open");let positions=(openRaw??[]).map(p=>({id:p.id,coin:p.coin,side:p.side as "long"|"short",size:+p.size,notional:+p.notional,leverage:+p.leverage,entry_price:+p.entry_price,stop_loss:+p.stop_loss,take_profit:p.take_profit==null?(p.side==="long"?Number.POSITIVE_INFINITY:Number.NEGATIVE_INFINITY):+p.take_profit,trail_high:p.trail_high==null?null:+p.trail_high,confidence:+p.confidence}))as PositionRow[];let liveAcct:Awaited<ReturnType<typeof fetchLiveAccount>>|null=null;if(isLive&&creds){try{liveAcct=await fetchLiveAccount(creds.accountAddress);}catch(err){canTrade=false;const msg=err instanceof Error?err.message:String(err);notes.push(`live account read failed: ${msg}`);await log(s.user_id,"error",`Could not read Hyperliquid account — trading paused this cycle: ${msg}`);}}const equityNow=isLive&&liveAcct?liveAcct.accountValue:+s.paper_equity;const held=new Set(positions.map(p=>p.coin));
+ const isTb=(s.strategy_key??"")===TRENDLINE_BREAK_KEY;const tbCfg={timeframes:parseTimeframes(s.tb_timeframes),pivotStrength:Math.round(+(s.tb_pivot_strength??3)),riskPct:+(s.tb_risk_pct??1),positionSizePct:+(s.tb_position_size_pct??s.position_size_pct??5)};
+ const loadTbSeries=async(coin:string):Promise<TbSeries=>{const series:TbSeries={};for(const tf of tbCfg.timeframes){const bars=await loadBars(coin,tf,300);if(bars&&bars.length>=30)series[tf]=bars;}return series;};
+ const closeTbPosition=async(p:PositionRow,mark:number,exitReason:string)=>{if(isLive&&creds){const asset=(await assets()).get(p.coin);if(!asset){report.errors.push(`${p.coin}: unknown asset on close`);return;}try{await marketOrder(creds,asset,{isBuy:p.side==="short",size:p.size,markPrice:mark,reduceOnly:true,slippagePct:1});}catch(err){const msg=err instanceof Error?err.message:String(err);report.errors.push(`close ${p.coin}: ${msg}`);await log(s.user_id,"error",`Failed to close ${p.coin}: ${msg}`);return;}}const pnl=p.side==="long"?(mark-p.entry_price)*p.size:(p.entry_price-mark)*p.size;await supabaseAdmin.from("paper_positions").update({status:"closed",exit_price:mark,exit_reason:exitReason,pnl,closed_at:new Date().toISOString()}).eq("id",p.id);positions=positions.filter(x=>x.id!==p.id);held.delete(p.coin);report.closed++;await log(s.user_id,"trade",`${isLive?"LIVE ":""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · ${exitReason} · PnL ${pnl.toFixed(2)}`,{strategy:TRENDLINE_BREAK_KEY});};
+ if(canTrade&&shockDir){for(const p of[...positions]){if(!shockHitsSide(shockDir,p.side))continue;const mark=mids[p.coin]?+mids[p.coin]:p.entry_price;await closeTbPosition(p,mark,"btc_shock");}}
+ if(isTb&&canTrade){for(const p of[...positions]){const mark=mids[p.coin]?+mids[p.coin]:p.entry_price;const series=await loadTbSeries(p.coin);const levels=buildCascade(series,tbCfg.timeframes,tbCfg.pivotStrength);const safety=safetyLineFor(levels,p.side,mark);if(safety!=null){if(safetyBreached(p.side,mark,safety)){await closeTbPosition(p,mark,"safety_line");continue;}const next=trailToSafety(p.side,p.stop_loss,safety);if(next!==p.stop_loss){p.stop_loss=next;await supabaseAdmin.from("paper_positions").update({stop_loss:next,safety_line:safety}).eq("id",p.id);}}if(p.side==="long"?mark<=p.stop_loss:mark>=p.stop_loss)await closeTbPosition(p,mark,"safety_stop");}}
+ const eligibleCount=liquid.length;const match=s.last_cycle_note?.match(/scanner_cursor=(\d+)/);const cursor=eligibleCount?Math.max(0,Math.min(Number(match?.[1]??0),eligibleCount-1)):0;const scanCount=Math.min(SCAN_PER_CYCLE,eligibleCount);const scanTargets=Array.from({length:scanCount},(_,i)=>liquid[(cursor+i)%eligibleCount]);const nextCursor=eligibleCount?(cursor+scanCount)%eligibleCount:0;notes.push(`scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
+ if(s.scalp_enabled&&canTrade&&equityNow>0&&positions.length<+s.max_positions){for(const target of scanTargets){if(positions.length>=+s.max_positions)break;if(held.has(target.meta.name))continue;let sig:ScalpSignal;let tbSafety:number|undefined;let tbTimeframe:string|undefined;if(isTb){const series=await loadTbSeries(target.meta.name);report.scanned++;if(Object.keys(series).length<tbCfg.timeframes.length)continue;const tb=evaluateTrendlineBreak(target.meta.name,series,tbCfg);tbSafety=tb.safetyLine;tbTimeframe=tb.timeframe;sig={coin:tb.coin,side:tb.side,family:TRENDLINE_BREAK_KEY,confidence:tb.confidence,reasons:tb.reasons,price:tb.price,atrPct:0,indicators:tb.indicators,actionLine:tb.actionLine,safetyLine:tb.safetyLine};}else{const weekly=await loadBars(target.meta.name,"1w",WEEKLY_BARS);const daily=await loadBars(target.meta.name,"1d",HTF_BARS);const fourHour=await loadBars(target.meta.name,"4h",HTF_BARS);const hourly=await loadBars(target.meta.name,"1h",BARS);const fifteenMin=await loadBars(target.meta.name,"15m",M15_BARS);report.scanned++;if(!weekly||!daily||!fourHour||!hourly||!fifteenMin||weekly.length<50||daily.length<80||fourHour.length<80||hourly.length<80||fifteenMin.length<80)continue;sig=evaluateScalpMulti(target.meta.name,{weekly,daily,fourHour,hourly,fifteenMin});}
+ if(!sig.side||sig.confidence<+s.min_confidence)continue;if(shockHitsSide(shockDir,sig.side))continue;const b=bucket(sig.coin);if(positions.filter(p=>bucket(p.coin)===b).length>=3)continue;const liveCap=+(s.live_max_alloc_usd??0);const equity=isLive&&liveCap>0?Math.min(equityNow,liveCap):equityNow;const quotePx=mids[sig.coin]?+mids[sig.coin]:sig.price;let leverage:number;let size:number;let tbStop=0;
+ if(isTb){if(tbSafety==null)continue;leverage=Math.max(1,Math.floor(target.meta.maxLeverage));tbStop=safetyStop(sig.side,tbSafety);const riskBasedSize=riskSize(equity,tbCfg.riskPct,quotePx,tbStop);const positionNotionalCap=equity*(tbCfg.positionSizePct/100)*leverage;const exposureCap=equity*(+s.max_exposure_pct/100)*leverage;const used=positions.reduce((sum,p)=>sum+p.notional,0);const room=exposureCap-used;if(room<=0){notes.push("exposure cap reached");break;}size=Math.min(riskBasedSize,positionNotionalCap/quotePx,room/quotePx);if(!(size>0)||!Number.isFinite(size))continue;}else{const intent=buildEntryIntent({side:sig.side,price:quotePx,equity,positionSizePct:+s.position_size_pct,maxExposurePct:+s.max_exposure_pct,userMaxLeverage:+s.max_leverage,assetMaxLeverage:target.meta.maxLeverage,currentExposure:positions.reduce((sum,p)=>sum+p.notional,0),slPct:exits.slPct,tpPct:exits.tpPct});if(!intent.ok){if(intent.reason==="exposure cap reached"){notes.push("exposure cap reached");break;}continue;}leverage=intent.leverage;size=intent.size;}
+ const quote=quotePx;let entry=quote;const reason=`${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")}`;if(isLive&&creds){const asset=(await assets()).get(sig.coin);if(!asset){report.errors.push(`${sig.coin}: unknown asset`);continue;}size=Number(size.toFixed(asset.szDecimals));if(size<=0){await log(s.user_id,"warn",`Skipped ${sig.coin}: order size rounds to zero at ${asset.szDecimals} decimals.`);continue;}try{leverage=isTb?Math.max(1,Math.floor(asset.maxLeverage)):leverage;await setLeverage(creds,asset,leverage);const fill=await marketOrder(creds,asset,{isBuy:sig.side==="long",size,markPrice:quote,reduceOnly:false,slippagePct:1});if(fill.size<=0){await log(s.user_id,"warn",`Live entry for ${sig.coin} did not fill.`);continue;}entry=fill.avgPrice||quote;size=fill.size;}catch(err){const msg=err instanceof Error?err.message:String(err);report.errors.push(`open ${sig.coin}: ${msg}`);await log(s.user_id,"error",`Live entry failed for ${sig.coin}: ${msg}`);continue;}}
+ const sl=isTb?tbStop:sig.side==="long"?entry*(1-exits.slPct/100):entry*(1+exits.slPct/100);const tp=isTb?null:sig.side==="long"?entry*(1+exits.tpPct/100):entry*(1-exits.tpPct/100);const extra=isTb?{safety_line:tbSafety??null,action_line:sig.actionLine??null,timeframe:tbTimeframe??null,initial_stop:tbStop,risk_pct:tbCfg.riskPct}:{};const{error:insErr}=await supabaseAdmin.from("paper_positions").insert({user_id:s.user_id,coin:sig.coin,side:sig.side,size,notional:size*entry,leverage,entry_price:entry,stop_loss:sl,take_profit:tp,confidence:sig.confidence,reason,indicators:sig.indicators,...extra});if(insErr){report.errors.push(`record ${sig.coin}: ${insErr.message}`);continue;}positions.push({id:crypto.randomUUID(),coin:sig.coin,side:sig.side,size,notional:size*entry,leverage,entry_price:entry,stop_loss:sl,take_profit:tp??(sig.side==="long"?Number.POSITIVE_INFINITY:Number.NEGATIVE_INFINITY),trail_high:entry,confidence:sig.confidence});held.add(sig.coin);report.opened++;await log(s.user_id,"trade",`${isLive?"LIVE ":""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`,{agent:"server",live:isLive,signal:sig,riskPct:isTb?tbCfg.riskPct:null,positionSizePct:isTb?tbCfg.positionSizePct:null,leverage});}}
+ const note=notes.length?notes.join(" · ")+` · scanner_cursor=${nextCursor}`:`cycle complete · scanner_cursor=${nextCursor}`;await supabaseAdmin.from("bot_settings").update({last_cycle_at:new Date().toISOString(),last_cycle_note:note}).eq("user_id",s.user_id);
+ }catch(err){const msg=err instanceof Error?err.message:String(err);report.errors.push(`${s.user_id}: ${msg}`);await log(s.user_id,"error",`Trading cycle failed: ${msg}`);}}
+ return report;
 }
