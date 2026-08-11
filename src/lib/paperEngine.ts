@@ -1,5 +1,5 @@
 import { fetchCandles, fetchMetaAndCtxs, subscribeAllMids, type AssetCtx, type AssetMeta } from "./hyperliquid";
-import { candlesToBars, evaluateSignal, bucket, type Signal, type Bar, MODE_MIN_CONFIDENCE, type StrategyMode } from "./strategy";
+import { candlesToBars, evaluateMultiTimeframeSignal, bucket, type Signal, type Bar, MODE_MIN_CONFIDENCE, type StrategyMode } from "./strategy";
 import { supabase } from "@/integrations/supabase/client";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 
@@ -61,7 +61,8 @@ const CANDLE_INTERVAL = "1h";
 const CANDLE_MS = 60 * 60 * 1000;
 const BARS_NEEDED = 220;
 
-interface CoinCache { bars: Bar[]; lastFetch: number; nextEval: number }
+interface CoinCache { bars: Bar[]; daily: Bar[]; fourHour: Bar[]; lastFetch: number; nextEval: number }
+const HTF_BARS = 240;
 
 export class PaperEngine {
   private userId: string;
@@ -302,17 +303,25 @@ export class PaperEngine {
       if (cached && now < cached.nextEval) continue;
       // fetch/refresh candles (throttled)
       let bars: Bar[] | undefined = cached?.bars;
-      if (!bars || now - (cached?.lastFetch ?? 0) > 5 * 60 * 1000) {
+      let daily: Bar[] | undefined = cached?.daily;
+      let fourHour: Bar[] | undefined = cached?.fourHour;
+      if (!bars || !daily || !fourHour || now - (cached?.lastFetch ?? 0) > 5 * 60 * 1000) {
         try {
           const end = now;
-          const start = end - BARS_NEEDED * CANDLE_MS;
-          const cs = await fetchCandles(meta.name, CANDLE_INTERVAL, start, end);
-          bars = candlesToBars(cs);
-          this.cache.set(meta.name, { bars, lastFetch: now, nextEval: now + 30_000 });
+          // Gen-2 needs real Daily and 4H history; aggregating a 1H window cannot
+          // produce the 80 daily bars the trend-line evaluator requires.
+          const [cs, cd, c4] = await Promise.all([
+            fetchCandles(meta.name, CANDLE_INTERVAL, end - BARS_NEEDED * CANDLE_MS, end),
+            fetchCandles(meta.name, "1d", end - HTF_BARS * 24 * 60 * 60 * 1000, end),
+            fetchCandles(meta.name, "4h", end - HTF_BARS * 4 * 60 * 60 * 1000, end),
+          ]);
+          bars = candlesToBars(cs); daily = candlesToBars(cd); fourHour = candlesToBars(c4);
+          this.cache.set(meta.name, { bars, daily, fourHour, lastFetch: now, nextEval: now + 30_000 });
         } catch { continue; }
       }
       if (!bars || bars.length < BARS_NEEDED) continue;
-      const sig = evaluateSignal(meta.name, bars);
+      if (daily.length < 80 || fourHour.length < 80) continue;
+      const sig = evaluateMultiTimeframeSignal(meta.name, daily, fourHour, bars);
       this.cache.get(meta.name)!.nextEval = now + 60_000;
       if (!sig.side) continue;
       if (shockHitsSide(this.shockDir, sig.side)) continue;

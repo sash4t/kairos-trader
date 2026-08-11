@@ -2,13 +2,15 @@ import { NoObjectGeneratedError, generateObject } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 import { candlesToBars, bucket, type Bar } from "./strategy";
-import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal, type StrategyKey } from "./scalp";
+import { buildEntryIntent } from "./orderIntent";
+import { evaluateScalpMulti, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal, type StrategyKey } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
 const INTERVAL = "1h";
 const INTERVAL_MS = 60 * 60 * 1000;
 const BARS = 230;
+const HTF_BARS = 240;
 const SCAN_PER_CYCLE = 35;
 const MIN_24H_VOLUME = 100_000;
 
@@ -137,22 +139,40 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (positions.length >= s.max_positions) break;
           if (held.has(target.meta.name)) continue;
           const hourly = await loadBars(target.meta.name, "1h", BARS); report.scanned++; if (!hourly || hourly.length < 80) continue;
-          const sig: ScalpSignal = evaluateScalp(target.meta.name, hourly, strategyKey);
+          let sig: ScalpSignal;
+          if (strategyKey === "trendbot_momentum") {
+            sig = evaluateScalpMulti(target.meta.name, { daily: hourly, fourHour: hourly, hourly }, strategyKey);
+          } else {
+            // Gen-2 Daily → 4H → 1H needs 80+ real bars on each timeframe; a 1H
+            // window aggregated upward can never satisfy the daily requirement.
+            const daily = await loadBars(target.meta.name, "1d", HTF_BARS);
+            const fourHour = await loadBars(target.meta.name, "4h", HTF_BARS);
+            if (!daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
+            sig = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly }, strategyKey);
+          }
           if (!sig.side || sig.confidence < +s.min_confidence) continue;
           if (shockHitsSide(shockDir, sig.side)) continue;
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
           // Leverage never exceeds the user's configured cap or the exchange maximum.
-          const leverage = Math.min(+s.max_leverage, target.meta.maxLeverage);
-          const capNotional = equity * (+s.max_exposure_pct / 100) * +s.max_leverage; const exposure = positions.reduce((sum, p) => sum + p.notional, 0); const headroom = capNotional - exposure;
-          if (headroom <= capNotional * 0.05) { notes.push("exposure cap reached"); break; }
-          const notional = Math.min(equity * (+s.position_size_pct / 100) * leverage, headroom);
+          const quotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
+          const intent = buildEntryIntent({
+            side: sig.side, price: quotePx, equity,
+            positionSizePct: +s.position_size_pct, maxExposurePct: +s.max_exposure_pct,
+            userMaxLeverage: +s.max_leverage, assetMaxLeverage: target.meta.maxLeverage,
+            currentExposure: positions.reduce((sum, p) => sum + p.notional, 0),
+            slPct: exits.slPct, tpPct: exits.tpPct,
+          });
+          if (!intent.ok) { if (intent.reason === "exposure cap reached") { notes.push("exposure cap reached"); break; } continue; }
+          const leverage = intent.leverage;
+
           let verdict = { approve: true, reason: "AI review disabled", risk: "unknown" as string };
           if (s.ai_review_enabled) { verdict = await reviewSignal(sig, target.ctx, positions.map((p) => `${p.side} ${p.coin}`), exits); await log(s.user_id, "ai", `${verdict.approve ? "APPROVED" : "VETOED"} ${sig.side.toUpperCase()} ${sig.coin} — ${verdict.reason}`, { signal: sig, verdict }); if (!verdict.approve) { report.vetoed++; continue; } }
-          const quote = mids[sig.coin] ? +mids[sig.coin] : sig.price; let entry = quote; let size = notional / quote;
+          const quote = quotePx; let entry = quote; let size = intent.size;
           const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")} · AI: ${verdict.reason}`;
-          if (isLive && creds) { const asset = (await assets()).get(sig.coin); if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; } size = Number(size.toFixed(asset.szDecimals)); if (size <= 0) continue; try { await setLeverage(creds, asset, leverage); const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; } entry = fill.avgPrice || quote; size = fill.size; } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; } }
-          // Fixed percentage stop / target from the Bollinger baseline exits.
+          if (isLive && creds) { const asset = (await assets()).get(sig.coin); if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; } size = Number(size.toFixed(asset.szDecimals)); if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${asset.szDecimals} decimals.`); continue; } try { await setLeverage(creds, asset, leverage); const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; } entry = fill.avgPrice || quote; size = fill.size; } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; } }
+          // Fixed percentage stop / target.
+
           const sl = sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
           const tp = sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
           const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators });
