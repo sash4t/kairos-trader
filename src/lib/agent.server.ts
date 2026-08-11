@@ -99,11 +99,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
     const notes: string[] = [];
     try {
       const isLive = s.mode === "live";
-      const strategyKey: StrategyKey = s.strategy_key === "trendbot_momentum" ? "trendbot_momentum" : TRENDLINE_STRATEGY_KEY;
-      const isTrendline = strategyKey === TRENDLINE_STRATEGY_KEY;
+      const strategyKey: StrategyKey = normalizeStrategyKey(s.strategy_key);
+      const isTrendline = strategyKey === PURE_PRICE_STRATEGY_KEY;
       const cfg = trendlineCfg(s);
       const execTf = executionTimeframe(s);
-      const riskPct = clampRiskPct(+(s.trendline_risk_pct ?? 1));
       if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
       let canTrade = !isLive || !!creds;
       const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
