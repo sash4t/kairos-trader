@@ -1,0 +1,2 @@
+ALTER TABLE public.bot_settings ALTER COLUMN strategy_key SET DEFAULT 'trendline_pure_price';
+UPDATE public.bot_settings SET strategy_key = 'trendline_pure_price', updated_at = now() WHERE strategy_key IN ('adaptive_trend_momentum', 'bollinger_breakout', 'trendline_price_action');
