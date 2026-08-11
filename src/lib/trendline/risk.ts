@@ -1,47 +1,57 @@
-export interface SizeInput {
-  equity: number;
-  entry: number;
-  stop: number;
-  szDecimals?: number;
-  minSize?: number;
-  maxLeverage?: number;
-  maxNotional?: number;
-  feeBufferPct?: number;
-}
-
 export interface SizeResult {
   size: number;
   notional: number;
-  riskUsd: number;
   stopDistance: number;
   leverage: number;
   ok: boolean;
   reason?: string;
 }
 
-/** Kept for settings/backward compatibility; it is not used to size pure-price trades. */
-export function clampRiskPct(v: number): number {
-  if (!Number.isFinite(v) || v <= 0) return 1;
-  return Math.min(2, Math.max(0.25, v));
+export interface MaxLeverageSizeInput {
+  /** Equity the strategy may allocate from (already capped by live_max_alloc_usd). */
+  equity: number;
+  entry: number;
+  /** Protective Safety Line stop — used for reporting, never to derive size. */
+  stop: number;
+  /** The market's own maximum leverage from Hyperliquid asset metadata. */
+  marketMaxLeverage: number;
+  /** Remaining portfolio exposure headroom in notional USD. */
+  maxNotional?: number;
+  szDecimals?: number;
+  minSize?: number;
+  /** Margin safety buffer so the position is not opened at literally 100% margin. */
+  marginBufferPct?: number;
+}
+
+/** Exchange maximum leverage for the asset, floored at 1x and rounded down. */
+export function resolveMaxLeverage(marketMaxLeverage: number): number {
+  if (!Number.isFinite(marketMaxLeverage) || marketMaxLeverage < 1) return 1;
+  return Math.floor(marketMaxLeverage);
 }
 
 /**
- * Pure-price sizing deliberately has no hard-coded 1% account-risk rule.
- * Trendline Strategy - Pure Price runs at exactly 1x leverage; the Safety
- * Line remains the actual protective stop. Position notional is bounded by
- * available equity and the existing exposure headroom.
+ * Trendline Strategy - Pure Price sizing.
+ *
+ * There is deliberately NO 1% account-risk rule and NO forced 1x leverage:
+ * the position is opened at the market's maximum available Hyperliquid
+ * leverage, bounded by equity, the portfolio exposure headroom and a margin
+ * buffer. The Safety Line remains the actual protective stop.
  */
-export function sizeFromRisk(input: SizeInput): SizeResult {
-  const feeBuffer = input.entry * ((input.feeBufferPct ?? 0.1) / 100);
-  const stopDistance = Math.abs(input.entry - input.stop) + feeBuffer;
-  const notionalCap = Math.min(input.maxNotional ?? Infinity, input.equity);
-  const base: SizeResult = { size: 0, notional: 0, riskUsd: stopDistance, stopDistance, leverage: 1, ok: false };
-  if (!(stopDistance > 0) || !(input.entry > 0) || !(notionalCap > 0)) return { ...base, reason: "invalid entry/stop/equity" };
+export function sizeAtMaxLeverage(input: MaxLeverageSizeInput): SizeResult {
+  const leverage = resolveMaxLeverage(input.marketMaxLeverage);
+  const buffer = Math.min(Math.max(input.marginBufferPct ?? 2, 0), 50) / 100;
+  const stopDistance = Math.abs(input.entry - input.stop);
+  const base: SizeResult = { size: 0, notional: 0, stopDistance, leverage, ok: false };
+  if (!(input.entry > 0) || !(input.equity > 0)) return { ...base, reason: "invalid entry/equity" };
+
+  const capacity = input.equity * leverage * (1 - buffer);
+  const notionalCap = Math.min(capacity, input.maxNotional ?? Infinity);
+  if (!(notionalCap > 0)) return { ...base, reason: "no exposure headroom" };
 
   let size = notionalCap / input.entry;
   if (input.szDecimals != null) size = Number(size.toFixed(input.szDecimals));
   const notional = size * input.entry;
   if (size <= 0 || notional <= 0) return { ...base, reason: "size rounds to zero" };
   if (input.minSize != null && size < input.minSize) return { ...base, size, notional, reason: "below exchange minimum size" };
-  return { size, notional, riskUsd: size * stopDistance, stopDistance, leverage: 1, ok: true };
+  return { size, notional, stopDistance, leverage, ok: true };
 }

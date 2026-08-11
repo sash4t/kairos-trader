@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
-import { Activity, BarChart3, History, LayoutDashboard, Radar, Settings, LogOut, Power, Menu, X } from "lucide-react";
+import { BarChart3, History, LayoutDashboard, Radar, Settings, LogOut, Power, Menu, X } from "lucide-react";
 import { useBot } from "@/lib/botContext";
 import { supabase } from "@/integrations/supabase/client";
 import { KillSwitch } from "./KillSwitch";
@@ -10,7 +10,6 @@ const NAV = [
   { to: "/positions", label: "Positions", icon: BarChart3 },
   { to: "/scanner", label: "Scanner", icon: Radar },
   { to: "/trades", label: "Trades", icon: History },
-  { to: "/strategy", label: "Strategy", icon: Activity },
   { to: "/settings", label: "Settings", icon: Settings },
 ] as const;
 

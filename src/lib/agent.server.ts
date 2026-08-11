@@ -2,10 +2,12 @@ import { NoObjectGeneratedError, generateObject } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 import { candlesToBars, bucket, type Bar } from "./strategy";
-import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal, type StrategyKey } from "./scalp";
+import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
+import { normalizeStrategyKey, PURE_PRICE_STRATEGY_KEY, type StrategyKey } from "./strategies";
+import { detectBtcShock, sideToFlatten, DEFAULT_BTC_SHOCK, type ShockDirection } from "./btcShock";
 import {
-  DEFAULT_TRENDLINE_CONFIG, TRENDLINE_STRATEGY_KEY, TIMEFRAME_MS, ladderFor, evaluateTrendline,
-  currentSafetyLine, ratchetSafetyStop, safetyExitReason, sizeFromRisk, clampRiskPct,
+  DEFAULT_TRENDLINE_CONFIG, TIMEFRAME_MS, ladderFor, evaluateTrendline,
+  currentSafetyLine, ratchetSafetyStop, safetyExitReason, sizeAtMaxLeverage, resolveMaxLeverage,
   type Timeframe, type TrendlineConfig, type TrendlineSignal,
 } from "./trendline";
 
@@ -34,8 +36,9 @@ interface Settings {
   ai_review_enabled: boolean; scalp_enabled: boolean; scalp_tp_pct: number; scalp_sl_pct: number;
   trail_activate_pct: number; trail_dist_pct: number; max_positions: number; max_leverage: number;
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
-  paper_equity: number; mode: string; live_max_alloc_usd: number; tp_rr: number; strategy_key?: StrategyKey;
+  paper_equity: number; mode: string; live_max_alloc_usd: number; tp_rr: number; strategy_key?: string;
   trendline_risk_pct?: number; execution_timeframe?: string; safety_buffer_pct?: number;
+  btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
 }
 interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number | null; trail_high: number | null; confidence: number }
 
@@ -96,11 +99,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
     const notes: string[] = [];
     try {
       const isLive = s.mode === "live";
-      const strategyKey: StrategyKey = s.strategy_key === "trendbot_momentum" ? "trendbot_momentum" : TRENDLINE_STRATEGY_KEY;
-      const isTrendline = strategyKey === TRENDLINE_STRATEGY_KEY;
+      const strategyKey: StrategyKey = normalizeStrategyKey(s.strategy_key);
+      const isTrendline = strategyKey === PURE_PRICE_STRATEGY_KEY;
       const cfg = trendlineCfg(s);
       const execTf = executionTimeframe(s);
-      const riskPct = clampRiskPct(+(s.trendline_risk_pct ?? 1));
       if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
       let canTrade = !isLive || !!creds;
       const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
@@ -122,10 +124,25 @@ export async function runTradingCycle(): Promise<CycleReport> {
         }
       }
       let realised = 0;
+      // BTC shock protection runs BEFORE ordinary Safety Line processing.
+      let shockDir: ShockDirection | null = null;
+      if (positions.length) {
+        const btcBars = await loadInterval("BTC", "5m", 60);
+        if (btcBars && btcBars.length > 2) {
+          const shock = detectBtcShock(btcBars, { enabled: s.btc_shock_enabled !== false, thresholdPct: +(s.btc_shock_pct ?? DEFAULT_BTC_SHOCK.thresholdPct), windowMin: +(s.btc_shock_window_min ?? DEFAULT_BTC_SHOCK.windowMin) });
+          shockDir = shock.direction;
+          if (shockDir) {
+            notes.push(`BTC shock ${shockDir} ${shock.movePct.toFixed(2)}%`);
+            await log(s.user_id, "warn", `BTC shock ${shockDir} (${shock.movePct.toFixed(2)}% over ${s.btc_shock_window_min ?? DEFAULT_BTC_SHOCK.windowMin}m) — flattening all ${sideToFlatten(shockDir).toUpperCase()} positions.`, { agent: "server", btcShock: shock, live: isLive });
+          }
+        }
+      }
       for (const p of [...positions]) {
         const markStr = mids[p.coin]; if (!markStr) continue; const mark = +markStr;
-        let reason: string | null = null;
-        if (isTrendline) {
+        const forced = shockDir && p.side === sideToFlatten(shockDir) ? `btc_shock_${shockDir}` : null;
+        let reason: string | null = forced;
+        if (forced) { /* emergency directional flattening skips trailing work */ }
+        else if (isTrendline) {
           // The Safety Line is the stop: re-derive it from live structure and
           // ratchet the stop toward it. It can only ever tighten.
           const ladder = await loadLadder(p.coin, execTf);
@@ -144,6 +161,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           reason = exitReasonFor(p.side, mark, p.stop_loss, p.take_profit ?? (p.side === "long" ? Infinity : 0), p.entry_price);
         }
         if (!reason) continue;
+
         let exitPrice = mark; let exitSize = p.size;
         if (isLive && creds) { const asset = (await assets()).get(p.coin); if (!asset) { report.errors.push(`${p.coin}: unknown asset`); continue; } try { const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live close for ${p.coin} did not fill — retrying next cycle.`); continue; } exitPrice = fill.avgPrice || mark; exitSize = fill.size; if (exitSize < p.size * 0.99) { const remaining = p.size - exitSize; const partialPnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize; p.size = remaining; p.notional = remaining * p.entry_price; await supabaseAdmin.from("paper_positions").update({ size: remaining, notional: p.notional }).eq("id", p.id); await log(s.user_id, "trade", `LIVE PARTIAL CLOSE ${p.coin} ${exitSize} @ ${exitPrice.toFixed(6)} · PnL ${partialPnl >= 0 ? "+" : ""}${partialPnl.toFixed(2)} USDC`, { agent: "server", live: true }); continue; } } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Live close failed for ${p.coin}: ${msg}`); continue; } }
         const pnl = p.side === "long" ? (exitPrice - p.entry_price) * exitSize : (p.entry_price - exitPrice) * exitSize;
@@ -226,9 +244,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
           let tp: number | null;
 
           if (isTrendline && trendSig) {
-            // Risk-based sizing off the entry-to-safety-stop distance.
+            // Pure Price: exchange MAXIMUM leverage for this market — never 1x,
+            // never a fixed % of equity risked. Portfolio exposure headroom,
+            // max positions, daily-loss and kill switch still bound the size.
             const stopFromSafety = trendSig.initialStop!;
-            const sized = sizeFromRisk({ equity, riskPct, entry: quote, stop: stopFromSafety, szDecimals: target.meta.szDecimals, maxLeverage: leverageCap, maxNotional: headroom });
+            const sized = sizeAtMaxLeverage({ equity, entry: quote, stop: stopFromSafety, marketMaxLeverage: target.meta.maxLeverage, szDecimals: target.meta.szDecimals, maxNotional: headroom });
             if (!sized.ok) { notes.push(`${target.meta.name}: ${sized.reason}`); continue; }
             size = sized.size; leverage = sized.leverage; initialStop = stopFromSafety; sl = stopFromSafety; tp = null;
           } else {
@@ -258,13 +278,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
             indicators: detail as never,
             safety_line: safetyLine, action_line: actionLine,
             timeframe: isTrendline ? execTf : INTERVAL,
-            initial_stop: initialStop, risk_pct: isTrendline ? riskPct : null,
+            initial_stop: initialStop, risk_pct: null,
           });
           if (insErr) { report.errors.push(`record ${target.meta.name}: ${insErr.message}`); continue; }
           positions.push({ id: crypto.randomUUID(), coin: target.meta.name, side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, trail_high: entry, confidence }); held.add(target.meta.name); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${side.toUpperCase()} ${target.meta.name} @ ${entry.toFixed(6)} · size ${size} · stop ${sl.toPrecision(6)} · risk ${isTrendline ? riskPct : +s.position_size_pct}% · ${reason}`, {
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${side.toUpperCase()} ${target.meta.name} @ ${entry.toFixed(6)} · size ${size} · stop ${sl.toPrecision(6)} · ${isTrendline ? `leverage ${leverage}x (market max)` : `risk ${+s.position_size_pct}%`} · ${reason}`, {
             agent: "server", live: isLive, strategy: strategyKey, timeframe: isTrendline ? execTf : INTERVAL,
-            direction: side, entry, initialStop, currentStop: sl, riskPct: isTrendline ? riskPct : null, size,
+            direction: side, entry, initialStop, currentStop: sl, leverage, maxLeverageUsed: isTrendline ? resolveMaxLeverage(target.meta.maxLeverage) : null, size,
             actionLine, safetyLine, detail,
           });
         }
