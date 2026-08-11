@@ -55,9 +55,12 @@ const LEGACY_KEYS: Record<string, StrategyKey> = {
   trendbot_momentum: TRENDBOT_MOMENTUM_KEY,
 };
 
+/** Trendline Strategy - Pure Price is the canonical default strategy. */
+export const DEFAULT_STRATEGY_KEY = PURE_PRICE_STRATEGY_KEY;
+
 export function normalizeStrategyKey(value: string | null | undefined): StrategyKey {
-  if (!value) return ADAPTIVE_STRATEGY_KEY;
-  return LEGACY_KEYS[value] ?? ADAPTIVE_STRATEGY_KEY;
+  if (!value) return DEFAULT_STRATEGY_KEY;
+  return LEGACY_KEYS[value] ?? DEFAULT_STRATEGY_KEY;
 }
 
 export function isPurePrice(key: string | null | undefined): boolean {
