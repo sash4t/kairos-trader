@@ -127,27 +127,22 @@ function Strategy() {
       <div className="panel p-4 sm:p-5 text-xs text-muted-foreground space-y-2">
         <div className="mono uppercase tracking-widest text-warning">Strategy summary</div>
         <p>
-          <strong>Bollinger breakout in trend</strong> on <strong>1-hour</strong> Hyperliquid perp bars, long and short.
-          Entry when price closes beyond the <strong>2.0σ Bollinger band (period 20)</strong> on the trend side of the
-          <strong> SMA 200</strong>, with RSI confirming direction, inside an ATR band of <strong>0.5%–6%</strong>.
-          Exits: fixed <strong>12% take-profit</strong>, <strong>1.5% stop</strong>, and a <strong>1.2% trailing stop</strong>
-          armed once the trade is <strong>1.5%</strong> in profit — the trail supplies most of the edge.
-          Max hold <strong>24 bars</strong>. Correlation guard caps 3 positions per sector.
+          <strong>Trendline price action, top-down</strong>: <strong>Daily</strong> establishes the major bias,
+          <strong> 4H</strong> confirms it, and <strong>1H</strong> supplies the <strong>action-line</strong> break that
+          triggers the entry — long and short. Pure price-action trend lines (pivot-based, minimum 2 touches);
+          no Bollinger, EMA or RSI entry requirement. The opposing 1H trend line is the structural
+          <strong> safety line</strong> used for the stop. <strong>No fixed take-profit</strong> — trades are managed by
+          the safety line and the trailing stop. Correlation guard caps 3 positions per sector.
           Leverage is always <strong>min(your max leverage, exchange max leverage)</strong>.
         </p>
         <p className="mono text-warning">
           BTC rapid-move safeguard: a BTC move of <strong>2.0%+ over 15 minutes</strong> (1m candles) instantly flattens
           positions fighting the move — a drop closes longs, a spike closes shorts — and blocks new entries on that side.
         </p>
-        <p className="mono text-bull">
-          Historical backtest — top 20 Hyperliquid perps, ~40 days of 1h bars, taker fees and slippage
-          included (0.16% round trip), no intrabar lookahead: <strong>329 trades · 80% win rate ·
-          profit factor 1.72 · +10.3% · 0.9% max drawdown</strong>.
-        </p>
         <p>
-          Historical context only, not a guarantee: one month of data across a single market regime is a
-          short sample. Forward-test on paper before committing size.
+          Forward-test on paper before committing size.
         </p>
+
 
       </div>
 
