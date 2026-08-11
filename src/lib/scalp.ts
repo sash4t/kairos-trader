@@ -1,4 +1,4 @@
-import { evaluateMultiTimeframeSignal, STRATEGY_PARAMS, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
+import { evaluateMultiTimeframeSignal, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
 import { evaluateTrendBotSignal, TRENDBOT_STRATEGY_KEY } from "./trendbotStrategy";
 
 export type ScalpSide = "long" | "short";
