@@ -19,6 +19,12 @@ export interface SizeResult {
   reason?: string;
 }
 
+/** Kept for settings/backward compatibility; it is not used to size pure-price trades. */
+export function clampRiskPct(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 1;
+  return Math.min(2, Math.max(0.25, v));
+}
+
 /**
  * Pure-price sizing deliberately has no hard-coded 1% account-risk rule.
  * Trendline Strategy - Pure Price runs at exactly 1x leverage; the Safety
