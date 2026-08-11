@@ -42,7 +42,7 @@ export interface Settings {
   btc_shock_enabled?: boolean;
   btc_shock_pct?: number;
   btc_shock_window_min?: number;
-  trendline_risk_pct?: number;
+
   execution_timeframe?: string;
   safety_buffer_pct?: number;
   /** Max USD of the real account the bot may size positions from in live mode (0 = whole account). */
