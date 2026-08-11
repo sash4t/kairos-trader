@@ -93,7 +93,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
         try { liveAcct = await fetchLiveAccount(creds.accountAddress); }
         catch (err) { canTrade = false; const msg = err instanceof Error ? err.message : String(err); notes.push(`live account read failed: ${msg}`); await log(s.user_id, "error", `Could not read Hyperliquid account — trading paused this cycle: ${msg}`); }
       }
-      const equityNow = isLive && liveAcct ? liveAcct.equity : +s.paper_equity;
+      const equityNow = isLive && liveAcct ? liveAcct.accountValue : +s.paper_equity;
       const held = new Set(positions.map(p => p.coin));
 
       const eligibleCount = liquid.length;

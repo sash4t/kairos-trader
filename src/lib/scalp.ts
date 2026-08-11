@@ -1,7 +1,8 @@
 import { evaluateMultiTimeframeSignal, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
+import { TRENDLINE_BREAK_KEY } from "./strategies/trendlineBreak";
 
 export type ScalpSide = "long" | "short";
-export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY;
+export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDLINE_BREAK_KEY;
 
 export interface ScalpSignal {
   coin: string; side: ScalpSide | null; family: string; confidence: number; reasons: string[]; price: number; atrPct: number; indicators: Record<string, number>;
@@ -10,6 +11,7 @@ export interface ScalpSignal {
 
 export const STRATEGY_OPTIONS = [
   { key: TRENDLINE_STRATEGY_KEY, name: "Trendline Price Action", description: "Top-down trend lines: Daily → 4H → 1H. Daily sets the major bias, 4H confirms it, and 1H provides the action-line break." },
+  { key: TRENDLINE_BREAK_KEY, name: "Trendline Break", description: "Chained multi-timeframe trendlines (1M → 1H). Close through an upward line goes short, close through a downward line goes long; the opposing line is the trailing safety-line stop." },
 ] as const;
 
 export function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
