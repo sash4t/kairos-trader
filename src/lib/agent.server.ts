@@ -244,9 +244,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
           let tp: number | null;
 
           if (isTrendline && trendSig) {
-            // Risk-based sizing off the entry-to-safety-stop distance.
+            // Pure Price: exchange MAXIMUM leverage for this market — never 1x,
+            // never a fixed % of equity risked. Portfolio exposure headroom,
+            // max positions, daily-loss and kill switch still bound the size.
             const stopFromSafety = trendSig.initialStop!;
-            const sized = sizeFromRisk({ equity, riskPct, entry: quote, stop: stopFromSafety, szDecimals: target.meta.szDecimals, maxLeverage: leverageCap, maxNotional: headroom });
+            const sized = sizeAtMaxLeverage({ equity, entry: quote, stop: stopFromSafety, marketMaxLeverage: target.meta.maxLeverage, szDecimals: target.meta.szDecimals, maxNotional: headroom });
             if (!sized.ok) { notes.push(`${target.meta.name}: ${sized.reason}`); continue; }
             size = sized.size; leverage = sized.leverage; initialStop = stopFromSafety; sl = stopFromSafety; tp = null;
           } else {
