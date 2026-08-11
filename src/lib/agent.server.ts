@@ -165,7 +165,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
           });
           if (!intent.ok) { if (intent.reason === "exposure cap reached") { notes.push("exposure cap reached"); break; } continue; }
           const leverage = intent.leverage;
-          const notional = intent.notional;
 
           let verdict = { approve: true, reason: "AI review disabled", risk: "unknown" as string };
           if (s.ai_review_enabled) { verdict = await reviewSignal(sig, target.ctx, positions.map((p) => `${p.side} ${p.coin}`), exits); await log(s.user_id, "ai", `${verdict.approve ? "APPROVED" : "VETOED"} ${sig.side.toUpperCase()} ${sig.coin} — ${verdict.reason}`, { signal: sig, verdict }); if (!verdict.approve) { report.vetoed++; continue; } }
