@@ -55,18 +55,19 @@ export async function runTradingCycle(): Promise<CycleReport> {
   let assetIndex: Awaited<ReturnType<typeof loadAssetIndex>> | null = null;
   const assets = async () => (assetIndex ??= await loadAssetIndex());
   const barCache = new Map<string, Bar[]>();
-  const loadBars = async (coin: string): Promise<Bar[] | null> => {
-    if (barCache.has(coin)) return barCache.get(coin)!;
+  const loadBars = async (coin: string, interval: "1h" | "4h" | "1d", count: number): Promise<Bar[] | null> => {
+    const key = `${coin}:${interval}`;
+    if (barCache.has(key)) return barCache.get(key)!;
     try {
+      const intervalMs = interval === "1h" ? 60 * 60 * 1000 : interval === "4h" ? 4 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
       const end = Date.now();
-      const candles = await hl<{ t: number; o: string; h: string; l: string; c: string; v: string }[]>({ type: "candleSnapshot", req: { coin, interval: INTERVAL, startTime: end - BARS * INTERVAL_MS, endTime: end } });
+      const candles = await hl<{ t: number; o: string; h: string; l: string; c: string; v: string }[]>({ type: "candleSnapshot", req: { coin, interval, startTime: end - count * intervalMs, endTime: end } });
       const bars = candlesToBars(candles as never).slice(0, -1);
-      barCache.set(coin, bars);
+      barCache.set(key, bars);
       return bars;
     } catch { return null; }
   };
 
-  // BTC shock detector — one fetch per distinct window across all users.
   const btcMoveCache = new Map<number, number | null>();
   const btcMove = async (windowMin: number) => {
     if (!btcMoveCache.has(windowMin)) btcMoveCache.set(windowMin, await fetchBtcMovePct(windowMin));
@@ -87,10 +88,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
         const win = Math.max(1, Math.round(+(s.btc_shock_window_min ?? 15)));
         shockMove = await btcMove(win);
         shockDir = shockDirection(shockMove, +(s.btc_shock_pct ?? 1.5));
-        if (shockDir) {
-          notes.push(`BTC shock ${shockDir} ${shockMove!.toFixed(2)}% / ${win}m`);
-          await log(s.user_id, "warn", `BTC shock detected: ${shockMove!.toFixed(2)}% over ${win}m — flattening ${shockDir === "down" ? "longs" : "shorts"} and pausing opposing entries.`, { shockDir, shockMove, windowMin: win });
-        }
+        if (shockDir) { notes.push(`BTC shock ${shockDir} ${shockMove!.toFixed(2)}% / ${win}m`); await log(s.user_id, "warn", `BTC shock detected: ${shockMove!.toFixed(2)}% over ${win}m — flattening ${shockDir === "down" ? "longs" : "shorts"} and pausing opposing entries.`, { shockDir, shockMove, windowMin: win }); }
       }
       const { data: openRaw } = await supabaseAdmin.from("paper_positions").select("*").eq("user_id", s.user_id).eq("status", "open");
       let positions = (openRaw ?? []).map((p) => ({ id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional, leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss, take_profit: p.take_profit == null ? (p.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY) : +p.take_profit, trail_high: p.trail_high == null ? null : +p.trail_high, confidence: +p.confidence })) as PositionRow[];
@@ -138,16 +136,24 @@ export async function runTradingCycle(): Promise<CycleReport> {
         for (const target of scanTargets) {
           if (positions.length >= s.max_positions) break;
           if (held.has(target.meta.name)) continue;
-          const bars = await loadBars(target.meta.name); report.scanned++; if (!bars || bars.length < 210) continue;
-          const sig = evaluateScalp(target.meta.name, bars, strategyKey); if (!sig.side || sig.confidence < +s.min_confidence) continue;
+          const hourly = await loadBars(target.meta.name, "1h", BARS); report.scanned++; if (!hourly || hourly.length < 80) continue;
+          let sig: ScalpSignal;
+          if (strategyKey === "trendline_price_action") {
+            const daily = await loadBars(target.meta.name, "1d", 120);
+            const fourHour = await loadBars(target.meta.name, "4h", 120);
+            if (!daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
+            sig = evaluateScalp(target.meta.name, hourly, strategyKey, daily, fourHour);
+          } else {
+            sig = evaluateScalp(target.meta.name, hourly, strategyKey);
+          }
+          if (!sig.side || sig.confidence < +s.min_confidence) continue;
           if (shockHitsSide(shockDir, sig.side)) continue;
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
-          // The trendline strategy sizes at the coin's maximum exchange leverage; other
-          // strategies stay capped by the user's max-leverage setting.
           const leverage = strategyKey === "trendline_price_action"
             ? target.meta.maxLeverage
-            : Math.min(+s.max_leverage, target.meta.maxLeverage); const capNotional = equity * (+s.max_exposure_pct / 100) * Math.max(+s.max_leverage, leverage); const exposure = positions.reduce((sum, p) => sum + p.notional, 0); const headroom = capNotional - exposure;
+            : Math.min(+s.max_leverage, target.meta.maxLeverage);
+          const capNotional = equity * (+s.max_exposure_pct / 100) * Math.max(+s.max_leverage, leverage); const exposure = positions.reduce((sum, p) => sum + p.notional, 0); const headroom = capNotional - exposure;
           if (headroom <= capNotional * 0.05) { notes.push("exposure cap reached"); break; }
           const notional = Math.min(equity * (+s.position_size_pct / 100) * leverage, headroom);
           let verdict = { approve: true, reason: "AI review disabled", risk: "unknown" as string };
