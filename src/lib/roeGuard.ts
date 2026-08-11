@@ -50,7 +50,8 @@ export function normalizeMaxRoeLossPct(value: unknown): number {
 /** True when ROE has reached (or passed) the negative threshold. */
 export function roeStopTriggered(roePct: number, maxRoeLossPct: unknown = DEFAULT_MAX_ROE_LOSS_PCT): boolean {
   const limit = normalizeMaxRoeLossPct(maxRoeLossPct);
-  return roePct <= -limit;
+  // Small epsilon so float noise (e.g. -0.9999999999) still trips an exact -1.00% limit.
+  return roePct <= -limit + 1e-9;
 }
 
 export interface RoeCheck {
