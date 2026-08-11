@@ -57,6 +57,7 @@ export type Database = {
           max_exposure_pct: number
           max_leverage: number
           max_positions: number
+          max_roe_loss_pct: number
           min_confidence: number
           mode: string
           paper_equity: number
@@ -94,6 +95,7 @@ export type Database = {
           max_exposure_pct?: number
           max_leverage?: number
           max_positions?: number
+          max_roe_loss_pct?: number
           min_confidence?: number
           mode?: string
           paper_equity?: number
@@ -131,6 +133,7 @@ export type Database = {
           max_exposure_pct?: number
           max_leverage?: number
           max_positions?: number
+          max_roe_loss_pct?: number
           min_confidence?: number
           mode?: string
           paper_equity?: number
@@ -287,6 +290,39 @@ export type Database = {
           id?: string
           updated_at?: string
           wallet_address?: string | null
+        }
+        Relationships: []
+      }
+      trendline_broken_lines: {
+        Row: {
+          broken_at: string
+          coin: string
+          created_at: string
+          id: string
+          line_id: string
+          strategy_key: string
+          timeframe: string
+          user_id: string
+        }
+        Insert: {
+          broken_at?: string
+          coin: string
+          created_at?: string
+          id?: string
+          line_id: string
+          strategy_key: string
+          timeframe: string
+          user_id: string
+        }
+        Update: {
+          broken_at?: string
+          coin?: string
+          created_at?: string
+          id?: string
+          line_id?: string
+          strategy_key?: string
+          timeframe?: string
+          user_id?: string
         }
         Relationships: []
       }

@@ -8,6 +8,7 @@ import {
 import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
 import { normalizeStrategyKey, PURE_PRICE_STRATEGY_KEY, type StrategyKey } from "./strategies";
 import { detectBtcShock, sideToFlatten, DEFAULT_BTC_SHOCK, type ShockDirection } from "./btcShock";
+import { evaluateRoeStop, DEFAULT_MAX_ROE_LOSS_PCT } from "./roeGuard";
 import { supabase } from "@/integrations/supabase/client";
 
 export interface Settings {
@@ -42,6 +43,8 @@ export interface Settings {
   btc_shock_enabled?: boolean;
   btc_shock_pct?: number;
   btc_shock_window_min?: number;
+  /** Global hard ROE loss ceiling (percent, positive number). */
+  max_roe_loss_pct?: number;
 
   execution_timeframe?: string;
   safety_buffer_pct?: number;
@@ -209,6 +212,16 @@ export class PaperEngine {
     // Manage each open position
     for (const p of [...this.positions]) {
       const m = this.mid(p.coin); if (m == null) continue;
+      // GLOBAL hard ROE stop — evaluated before strategy stops/trailing.
+      const roe = evaluateRoeStop({
+        side: p.side, entry: p.entry_price, mark: m, leverage: p.leverage,
+        maxRoeLossPct: this.settings.max_roe_loss_pct ?? DEFAULT_MAX_ROE_LOSS_PCT,
+      });
+      if (roe.triggered) {
+        this.log("warn", `${roe.message} — flattening ${p.coin}.`, { coin: p.coin, roePct: roe.roePct, leverage: p.leverage, mark: m, entry: p.entry_price });
+        this.closePosition(p, m, roe.reason!).catch(() => {});
+        continue;
+      }
       // BTC shock protection runs BEFORE ordinary Safety Line / stop processing.
       if (this.shockDir && p.side === sideToFlatten(this.shockDir)) {
         this.closePosition(p, m, `btc_shock_${this.shockDir}`).catch(() => {});

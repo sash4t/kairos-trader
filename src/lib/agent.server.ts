@@ -5,6 +5,7 @@ import { candlesToBars, bucket, type Bar } from "./strategy";
 import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
 import { normalizeStrategyKey, PURE_PRICE_STRATEGY_KEY, type StrategyKey } from "./strategies";
 import { detectBtcShock, sideToFlatten, DEFAULT_BTC_SHOCK, type ShockDirection } from "./btcShock";
+import { evaluateRoeStop, normalizeMaxRoeLossPct, DEFAULT_MAX_ROE_LOSS_PCT } from "./roeGuard";
 import {
   DEFAULT_TRENDLINE_CONFIG, TIMEFRAME_MS, ladderFor, evaluateTrendline,
   currentSafetyLine, ratchetSafetyStop, safetyExitReason, sizeAtMaxLeverage, resolveMaxLeverage,
@@ -39,6 +40,7 @@ interface Settings {
   paper_equity: number; mode: string; live_max_alloc_usd: number; tp_rr: number; strategy_key?: string;
   execution_timeframe?: string; safety_buffer_pct?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
+  max_roe_loss_pct?: number;
 }
 interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number | null; trail_high: number | null; confidence: number }
 
@@ -137,11 +139,24 @@ export async function runTradingCycle(): Promise<CycleReport> {
           }
         }
       }
+      const maxRoeLoss = normalizeMaxRoeLossPct(s.max_roe_loss_pct ?? DEFAULT_MAX_ROE_LOSS_PCT);
+      const liveByCoin = new Map((liveAcct?.positions ?? []).map((lp) => [lp.coin, lp]));
       for (const p of [...positions]) {
         const markStr = mids[p.coin]; if (!markStr) continue; const mark = +markStr;
-        const forced = shockDir && p.side === sideToFlatten(shockDir) ? `btc_shock_${shockDir}` : null;
+        // GLOBAL hard ROE stop — runs before strategy stops/trailing and before entries.
+        const livePos = liveByCoin.get(p.coin);
+        const leverage = livePos?.leverage && livePos.leverage > 0 ? livePos.leverage : p.leverage;
+        const marginUsed = livePos ? (livePos.size * livePos.entryPrice) / (leverage || 1) : undefined;
+        const roe = evaluateRoeStop({
+          side: p.side, entry: p.entry_price, mark, leverage, maxRoeLossPct: maxRoeLoss,
+          ...(livePos ? { unrealizedPnl: livePos.unrealizedPnl, marginUsed } : {}),
+        });
+        const forced = roe.triggered
+          ? roe.reason
+          : shockDir && p.side === sideToFlatten(shockDir) ? `btc_shock_${shockDir}` : null;
         let reason: string | null = forced;
-        if (forced) { /* emergency directional flattening skips trailing work */ }
+        if (roe.triggered) await log(s.user_id, "warn", `${roe.message} — flattening ${p.coin}.`, { agent: "server", coin: p.coin, roePct: roe.roePct, leverage, mark, entry: p.entry_price, live: isLive });
+        if (forced) { /* emergency flattening skips trailing work */ }
         else if (isTrendline) {
           // The Safety Line is the stop: re-derive it from live structure and
           // ratchet the stop toward it. It can only ever tighten.
