@@ -37,7 +37,7 @@ interface Settings {
   trail_activate_pct: number; trail_dist_pct: number; max_positions: number; max_leverage: number;
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
   paper_equity: number; mode: string; live_max_alloc_usd: number; tp_rr: number; strategy_key?: string;
-  trendline_risk_pct?: number; execution_timeframe?: string; safety_buffer_pct?: number;
+  execution_timeframe?: string; safety_buffer_pct?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
 }
 interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number | null; trail_high: number | null; confidence: number }
