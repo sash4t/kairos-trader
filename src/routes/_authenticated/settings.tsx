@@ -20,7 +20,7 @@ function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [userState, setUserState] = useState<UserState | null>(null);
   const [loadingWallet, setLoadingWallet] = useState(false);
-  const [strategyKey, setStrategyKey] = useState<StrategyKey>("bollinger_breakout");
+  const [strategyKey, setStrategyKey] = useState<StrategyKey>("trendline_price_action");
   const [savingStrategy, setSavingStrategy] = useState(false);
   const resetFn = useServerFn(resetPaperAccount);
   const queryClient = useQueryClient();
@@ -46,7 +46,7 @@ function SettingsPage() {
     },
   });
 
-  useEffect(() => { if (botSettings?.strategy_key === "trendbot_momentum") setStrategyKey("trendbot_momentum"); else if (botSettings) setStrategyKey("bollinger_breakout"); }, [botSettings]);
+  useEffect(() => { if (botSettings?.strategy_key === "trendbot_momentum") setStrategyKey("trendbot_momentum"); else if (botSettings) setStrategyKey("trendline_price_action"); }, [botSettings]);
 
   const saveStrategy = async (next: StrategyKey) => {
     if (!userId) return;
