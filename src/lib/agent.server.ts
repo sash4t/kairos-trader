@@ -2,13 +2,15 @@ import { NoObjectGeneratedError, generateObject } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 import { candlesToBars, bucket, type Bar } from "./strategy";
-import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal, type StrategyKey } from "./scalp";
+import { buildEntryIntent } from "./orderIntent";
+import { evaluateScalpMulti, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal, type StrategyKey } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
 const INTERVAL = "1h";
 const INTERVAL_MS = 60 * 60 * 1000;
 const BARS = 230;
+const HTF_BARS = 240;
 const SCAN_PER_CYCLE = 35;
 const MIN_24H_VOLUME = 100_000;
 
