@@ -11,11 +11,6 @@ export interface Signal {
 export interface Bar { t: number; o: number; h: number; l: number; c: number; v: number }
 export function candlesToBars(cs: Candle[]): Bar[] { return cs.map(c => ({ t: c.t, o: +c.o, h: +c.h, l: +c.l, c: +c.c, v: +c.v })); }
 
-/**
- * Top-down trend-line price action:
- * Daily -> 4H -> 1H. Daily establishes the major bias, 4H confirms it,
- * and 1H supplies the actual action-line break/entry trigger.
- */
 export const STRATEGY_PARAMS = {
   intervals: ["1d", "4h", "1h"] as const,
   pivotStrength: 3,
@@ -81,18 +76,28 @@ export function getTrendlineState(bars: Bar[]): { support: TrendLine | null; res
   };
 }
 
+/**
+ * Use the trend-line channel midpoint when both lines exist. The previous
+ * implementation checked support and resistance independently, so a normal
+ * candle inside a valid channel satisfied both tests and LONG always won.
+ */
 function timeframeBias(bars: Bar[]): "long" | "short" | null {
   if (bars.length < 50) return null;
   const state = getTrendlineState(bars);
   const price = bars.at(-1)!.c;
   const support = state.support?.valueAt(bars.length);
   const resistance = state.resistance?.valueAt(bars.length);
-  if (state.support && support != null && price >= support) return "long";
-  if (state.resistance && resistance != null && price <= resistance) return "short";
+  if (support != null && resistance != null && resistance > support) {
+    const midpoint = (support + resistance) / 2;
+    if (price > midpoint) return "long";
+    if (price < midpoint) return "short";
+    return null;
+  }
+  if (support != null && price > support) return "long";
+  if (resistance != null && price < resistance) return "short";
   return null;
 }
 
-/** Evaluate the actual 1H trigger after Daily and 4H trend-line alignment. */
 export function evaluateMultiTimeframeSignal(coin: string, daily: Bar[], fourHour: Bar[], hourly: Bar[]): Signal {
   const empty: Signal = { coin, side:null, confidence:0, reasons:[], price:hourly.at(-1)?.c ?? 0, atrValue:0, indicators:{} };
   if (daily.length < 80 || fourHour.length < 80 || hourly.length < 80) return { ...empty, reasons:["Waiting for Daily/4H/1H trend-line history"] };
@@ -140,7 +145,6 @@ export function evaluateMultiTimeframeSignal(coin: string, daily: Bar[], fourHou
   return { coin, side, confidence:Math.min(98,confidence), reasons, price, atrValue, indicators, actionLine, safetyLine };
 }
 
-/** Backwards-compatible single-timeframe evaluator. */
 export function evaluateSignal(coin: string, bars: Bar[]): Signal {
   return evaluateMultiTimeframeSignal(coin, bars, bars, bars);
 }
