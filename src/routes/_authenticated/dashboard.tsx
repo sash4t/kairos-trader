@@ -5,6 +5,8 @@ import { useServerFn } from "@tanstack/react-start";
 import { getLiveStatus } from "@/lib/live.functions";
 import { supabase } from "@/integrations/supabase/client";
 import { useBot } from "@/lib/botContext";
+import { sessionMaxDrawdown } from "@/lib/riskGuards";
+
 import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { TrendingUp, TrendingDown, Wallet, Activity, ShieldAlert } from "lucide-react";
 
@@ -72,10 +74,10 @@ function Dashboard() {
     ? Math.abs((wins.reduce((s, c) => s + +(c.pnl ?? 0), 0)) / (losses.reduce((s, c) => s + +(c.pnl ?? 0), 0)))
     : wins.length ? Infinity : 0;
 
-  // Max drawdown from equity snapshots
-  let peak = startEquity, maxDD = 0;
-  for (const p of equitySeries) { peak = Math.max(peak, +p.equity); maxDD = Math.min(maxDD, +p.equity - peak); }
-  const maxDDpct = (maxDD / peak) * 100;
+  // Max drawdown for the CURRENT session only — snapshots from before an
+  // equity reset must not drag the displayed drawdown down forever.
+  const { maxDDpct } = sessionMaxDrawdown([...equitySeries.map(p => ({ ts: p.ts, equity: +p.equity })), { ts: Date.now(), equity }]);
+
 
   const chartData = equitySeries.length
     ? equitySeries.map(p => ({ t: new Date(p.ts).getTime(), v: +p.equity }))
