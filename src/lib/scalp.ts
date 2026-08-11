@@ -1,4 +1,4 @@
-import { evaluateMultiTimeframeSignal, STRATEGY_PARAMS, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
+import { evaluateMultiTimeframeSignal, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
 import { evaluateTrendBotSignal, TRENDBOT_STRATEGY_KEY } from "./trendbotStrategy";
 
 export type ScalpSide = "long" | "short";
@@ -14,21 +14,21 @@ export const STRATEGY_OPTIONS = [
   { key: TRENDBOT_STRATEGY_KEY, name: "TrendBot Momentum", description: "EMA20/50 + RSI14 + MACD momentum, long and short." },
 ] as const;
 
-function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
-  const groups = new Map<number, Bar>();
-  for (const b of bars) {
-    const key = Math.floor(b.t / intervalMs) * intervalMs;
-    const existing = groups.get(key);
-    if (!existing) groups.set(key, { t:key, o:b.o, h:b.h, l:b.l, c:b.c, v:b.v });
-    else { existing.h=Math.max(existing.h,b.h); existing.l=Math.min(existing.l,b.l); existing.c=b.c; existing.v+=b.v; }
-  }
-  return [...groups.values()].sort((a,b)=>a.t-b.t);
-}
-
-export function evaluateScalp(coin: string, bars: Bar[], strategyKey: StrategyKey = TRENDLINE_STRATEGY_KEY): ScalpSignal {
+export function evaluateScalp(
+  coin: string,
+  hourlyBars: Bar[],
+  strategyKey: StrategyKey = TRENDLINE_STRATEGY_KEY,
+  dailyBars?: Bar[],
+  fourHourBars?: Bar[],
+): ScalpSignal {
   const sig = strategyKey === TRENDBOT_STRATEGY_KEY
-    ? evaluateTrendBotSignal(coin, bars)
-    : evaluateMultiTimeframeSignal(coin, aggregateBars(bars, 24 * 60 * 60 * 1000), aggregateBars(bars, 4 * 60 * 60 * 1000), bars);
+    ? evaluateTrendBotSignal(coin, hourlyBars)
+    : evaluateMultiTimeframeSignal(
+        coin,
+        dailyBars ?? hourlyBars,
+        fourHourBars ?? hourlyBars,
+        hourlyBars,
+      );
   return { coin, side: sig.side, family: strategyKey, confidence: sig.confidence, reasons: sig.reasons, price: sig.price, atrPct: sig.indicators["atrPct"] ?? 0, indicators: sig.indicators, actionLine: sig.actionLine, safetyLine: sig.safetyLine };
 }
 
