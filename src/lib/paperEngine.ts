@@ -2,9 +2,12 @@ import { fetchCandles, fetchMetaAndCtxs, subscribeAllMids, type AssetCtx, type A
 import { candlesToBars, bucket, type Bar, type StrategyMode } from "./strategy";
 import {
   DEFAULT_TRENDLINE_CONFIG, TIMEFRAME_MS, ladderFor, evaluateTrendline, currentSafetyLine,
-  ratchetSafetyStop, safetyExitReason, sizeFromRisk, clampRiskPct,
+  ratchetSafetyStop, safetyExitReason, sizeAtMaxLeverage,
   type Timeframe, type TrendlineConfig, type TrendlineSignal,
 } from "./trendline";
+import { evaluateScalp, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
+import { normalizeStrategyKey, PURE_PRICE_STRATEGY_KEY, type StrategyKey } from "./strategies";
+import { detectBtcShock, sideToFlatten, DEFAULT_BTC_SHOCK, type ShockDirection } from "./btcShock";
 import { supabase } from "@/integrations/supabase/client";
 
 export interface Settings {
@@ -36,6 +39,9 @@ export interface Settings {
   last_cycle_at: string | null;
   last_cycle_note: string | null;
   strategy_key?: string;
+  btc_shock_enabled?: boolean;
+  btc_shock_pct?: number;
+  btc_shock_window_min?: number;
   trendline_risk_pct?: number;
   execution_timeframe?: string;
   safety_buffer_pct?: number;
@@ -83,6 +89,7 @@ export class PaperEngine {
   private snapshotTs = 0;
   private running = false;
   private evaluating = false;
+  private shockDir: ShockDirection | null = null;
 
   constructor(userId: string, settings: Settings, log: Log) {
     this.userId = userId;
@@ -202,16 +209,21 @@ export class PaperEngine {
     // Manage each open position
     for (const p of [...this.positions]) {
       const m = this.mid(p.coin); if (m == null) continue;
-      // The Safety Line (recomputed on each eval cycle) is the stop. Here we
-      // only enforce it — a trendline position has no fixed take-profit.
-      if (p.side === "long") {
-        const label = safetyExitReason("long", p.entry_price, m, p.stop_loss);
+      // BTC shock protection runs BEFORE ordinary Safety Line / stop processing.
+      if (this.shockDir && p.side === sideToFlatten(this.shockDir)) {
+        this.closePosition(p, m, `btc_shock_${this.shockDir}`).catch(() => {});
+        continue;
+      }
+      if (this.isPure()) {
+        // The Safety Line (recomputed on each eval cycle) IS the stop, and
+        // Pure Price has no fixed take-profit.
+        const label = safetyExitReason(p.side, p.entry_price, m, p.stop_loss);
         if (label) this.closePosition(p, m, label).catch(() => {});
-        else if (p.take_profit != null && m >= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
       } else {
-        const label = safetyExitReason("short", p.entry_price, m, p.stop_loss);
+        const t = updateTrail(p.side, p.entry_price, m, p.stop_loss, p.trail_high, this.exits());
+        if (t.changed) { p.stop_loss = t.stopLoss; p.trail_high = t.trailHigh; this.persistPositionUpdate(p); }
+        const label = exitReasonFor(p.side, m, p.stop_loss, p.take_profit ?? (p.side === "long" ? Infinity : 0), p.entry_price);
         if (label) this.closePosition(p, m, label).catch(() => {});
-        else if (p.take_profit != null && m <= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
       }
     }
 
@@ -249,6 +261,43 @@ export class PaperEngine {
   private execTf(): Timeframe {
     const tf = (this.settings.execution_timeframe ?? "1h") as Timeframe;
     return TIMEFRAME_MS[tf] ? tf : "1h";
+  }
+  private strategyKey(): StrategyKey { return normalizeStrategyKey(this.settings.strategy_key); }
+  private isPure(): boolean { return this.strategyKey() === PURE_PRICE_STRATEGY_KEY; }
+  private exits(): ExitParams {
+    return {
+      tpPct: +this.settings.scalp_tp_pct, slPct: +this.settings.scalp_sl_pct,
+      trailActivatePct: +this.settings.trail_activate_pct, trailDistPct: +this.settings.trail_dist_pct,
+    };
+  }
+
+  /** BTC shock protection — identical rule for paper and live. */
+  private async refreshBtcShock() {
+    try {
+      const end = Date.now();
+      const cs = await fetchCandles("BTC", "5m", end - 60 * 5 * 60_000, end);
+      const bars = candlesToBars(cs).slice(0, -1);
+      const shock = detectBtcShock(bars, {
+        enabled: this.settings.btc_shock_enabled !== false,
+        thresholdPct: +(this.settings.btc_shock_pct ?? DEFAULT_BTC_SHOCK.thresholdPct),
+        windowMin: +(this.settings.btc_shock_window_min ?? DEFAULT_BTC_SHOCK.windowMin),
+      });
+      const prev = this.shockDir;
+      this.shockDir = shock.direction;
+      if (shock.direction && shock.direction !== prev) {
+        this.log("warn", `BTC shock ${shock.direction} (${shock.movePct.toFixed(2)}%) — flattening all ${sideToFlatten(shock.direction).toUpperCase()} positions.`, { btcShock: shock });
+      }
+    } catch { /* leave the previous shock state on a fetch failure */ }
+  }
+
+  /** Confirmed 1H bars for the indicator strategies. */
+  private async loadBars(coin: string): Promise<Bar[] | null> {
+    try {
+      const end = Date.now();
+      const cs = await fetchCandles(coin, "1h", end - 230 * 60 * 60 * 1000, end);
+      const bars = candlesToBars(cs).slice(0, -1);
+      return bars.length ? bars : null;
+    } catch { return null; }
   }
 
   /** Confirmed bars for the full Monthly → … → execution ladder (in-progress candle dropped). */
