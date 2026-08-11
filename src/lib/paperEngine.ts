@@ -1,6 +1,7 @@
 import { fetchCandles, fetchMetaAndCtxs, subscribeAllMids, type AssetCtx, type AssetMeta } from "./hyperliquid";
 import { candlesToBars, evaluateSignal, bucket, type Signal, type Bar, MODE_MIN_CONFIDENCE, type StrategyMode } from "./strategy";
 import { supabase } from "@/integrations/supabase/client";
+import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 
 export interface Settings {
   user_id: string;
@@ -32,6 +33,10 @@ export interface Settings {
   last_cycle_note: string | null;
   /** Max USD of the real account the bot may size positions from in live mode (0 = whole account). */
   live_max_alloc_usd: number;
+  /** Flatten positions fighting a sudden BTC move. */
+  btc_shock_enabled?: boolean;
+  btc_shock_pct?: number;
+  btc_shock_window_min?: number;
 }
 
 export interface OpenPosition {
@@ -76,6 +81,8 @@ export class PaperEngine {
   private snapshotTs = 0;
   private running = false;
   private evaluating = false;
+  private shockDir: ShockDir = null;
+  private shockTimer: any = null;
 
   constructor(userId: string, settings: Settings, log: Log) {
     this.userId = userId;
@@ -106,6 +113,9 @@ export class PaperEngine {
     this.tickTimer = setInterval(() => this.tick(), 2000);
     // Strategy eval — every 15s scan a slice of universe
     this.evalTimer = setInterval(() => this.evalCycle().catch(err => this.log("error", err.message)), 15000);
+    // BTC shock watch — refresh the trailing BTC move every 20s.
+    this.pollBtcShock();
+    this.shockTimer = setInterval(() => this.pollBtcShock(), 20000);
   }
 
   async syncPositions() {
@@ -114,7 +124,8 @@ export class PaperEngine {
     this.positions = (openPos ?? []).map(p => ({
       id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional,
       leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss,
-      take_profit: +p.take_profit, trail_high: p.trail_high != null ? +p.trail_high : null,
+      take_profit: p.take_profit != null ? +p.take_profit : Number.POSITIVE_INFINITY * (p.side === "long" ? 1 : -1),
+      trail_high: p.trail_high != null ? +p.trail_high : null,
       confidence: +p.confidence,
     }));
     this.log("info", `Synced ${this.positions.length} open paper position(s)`);
@@ -125,6 +136,7 @@ export class PaperEngine {
     this.unsubMids?.(); this.unsubMids = null;
     if (this.tickTimer) clearInterval(this.tickTimer);
     if (this.evalTimer) clearInterval(this.evalTimer);
+    if (this.shockTimer) clearInterval(this.shockTimer);
     this.log("info", "Engine stopped");
   }
 
@@ -172,6 +184,17 @@ export class PaperEngine {
     return this.startEquity + u;
   }
 
+  private async pollBtcShock() {
+    if (this.settings.btc_shock_enabled === false) { this.shockDir = null; return; }
+    const win = Math.max(1, Math.round(Number(this.settings.btc_shock_window_min ?? 15)));
+    const move = await fetchBtcMovePct(win);
+    const dir = shockDirection(move, Number(this.settings.btc_shock_pct ?? 1.5));
+    if (dir && dir !== this.shockDir) {
+      this.log("warn", `BTC shock ${dir} ${move!.toFixed(2)}% over ${win}m — closing ${dir === "down" ? "longs" : "shorts"}.`);
+    }
+    this.shockDir = dir;
+  }
+
   private tick() {
     // Never manage positions or write snapshots while the account is live.
     if (this.isLive()) return;
@@ -195,6 +218,8 @@ export class PaperEngine {
     // Manage each open position
     for (const p of [...this.positions]) {
       const m = this.mid(p.coin); if (m == null) continue;
+      // A sudden BTC move against the position closes it instantly, ahead of SL/TP.
+      if (shockHitsSide(this.shockDir, p.side)) { this.closePosition(p, m, "btc_shock").catch(() => {}); continue; }
       // trailing
       if (this.settings.trailing_enabled) {
         if (p.side === "long") {
@@ -290,6 +315,7 @@ export class PaperEngine {
       const sig = evaluateSignal(meta.name, bars);
       this.cache.get(meta.name)!.nextEval = now + 60_000;
       if (!sig.side) continue;
+      if (shockHitsSide(this.shockDir, sig.side)) continue;
       const threshold = Math.max(this.settings.min_confidence, MODE_MIN_CONFIDENCE[this.settings.strategy_mode]);
       if (sig.confidence < threshold) continue;
       if (this.positions.some(p => p.coin === meta.name)) continue; // opened meanwhile
