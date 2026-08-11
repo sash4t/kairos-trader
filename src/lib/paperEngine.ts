@@ -2,6 +2,11 @@ import { fetchCandles, fetchMetaAndCtxs, subscribeAllMids, type AssetCtx, type A
 import { candlesToBars, evaluateMultiTimeframeSignal, bucket, type Signal, type Bar, MODE_MIN_CONFIDENCE, type StrategyMode } from "./strategy";
 import { supabase } from "@/integrations/supabase/client";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
+import {
+  TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, evaluateTrendlineBreak, buildCascade,
+  safetyLineFor, safetyStop, riskSize, trailToSafety, safetyBreached,
+  type TbTimeframe, type TbSeries,
+} from "./strategies/trendlineBreak";
 
 export interface Settings {
   user_id: string;
@@ -37,6 +42,12 @@ export interface Settings {
   btc_shock_enabled?: boolean;
   btc_shock_pct?: number;
   btc_shock_window_min?: number;
+  /** Active strategy. `trendline-break` runs its own independent engine path. */
+  strategy_key?: string;
+  tb_timeframes?: string;
+  tb_pivot_strength?: number;
+  tb_risk_pct?: number;
+  tb_refresh_min?: number;
 }
 
 export interface OpenPosition {
@@ -51,6 +62,8 @@ export interface OpenPosition {
   take_profit: number;
   trail_high: number | null;
   confidence: number;
+  /** Trendline Break only: the opposing trendline that trails the stop. */
+  safety_line?: number | null;
 }
 
 type Log = (level: "info" | "warn" | "error" | "trade", msg: string, meta?: any) => void;
@@ -84,6 +97,7 @@ export class PaperEngine {
   private evaluating = false;
   private shockDir: ShockDir = null;
   private shockTimer: any = null;
+  private tbSeries = new Map<string, { series: TbSeries; ts: number }>();
 
   constructor(userId: string, settings: Settings, log: Log) {
     this.userId = userId;
@@ -95,6 +109,108 @@ export class PaperEngine {
 
   /** The browser engine simulates fills; it must never touch a live account. */
   private isLive() { return this.settings.mode === "live"; }
+
+  /** True when the independent "Trendline Break" strategy is selected. */
+  private isTrendlineBreak() { return this.settings.strategy_key === TRENDLINE_BREAK_KEY; }
+
+  private tbConfig() {
+    return {
+      timeframes: parseTimeframes(this.settings.tb_timeframes),
+      pivotStrength: Math.round(Number(this.settings.tb_pivot_strength ?? 3)),
+      riskPct: Number(this.settings.tb_risk_pct ?? 1),
+      refreshMs: Math.max(1, Number(this.settings.tb_refresh_min ?? 60)) * 60_000,
+    };
+  }
+
+  private async tbLoadSeries(coin: string, timeframes: TbTimeframe[], refreshMs: number): Promise<TbSeries | null> {
+    const cached = this.tbSeries.get(coin);
+    if (cached && Date.now() - cached.ts < refreshMs) return cached.series;
+    const end = Date.now();
+    const series: TbSeries = {};
+    try {
+      for (const tf of timeframes) {
+        const cs = await fetchCandles(coin, tf, end - 300 * TB_INTERVAL_MS[tf], end);
+        const bars = candlesToBars(cs);
+        if (bars.length >= 30) series[tf] = bars;
+      }
+    } catch { return null; }
+    if (Object.keys(series).length < timeframes.length) return null;
+    this.tbSeries.set(coin, { series, ts: end });
+    return series;
+  }
+
+  /** Independent cycle for Trendline Break: trail safety lines, then look for breaks. */
+  private async runTrendlineBreakCycle() {
+    const cfg = this.tbConfig();
+
+    // 1) Manage open positions against the advancing safety line.
+    for (const p of [...this.positions]) {
+      const series = await this.tbLoadSeries(p.coin, cfg.timeframes, cfg.refreshMs);
+      if (!series) continue;
+      const mark = this.mid(p.coin) ?? p.entry_price;
+      const levels = buildCascade(series, cfg.timeframes, cfg.pivotStrength);
+      const safety = safetyLineFor(levels, p.side, mark);
+      if (safety == null) continue;
+      p.safety_line = safety;
+      const next = trailToSafety(p.side, p.stop_loss, safety);
+      if (next !== p.stop_loss) { p.stop_loss = next; }
+      supabase.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety }).eq("id", p.id).then(() => {});
+      if (safetyBreached(p.side, mark, safety)) await this.closePosition(p, mark, "safety_line");
+    }
+
+    // 2) Look for new action-line breaks.
+    const held = new Set(this.positions.map(p => p.coin));
+    const EXCLUDED = new Set(["BTC", "ETH"]);
+    const scored = this.meta
+      .map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
+      .filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED.has(x.meta.name))
+      .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm)
+      .slice(0, 30);
+
+    for (const { meta } of scored) {
+      if (this.positions.length >= this.settings.max_positions) break;
+      if (held.has(meta.name)) continue;
+      const series = await this.tbLoadSeries(meta.name, cfg.timeframes, cfg.refreshMs);
+      if (!series) continue;
+      const sig = evaluateTrendlineBreak(meta.name, series, cfg);
+      if (!sig.side || sig.safetyLine == null) continue;
+      if (shockHitsSide(this.shockDir, sig.side)) continue;
+      if (sig.confidence < this.settings.min_confidence) continue;
+      held.add(meta.name);
+      await this.tbOpen(sig.coin, sig.side, sig.price, sig.safetyLine, sig.actionLine ?? sig.price, sig.confidence, sig.reasons, sig.timeframe ?? cfg.timeframes.at(-1)!, cfg.riskPct, meta);
+    }
+  }
+
+  private async tbOpen(
+    coin: string, side: "long" | "short", price: number, safetyLine: number, actionLine: number,
+    confidence: number, reasons: string[], timeframe: string, riskPct: number, meta: AssetMeta,
+  ) {
+    const b = bucket(coin);
+    if (this.positions.filter(p => bucket(p.coin) === b).length >= 3) return;
+    const equity = this.currentEquity();
+    const leverage = Math.max(1, Math.floor(Math.min(this.settings.max_leverage, meta.maxLeverage)));
+    const stop = safetyStop(side, safetyLine);
+    let size = riskSize(equity, riskPct, price, stop);
+    const room = equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0);
+    if (room <= 0) return;
+    if (size * price > room) size = room / price;
+    if (!(size > 0) || !Number.isFinite(size)) return;
+
+    const reason = `${side.toUpperCase()} ${coin} — ${reasons.join(" + ")}`;
+    const { data, error } = await supabase.from("paper_positions").insert({
+      user_id: this.userId, coin, side, size, notional: size * price, leverage,
+      entry_price: price, stop_loss: stop, take_profit: null, confidence, reason,
+      indicators: { actionLine, safetyLine }, action_line: actionLine, safety_line: safetyLine,
+      timeframe, initial_stop: stop, risk_pct: riskPct,
+    }).select().single();
+    if (error || !data) { this.log("error", `Failed to open ${coin}: ${error?.message}`); return; }
+    this.positions.push({
+      id: data.id, coin, side, size, notional: size * price, leverage, entry_price: price,
+      stop_loss: stop, take_profit: side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY,
+      trail_high: null, confidence, safety_line: safetyLine,
+    });
+    this.log("trade", `OPEN ${reason} @ ${price.toFixed(6)} · action ${actionLine.toFixed(6)} · safety ${safetyLine.toFixed(6)} · SL ${stop.toFixed(6)} · risk ${riskPct}%`);
+  }
 
   async start() {
     if (this.running) return;
@@ -128,6 +244,7 @@ export class PaperEngine {
       take_profit: p.take_profit != null ? +p.take_profit : Number.POSITIVE_INFINITY * (p.side === "long" ? 1 : -1),
       trail_high: p.trail_high != null ? +p.trail_high : null,
       confidence: +p.confidence,
+      safety_line: p.safety_line != null ? +p.safety_line : null,
     }));
     this.log("info", `Synced ${this.positions.length} open paper position(s)`);
   }
@@ -221,6 +338,12 @@ export class PaperEngine {
       const m = this.mid(p.coin); if (m == null) continue;
       // A sudden BTC move against the position closes it instantly, ahead of SL/TP.
       if (shockHitsSide(this.shockDir, p.side)) { this.closePosition(p, m, "btc_shock").catch(() => {}); continue; }
+      if (this.isTrendlineBreak()) {
+        // Trendline Break stops follow the safety line (trailed in its own cycle).
+        const label = (p.side === "long" ? p.stop_loss > p.entry_price : p.stop_loss < p.entry_price) ? "safety_trail" : "safety_stop";
+        if (p.side === "long" ? m <= p.stop_loss : m >= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
+        continue;
+      }
       // trailing
       if (this.settings.trailing_enabled) {
         if (p.side === "long") {
@@ -279,7 +402,8 @@ export class PaperEngine {
     if (this.evaluating) return;
     this.evaluating = true;
     try {
-      await this.runEvalCycle();
+      if (this.isTrendlineBreak()) await this.runTrendlineBreakCycle();
+      else await this.runEvalCycle();
     } finally {
       this.evaluating = false;
     }
