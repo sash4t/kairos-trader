@@ -45,7 +45,11 @@ export type Database = {
         Row: {
           ai_review_enabled: boolean
           bot_enabled: boolean
+          btc_shock_enabled: boolean
+          btc_shock_pct: number
+          btc_shock_window_min: number
           daily_loss_pct: number
+          execution_timeframe: string
           kill_switch_engaged: boolean
           last_cycle_at: string | null
           last_cycle_note: string | null
@@ -53,10 +57,12 @@ export type Database = {
           max_exposure_pct: number
           max_leverage: number
           max_positions: number
+          max_roe_loss_pct: number
           min_confidence: number
           mode: string
           paper_equity: number
           position_size_pct: number
+          safety_buffer_pct: number
           scalp_enabled: boolean
           scalp_sl_pct: number
           scalp_tp_pct: number
@@ -70,13 +76,18 @@ export type Database = {
           trail_activate_pct: number
           trail_dist_pct: number
           trailing_enabled: boolean
+          trendline_risk_pct: number
           updated_at: string
           user_id: string
         }
         Insert: {
           ai_review_enabled?: boolean
           bot_enabled?: boolean
+          btc_shock_enabled?: boolean
+          btc_shock_pct?: number
+          btc_shock_window_min?: number
           daily_loss_pct?: number
+          execution_timeframe?: string
           kill_switch_engaged?: boolean
           last_cycle_at?: string | null
           last_cycle_note?: string | null
@@ -84,10 +95,12 @@ export type Database = {
           max_exposure_pct?: number
           max_leverage?: number
           max_positions?: number
+          max_roe_loss_pct?: number
           min_confidence?: number
           mode?: string
           paper_equity?: number
           position_size_pct?: number
+          safety_buffer_pct?: number
           scalp_enabled?: boolean
           scalp_sl_pct?: number
           scalp_tp_pct?: number
@@ -101,13 +114,18 @@ export type Database = {
           trail_activate_pct?: number
           trail_dist_pct?: number
           trailing_enabled?: boolean
+          trendline_risk_pct?: number
           updated_at?: string
           user_id: string
         }
         Update: {
           ai_review_enabled?: boolean
           bot_enabled?: boolean
+          btc_shock_enabled?: boolean
+          btc_shock_pct?: number
+          btc_shock_window_min?: number
           daily_loss_pct?: number
+          execution_timeframe?: string
           kill_switch_engaged?: boolean
           last_cycle_at?: string | null
           last_cycle_note?: string | null
@@ -115,10 +133,12 @@ export type Database = {
           max_exposure_pct?: number
           max_leverage?: number
           max_positions?: number
+          max_roe_loss_pct?: number
           min_confidence?: number
           mode?: string
           paper_equity?: number
           position_size_pct?: number
+          safety_buffer_pct?: number
           scalp_enabled?: boolean
           scalp_sl_pct?: number
           scalp_tp_pct?: number
@@ -132,6 +152,7 @@ export type Database = {
           trail_activate_pct?: number
           trail_dist_pct?: number
           trailing_enabled?: boolean
+          trendline_risk_pct?: number
           updated_at?: string
           user_id?: string
         }
@@ -169,6 +190,7 @@ export type Database = {
       }
       paper_positions: {
         Row: {
+          action_line: number | null
           closed_at: string | null
           coin: string
           confidence: number
@@ -177,20 +199,25 @@ export type Database = {
           exit_reason: string | null
           id: string
           indicators: Json | null
+          initial_stop: number | null
           leverage: number
           notional: number
           opened_at: string
           pnl: number | null
           reason: string
+          risk_pct: number | null
+          safety_line: number | null
           side: string
           size: number
           status: string
           stop_loss: number
-          take_profit: number
+          take_profit: number | null
+          timeframe: string | null
           trail_high: number | null
           user_id: string
         }
         Insert: {
+          action_line?: number | null
           closed_at?: string | null
           coin: string
           confidence: number
@@ -199,20 +226,25 @@ export type Database = {
           exit_reason?: string | null
           id?: string
           indicators?: Json | null
+          initial_stop?: number | null
           leverage: number
           notional: number
           opened_at?: string
           pnl?: number | null
           reason: string
+          risk_pct?: number | null
+          safety_line?: number | null
           side: string
           size: number
           status?: string
           stop_loss: number
-          take_profit: number
+          take_profit?: number | null
+          timeframe?: string | null
           trail_high?: number | null
           user_id: string
         }
         Update: {
+          action_line?: number | null
           closed_at?: string | null
           coin?: string
           confidence?: number
@@ -221,16 +253,20 @@ export type Database = {
           exit_reason?: string | null
           id?: string
           indicators?: Json | null
+          initial_stop?: number | null
           leverage?: number
           notional?: number
           opened_at?: string
           pnl?: number | null
           reason?: string
+          risk_pct?: number | null
+          safety_line?: number | null
           side?: string
           size?: number
           status?: string
           stop_loss?: number
-          take_profit?: number
+          take_profit?: number | null
+          timeframe?: string | null
           trail_high?: number | null
           user_id?: string
         }
@@ -254,6 +290,39 @@ export type Database = {
           id?: string
           updated_at?: string
           wallet_address?: string | null
+        }
+        Relationships: []
+      }
+      trendline_broken_lines: {
+        Row: {
+          broken_at: string
+          coin: string
+          created_at: string
+          id: string
+          line_id: string
+          strategy_key: string
+          timeframe: string
+          user_id: string
+        }
+        Insert: {
+          broken_at?: string
+          coin: string
+          created_at?: string
+          id?: string
+          line_id: string
+          strategy_key: string
+          timeframe: string
+          user_id: string
+        }
+        Update: {
+          broken_at?: string
+          coin?: string
+          created_at?: string
+          id?: string
+          line_id?: string
+          strategy_key?: string
+          timeframe?: string
+          user_id?: string
         }
         Relationships: []
       }
