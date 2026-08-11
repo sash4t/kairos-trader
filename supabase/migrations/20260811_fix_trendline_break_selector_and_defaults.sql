@@ -12,8 +12,13 @@ ALTER TABLE public.bot_settings
     'trendline-break'
   ));
 
--- Existing installs should continue using the existing strategy rather than
--- silently switching to Trendline Break.
+-- The current non-Transcript engine path is the existing Trendline Price Action
+-- strategy. Normalize legacy keys so the UI and execution engine agree.
+UPDATE public.bot_settings
+SET strategy_key = 'trendline_price_action'
+WHERE strategy_key IN ('bollinger_breakout', 'trendbot_momentum')
+   OR strategy_key IS NULL;
+
 ALTER TABLE public.bot_settings
   ALTER COLUMN strategy_key SET DEFAULT 'trendline_price_action';
 
