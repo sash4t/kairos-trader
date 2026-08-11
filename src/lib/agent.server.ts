@@ -1,6 +1,6 @@
 import { candlesToBars, bucket, type Bar } from "./strategy";
 import { buildEntryIntent } from "./orderIntent";
-import { evaluateScalpMulti, exitReasonFor, updateTrail, type ExitParams, type ScalpSignal } from "./scalp";
+import { evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 import {
   TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, buildCascade, evaluateTrendlineBreak,
@@ -9,8 +9,6 @@ import {
 } from "./strategies/trendlineBreak";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
-const INTERVAL = "1h";
-const INTERVAL_MS = 60 * 60 * 1000;
 const BARS = 230;
 const HTF_BARS = 240;
 const SCAN_PER_CYCLE = 35;
@@ -32,7 +30,7 @@ interface Settings {
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
   paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: string; tp_rr?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
-  tb_timeframes?: string; tb_pivot_strength?: number; tb_risk_pct?: number; tb_refresh_min?: number;
+  tb_timeframes?: string; tb_pivot_strength?: number; tb_risk_pct?: number; tb_position_size_pct?: number; tb_refresh_min?: number;
   last_cycle_note?: string | null;
 }
 interface PositionRow { id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number; entry_price: number; stop_loss: number; take_profit: number; trail_high: number | null; confidence: number }
@@ -71,12 +69,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
     } catch { return null; }
   };
 
-  const btcMoveCache = new Map<number, number | null>();
-  const btcMove = async (windowMin: number) => {
-    if (!btcMoveCache.has(windowMin)) btcMoveCache.set(windowMin, await fetchBtcMovePct(windowMin));
-    return btcMoveCache.get(windowMin)!;
-  };
-
   for (const raw of users) {
     const s = raw as unknown as Settings;
     const notes: string[] = [];
@@ -85,13 +77,17 @@ export async function runTradingCycle(): Promise<CycleReport> {
       if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
       let canTrade = !isLive || !!creds;
       const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
+      const shockWindow = Math.max(1, Math.round(+(s.btc_shock_window_min ?? 240)));
       let shockDir: ShockDir = null; let shockMove: number | null = null;
       if (s.btc_shock_enabled !== false) {
-        const win = Math.max(1, Math.round(+(s.btc_shock_window_min ?? 15)));
-        shockMove = await btcMove(win);
-        shockDir = shockDirection(shockMove, +(s.btc_shock_pct ?? 2.0));
-        if (shockDir) { notes.push(`BTC shock ${shockDir} ${shockMove!.toFixed(2)}% / ${win}m`); await log(s.user_id, "warn", `BTC shock detected: ${shockMove!.toFixed(2)}% over ${win}m — flattening ${shockDir === "down" ? "longs" : "shorts"} and pausing opposing entries.`, { shockDir, shockMove, windowMin: win }); }
+        shockMove = await fetchBtcMovePct(shockWindow);
+        shockDir = shockDirection(shockMove, +(s.btc_shock_pct ?? 1.5));
+        if (shockDir) {
+          notes.push(`BTC shock ${shockDir} ${shockMove!.toFixed(2)}% / ${shockWindow}m`);
+          await log(s.user_id, "warn", `BTC shock detected: ${shockMove!.toFixed(2)}% within ${shockWindow}m — flattening ${shockDir === "down" ? "longs" : "shorts"} and pausing opposing entries.`, { shockDir, shockMove, windowMin: shockWindow });
+        }
       }
+
       const { data: openRaw } = await supabaseAdmin.from("paper_positions").select("*").eq("user_id", s.user_id).eq("status", "open");
       let positions = (openRaw ?? []).map((p) => ({ id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional, leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss, take_profit: p.take_profit == null ? (p.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY) : +p.take_profit, trail_high: p.trail_high == null ? null : +p.trail_high, confidence: +p.confidence })) as PositionRow[];
       let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
@@ -102,9 +98,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const equityNow = isLive && liveAcct ? liveAcct.accountValue : +s.paper_equity;
       const held = new Set(positions.map(p => p.coin));
 
-      // ---------- Trendline Break strategy (independent of other strategies) ----------
       const isTb = (s.strategy_key ?? "") === TRENDLINE_BREAK_KEY;
-      const tbCfg = { timeframes: parseTimeframes(s.tb_timeframes), pivotStrength: Math.round(+(s.tb_pivot_strength ?? 3)), riskPct: +(s.tb_risk_pct ?? 1) };
+      const tbCfg = {
+        timeframes: parseTimeframes(s.tb_timeframes),
+        pivotStrength: Math.round(+(s.tb_pivot_strength ?? 3)),
+        riskPct: +(s.tb_risk_pct ?? 1),
+        positionSizePct: +(s.tb_position_size_pct ?? s.position_size_pct ?? 5),
+      };
       const loadTbSeries = async (coin: string): Promise<TbSeries> => {
         const series: TbSeries = {};
         for (const tf of tbCfg.timeframes) {
@@ -128,15 +128,23 @@ export async function runTradingCycle(): Promise<CycleReport> {
         await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · ${exitReason} · PnL ${pnl.toFixed(2)}`, { strategy: TRENDLINE_BREAK_KEY });
       };
 
+      // BTC shock is evaluated before normal safety-line management, so adverse
+      // correlated positions are flattened first.
+      if (canTrade && shockDir) {
+        for (const p of [...positions]) {
+          if (!shockHitsSide(shockDir, p.side)) continue;
+          const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+          await closeTbPosition(p, mark, "btc_shock");
+        }
+      }
+
       if (isTb && canTrade) {
         for (const p of [...positions]) {
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
-          if (shockHitsSide(shockDir, p.side)) { await closeTbPosition(p, mark, "btc_shock"); continue; }
           const series = await loadTbSeries(p.coin);
           const levels = buildCascade(series, tbCfg.timeframes, tbCfg.pivotStrength);
           const safety = safetyLineFor(levels, p.side, mark);
           if (safety != null) {
-            // Price closed back through the safety line -> exit at market.
             if (safetyBreached(p.side, mark, safety)) { await closeTbPosition(p, mark, "safety_line"); continue; }
             const next = trailToSafety(p.side, p.stop_loss, safety);
             if (next !== p.stop_loss) {
@@ -184,14 +192,18 @@ export async function runTradingCycle(): Promise<CycleReport> {
           let leverage: number; let size: number; let tbStop = 0;
           if (isTb) {
             if (tbSafety == null) continue;
-            leverage = Math.max(1, Math.floor(Math.min(+s.max_leverage, target.meta.maxLeverage)));
+            // Trendline trades always use the exchange's maximum leverage. The
+            // risk budget and position-size cap still determine how much capital
+            // is actually deployed; leverage does not increase allowed loss.
+            leverage = Math.max(1, Math.floor(target.meta.maxLeverage));
             tbStop = safetyStop(sig.side, tbSafety);
-            size = riskSize(equity, tbCfg.riskPct, quotePx, tbStop);
+            const riskBasedSize = riskSize(equity, tbCfg.riskPct, quotePx, tbStop);
+            const positionNotionalCap = equity * (tbCfg.positionSizePct / 100) * leverage;
             const exposureCap = equity * (+s.max_exposure_pct / 100) * leverage;
             const used = positions.reduce((sum, p) => sum + p.notional, 0);
             const room = exposureCap - used;
             if (room <= 0) { notes.push("exposure cap reached"); break; }
-            if (size * quotePx > room) size = room / quotePx;
+            size = Math.min(riskBasedSize, positionNotionalCap / quotePx, room / quotePx);
             if (!(size > 0) || !Number.isFinite(size)) continue;
           } else {
             const intent = buildEntryIntent({ side: sig.side, price: quotePx, equity, positionSizePct: +s.position_size_pct, maxExposurePct: +s.max_exposure_pct, userMaxLeverage: +s.max_leverage, assetMaxLeverage: target.meta.maxLeverage, currentExposure: positions.reduce((sum, p) => sum + p.notional, 0), slPct: exits.slPct, tpPct: exits.tpPct });
@@ -200,14 +212,28 @@ export async function runTradingCycle(): Promise<CycleReport> {
           }
           const quote = quotePx; let entry = quote;
           const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")}`;
-          if (isLive && creds) { const asset = (await assets()).get(sig.coin); if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; } size = Number(size.toFixed(asset.szDecimals)); if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${asset.szDecimals} decimals.`); continue; } try { await setLeverage(creds, asset, leverage); const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 }); if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; } entry = fill.avgPrice || quote; size = fill.size; } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; } }
+          if (isLive && creds) {
+            const asset = (await assets()).get(sig.coin);
+            if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; }
+            size = Number(size.toFixed(asset.szDecimals));
+            if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${asset.szDecimals} decimals.`); continue; }
+            try {
+              // Re-read the asset max in case metadata changed between scanner and order.
+              leverage = isTb ? Math.max(1, Math.floor(asset.maxLeverage)) : leverage;
+              await setLeverage(creds, asset, leverage);
+              const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 });
+              if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; }
+              entry = fill.avgPrice || quote; size = fill.size;
+            } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; }
+          }
           const sl = isTb ? tbStop : sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
           const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
           const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: tbStop, risk_pct: tbCfg.riskPct } : {};
           const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra });
           if (insErr) { report.errors.push(`record ${sig.coin}: ${insErr.message}`); continue; }
-          positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence }); held.add(sig.coin); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · ${reason}`, { agent: "server", live: isLive, signal: sig });
+          positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence });
+          held.add(sig.coin); report.opened++;
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isTb ? tbCfg.riskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, leverage });
         }
       }
       const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · scanner_cursor=${nextCursor}`;
