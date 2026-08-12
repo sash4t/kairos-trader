@@ -229,3 +229,55 @@ export async function marketOrder(
   return { size: Math.abs(+filled.totalSz), avgPrice: +filled.avgPx, oid: filled.oid ?? null };
 }
 
+export interface NativeStopResult {
+  oid: number | null;
+  alreadyPresent: boolean;
+}
+
+/**
+ * Ensure a reduce-only exchange-native Stop Market exists for a live position.
+ * Hyperliquid itself watches MARK PRICE and triggers the order, so protection does
+ * not depend on Kairos' once-per-minute background cycle or the web app being open.
+ */
+export async function ensureNativeStopLoss(
+  creds: HlCreds,
+  asset: AssetInfo,
+  opts: { positionSide: "long" | "short"; size: number; triggerPrice: number },
+): Promise<NativeStopResult> {
+  if (!(opts.triggerPrice > 0) || !(opts.size > 0)) throw new Error(`${asset.name}: invalid native stop parameters`);
+  const triggerPx = formatPrice(opts.triggerPrice, asset.szDecimals);
+  const closeIsBuy = opts.positionSide === "short";
+  const expectedSide = closeIsBuy ? "B" : "A";
+  const open = await hlInfo<Array<{
+    coin: string; oid: number; isTrigger: boolean; reduceOnly: boolean; side: string;
+    triggerPx: string; orderType: string; sz: string;
+  }>>({ type: "frontendOpenOrders", user: creds.accountAddress });
+
+  const tolerance = Math.max(opts.triggerPrice * 0.00005, 10 ** -(Math.max(0, 6 - asset.szDecimals)));
+  const existing = (open ?? []).find((o) =>
+    o.coin === asset.name && o.isTrigger && o.reduceOnly && o.side === expectedSide &&
+    /stop/i.test(o.orderType ?? "") && Math.abs(+o.triggerPx - opts.triggerPrice) <= tolerance
+  );
+  if (existing) return { oid: existing.oid, alreadyPresent: true };
+
+  // For a market trigger Hyperliquid still requires `p`. Match the UI's market
+  // TP/SL behavior with a 10% execution band while keeping the trigger exact.
+  const marketLimit = closeIsBuy ? opts.triggerPrice * 1.10 : opts.triggerPrice * 0.90;
+  const sz = formatSize(opts.size, asset.szDecimals);
+  if (Number(sz) <= 0) throw new Error(`Size rounds to zero for ${asset.name}`);
+  const json = await post(creds, {
+    type: "order",
+    orders: [{
+      a: asset.index,
+      b: closeIsBuy,
+      p: formatPrice(marketLimit, asset.szDecimals),
+      s: sz,
+      r: true,
+      t: { trigger: { isMarket: true, triggerPx, tpsl: "sl" } },
+    }],
+    grouping: "positionTpsl",
+  });
+  const statuses = (json.response as { data?: { statuses?: unknown[] } } | undefined)?.data?.statuses ?? [];
+  const first = statuses[0] as { resting?: { oid: number } } | undefined;
+  return { oid: first?.resting?.oid ?? null, alreadyPresent: false };
+}
