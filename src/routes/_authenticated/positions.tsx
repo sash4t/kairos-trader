@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useBot } from "@/lib/botContext";
 import { useState } from "react";
 import { toast } from "sonner";
+import { closeLivePosition } from "@/lib/live.functions";
 
 export const Route = createFileRoute("/_authenticated/positions")({ component: Positions });
 
@@ -20,19 +21,39 @@ function Positions() {
 
   const close = async (p: any) => {
     setBusy(p.id);
-    const mark = +(mids[p.coin] ?? p.entry_price);
-    const pnl = p.side === "long" ? (mark - +p.entry_price) * +p.size : (+p.entry_price - mark) * +p.size;
-    await supabase.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: "manual", pnl, closed_at: new Date().toISOString() }).eq("id", p.id);
-    // Remove from engine's in-memory list
-    (engine as any)?.["positions"] && ((engine as any).positions = (engine as any).positions.filter((x: any) => x.id !== p.id));
-    toast.success(`Closed ${p.coin} @ ${mark.toFixed(6)}`);
-    setBusy(null); refetch();
+    try {
+      // Live positions MUST be closed at Hyperliquid first. We identify live
+      // positions by the active live trading mode on the engine; never mark
+      // the database record closed merely because the button was clicked.
+      const liveTrading = !!(engine as any)?.liveTrading;
+      if (liveTrading) {
+        const result = await closeLivePosition({ data: { coin: p.coin, side: p.side } });
+        if (!result.closed) {
+          const remaining = result.remainingSize > 0 ? ` Remaining size: ${result.remainingSize}.` : "";
+          toast.error(result.error ?? `Hyperliquid did not fully close ${p.coin}.${remaining}`);
+          return;
+        }
+        toast.success(`Closed ${p.coin} live on Hyperliquid${result.exitPrice ? ` @ ${result.exitPrice.toFixed(6)}` : ""}`);
+      } else {
+        const mark = +(mids[p.coin] ?? p.entry_price);
+        const pnl = p.side === "long" ? (mark - +p.entry_price) * +p.size : (+p.entry_price - mark) * +p.size;
+        const { error } = await supabase.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: "manual_paper", pnl, closed_at: new Date().toISOString() }).eq("id", p.id).eq("status", "open");
+        if (error) throw new Error(error.message);
+        toast.success(`Closed ${p.coin} @ ${mark.toFixed(6)}`);
+      }
+      // Remove from engine's in-memory list only after the close succeeded.
+      (engine as any)?.["positions"] && ((engine as any).positions = (engine as any).positions.filter((x: any) => x.id !== p.id));
+      await refetch();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
   };
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 space-y-4">
       <h1 className="text-xl sm:text-2xl font-semibold">Open positions</h1>
-      {/* Mobile cards */}
       <div className="space-y-3 md:hidden">
         {data.length === 0 && <div className="panel py-12 text-center text-sm text-muted-foreground">No open positions</div>}
         {data.map((p: any) => {
@@ -81,21 +102,10 @@ function Positions() {
               return (
                 <tr key={p.id} className="border-b border-panel-border/50 mono">
                   <td className="p-3">{p.coin}</td>
-                  <td className={`text-right ${pnl >= 0 ? "text-bull" : "text-bear"}`}>
-                    <span className="font-semibold">{pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}</span>
-                    <span className="ml-1 text-xs opacity-70">({pnl >= 0 ? "+" : ""}{(margin > 0 ? (pnl / margin) * 100 : 0).toFixed(1)}%)</span>
-                  </td>
+                  <td className={`text-right ${pnl >= 0 ? "text-bull" : "text-bear"}`}><span className="font-semibold">{pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}</span><span className="ml-1 text-xs opacity-70">({pnl >= 0 ? "+" : ""}{(margin > 0 ? (pnl / margin) * 100 : 0).toFixed(1)}%)</span></td>
                   <td className={p.side === "long" ? "text-bull" : "text-bear"}>{p.side.toUpperCase()}</td>
-                  <td className="text-right">{(+p.size).toFixed(4)}</td>
-                  <td className="text-right">{(+p.leverage).toFixed(0)}x</td>
-                  <td className="text-right">{(+p.entry_price).toFixed(6)}</td>
-                  <td className="text-right">{mark.toFixed(6)}</td>
-                  <td className="text-right text-bear">{(+p.stop_loss).toFixed(6)}</td>
-                  <td className="text-right text-bull">{(+p.take_profit).toFixed(6)}</td>
-                  <td className="text-right">{(+p.confidence).toFixed(0)}</td>
-                  <td className="p-3 text-right">
-                    <button disabled={busy === p.id} onClick={() => close(p)} className="rounded bg-bear/20 px-2 py-1 text-xs font-semibold text-bear hover:bg-bear/30 disabled:opacity-50">Close</button>
-                  </td>
+                  <td className="text-right">{(+p.size).toFixed(4)}</td><td className="text-right">{(+p.leverage).toFixed(0)}x</td><td className="text-right">{(+p.entry_price).toFixed(6)}</td><td className="text-right">{mark.toFixed(6)}</td><td className="text-right text-bear">{(+p.stop_loss).toFixed(6)}</td><td className="text-right text-bull">{(+p.take_profit).toFixed(6)}</td><td className="text-right">{(+p.confidence).toFixed(0)}</td>
+                  <td className="p-3 text-right"><button disabled={busy === p.id} onClick={() => close(p)} className="rounded bg-bear/20 px-2 py-1 text-xs font-semibold text-bear hover:bg-bear/30 disabled:opacity-50">Close</button></td>
                 </tr>
               );
             })}
