@@ -23,14 +23,14 @@ function Positions() {
     setBusy(p.id);
     try {
       if (settings?.mode === "live") {
-        const result = await closeLivePosition(p.coin, p.side);
-        if (!result.ok) {
-          toast.error(result.error || `Could not close ${p.coin} on Hyperliquid`);
+        const result = await closeLivePosition({ data: { coin: p.coin, side: p.side } });
+        if (!result.closed && result.remainingSize > 0) {
+          await supabase.from("paper_positions").update({ size: result.remainingSize }).eq("id", p.id).eq("status", "open");
+          toast.warning(`${p.coin} partially closed; ${result.remainingSize} remains open on Hyperliquid.`);
           return;
         }
         if (result.remainingSize > 0) {
-          await supabase.from("paper_positions").update({ size: result.remainingSize }).eq("id", p.id).eq("status", "open");
-          toast.warning(`${p.coin} partially closed; ${result.remainingSize} remains open on Hyperliquid.`);
+          toast.error(`Could not fully close ${p.coin} on Hyperliquid`);
           return;
         }
         const mark = result.exitPrice ?? +(mids[p.coin] ?? p.entry_price);
