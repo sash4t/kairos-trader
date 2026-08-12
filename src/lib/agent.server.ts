@@ -55,7 +55,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
   const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
   const liquid = meta.universe.map((m, i) => ({ meta: m, ctx: ctxs[i] })).filter((x) => x.ctx && +x.ctx.dayNtlVlm > MIN_24H_VOLUME && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
 
-  const { readHlCreds, loadAssetIndex, marketOrder, setLeverage, fetchLiveAccount } = await import("./hyperliquidExchange.server");
+  const { readHlCreds, loadAssetIndex, marketOrder, setLeverage, fetchLiveAccount, ensureNativeStopLoss } = await import("./hyperliquidExchange.server");
   const creds = readHlCreds();
   let assetIndex: Awaited<ReturnType<typeof loadAssetIndex>> | null = null;
   const assets = async () => (assetIndex ??= await loadAssetIndex());
@@ -151,6 +151,29 @@ export async function runTradingCycle(): Promise<CycleReport> {
         report.closed++;
         await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · ${exitReason} · PnL ${pnl.toFixed(2)}`, { strategy: s.strategy_key ?? "default" });
       };
+
+      // The 1-minute server cycle remains a second line of defense, but every
+      // live position should also have a real Hyperliquid Stop Market resting at
+      // its original protective stop. This removes the polling gap seen when a
+      // price crosses a 1% stop between cron ticks.
+      if (isLive && canTrade && creds) {
+        for (const p of positions) {
+          const trigger = p.initial_stop ?? p.stop_loss;
+          const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+          const alreadyBreached = p.side === "long" ? mark <= trigger : mark >= trigger;
+          if (alreadyBreached) continue; // software path below will close immediately this cycle
+          const asset = (await assets()).get(p.coin);
+          if (!asset) { await log(s.user_id, "error", `${p.coin}: cannot install native SL; asset metadata missing.`); continue; }
+          try {
+            const native = await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: trigger });
+            if (!native.alreadyPresent) await log(s.user_id, "info", `Installed native Hyperliquid SL for ${p.coin} @ ${trigger.toFixed(6)}.`, { oid: native.oid, trigger });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            report.errors.push(`native SL ${p.coin}: ${msg}`);
+            await log(s.user_id, "error", `Could not install native Hyperliquid SL for ${p.coin}: ${msg}`);
+          }
+        }
+      }
 
       if (canTrade && shockDir) {
         for (const p of [...positions]) {
@@ -258,27 +281,45 @@ export async function runTradingCycle(): Promise<CycleReport> {
           }
           const quote = quotePx; let entry = quote;
           const reason = `${sig.side.toUpperCase()} ${sig.coin} [${sig.family}] — ${sig.reasons.join(" + ")}`;
+          let liveAsset: Awaited<ReturnType<typeof assets>> extends Map<string, infer A> ? A | undefined : never;
           if (isLive && creds) {
-            const asset = (await assets()).get(sig.coin);
-            if (!asset) { report.errors.push(`${sig.coin}: unknown asset`); continue; }
-            size = Number(size.toFixed(asset.szDecimals));
-            if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${asset.szDecimals} decimals.`); continue; }
+            liveAsset = (await assets()).get(sig.coin) as typeof liveAsset;
+            if (!liveAsset) { report.errors.push(`${sig.coin}: unknown asset`); continue; }
+            size = Number(size.toFixed(liveAsset.szDecimals));
+            if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${liveAsset.szDecimals} decimals.`); continue; }
             try {
-              leverage = isTb ? Math.max(1, Math.floor(asset.maxLeverage)) : leverage;
-              await setLeverage(creds, asset, leverage);
-              const fill = await marketOrder(creds, asset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 });
+              leverage = isTb ? Math.max(1, Math.floor(liveAsset.maxLeverage)) : leverage;
+              await setLeverage(creds, liveAsset, leverage);
+              const fill = await marketOrder(creds, liveAsset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 });
               if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; }
               entry = fill.avgPrice || quote; size = fill.size;
             } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; }
           }
           const sl = isTb ? tbStop : sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
           const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
+
+          // A real-money entry is not considered safely established until the
+          // exchange itself has accepted its protective Stop Market. If that
+          // native SL cannot be installed, immediately flatten the fresh entry.
+          if (isLive && creds && liveAsset) {
+            try {
+              await ensureNativeStopLoss(creds, liveAsset, { positionSide: sig.side, size, triggerPrice: sl });
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              await log(s.user_id, "error", `Native SL placement failed for new ${sig.coin} position; flattening immediately: ${msg}`);
+              try { await marketOrder(creds, liveAsset, { isBuy: sig.side === "short", size, markPrice: entry, reduceOnly: true, slippagePct: 1 }); }
+              catch (flattenErr) { report.errors.push(`UNPROTECTED ${sig.coin}: ${flattenErr instanceof Error ? flattenErr.message : String(flattenErr)}`); }
+              report.errors.push(`native SL ${sig.coin}: ${msg}`);
+              continue;
+            }
+          }
+
           const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: tbStop, risk_pct: tbCfg.riskPct } : { initial_stop: sl };
           const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra });
           if (insErr) { report.errors.push(`record ${sig.coin}: ${insErr.message}`); continue; }
           positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: tbSafety ?? null });
           held.add(sig.coin); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isTb ? tbCfg.riskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, leverage });
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isTb ? tbCfg.riskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, leverage, nativeStop: isLive ? sl : null });
         }
       }
       const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · scanner_cursor=${nextCursor}`;
