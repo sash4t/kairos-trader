@@ -234,10 +234,16 @@ export interface NativeStopResult {
   alreadyPresent: boolean;
 }
 
+/** Cancel one resting order by oid. */
+async function cancelOrder(creds: HlCreds, asset: AssetInfo, oid: number) {
+  await post(creds, { type: "cancel", cancels: [{ a: asset.index, o: oid }] });
+}
+
 /**
- * Ensure a reduce-only exchange-native Stop Market exists for a live position.
- * Hyperliquid itself watches MARK PRICE and triggers the order, so protection does
- * not depend on Kairos' once-per-minute background cycle or the web app being open.
+ * Ensure exactly one reduce-only exchange-native Stop Market exists for a live
+ * position at the requested trigger. Any stale Kairos stop for the same coin and
+ * close side is cancelled first, which lets strategy/settings changes safely
+ * replace old too-tight safety-line stops.
  */
 export async function ensureNativeStopLoss(
   creds: HlCreds,
@@ -254,10 +260,17 @@ export async function ensureNativeStopLoss(
   }>>({ type: "frontendOpenOrders", user: creds.accountAddress });
 
   const tolerance = Math.max(opts.triggerPrice * 0.00005, 10 ** -(Math.max(0, 6 - asset.szDecimals)));
-  const existing = (open ?? []).find((o) =>
-    o.coin === asset.name && o.isTrigger && o.reduceOnly && o.side === expectedSide &&
-    /stop/i.test(o.orderType ?? "") && Math.abs(+o.triggerPx - opts.triggerPrice) <= tolerance
+  const matchingStops = (open ?? []).filter((o) =>
+    o.coin === asset.name && o.isTrigger && o.reduceOnly && o.side === expectedSide && /stop/i.test(o.orderType ?? "")
   );
+  const existing = matchingStops.find((o) => Math.abs(+o.triggerPx - opts.triggerPrice) <= tolerance);
+
+  // Remove stale/duplicate protective stops so an old safety-line order cannot
+  // close the trade early after Kairos switches to the configured hard SL.
+  for (const stale of matchingStops) {
+    if (existing && stale.oid === existing.oid) continue;
+    await cancelOrder(creds, asset, stale.oid);
+  }
   if (existing) return { oid: existing.oid, alreadyPresent: true };
 
   // For a market trigger Hyperliquid still requires `p`. Match the UI's market
