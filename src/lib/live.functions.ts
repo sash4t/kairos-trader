@@ -42,6 +42,105 @@ export const getLiveStatus = createServerFn({ method: "POST" })
     };
   });
 
+/**
+ * Close one live Hyperliquid position and reconcile the local record.
+ * The exchange is authoritative: a local position is never marked closed
+ * unless the reduce-only order actually fills and the exchange confirms
+ * that no position remains (or records the remaining partial size).
+ */
+export const closeLivePosition = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ data, context }): Promise<{
+    coin: string;
+    side: "long" | "short";
+    requestedSize: number;
+    filledSize: number;
+    remainingSize: number;
+    closed: boolean;
+    exitPrice: number | null;
+    error?: string;
+  }> => {
+    const { readHlCreds, fetchLiveAccount, loadAssetIndex, marketOrder, hlInfo } =
+      await import("./hyperliquidExchange.server");
+    const creds = readHlCreds();
+    if (!creds) throw new Error("Hyperliquid credentials are not configured.");
+
+    const { coin, side } = data as { coin: string; side: "long" | "short" };
+    if (!coin || (side !== "long" && side !== "short")) throw new Error("Invalid live position.");
+
+    // Never trust the stale/local size. Read the actual exchange position first.
+    const account = await fetchLiveAccount(creds.accountAddress);
+    const live = account.positions.find((p) => p.coin === coin && p.side === side);
+    if (!live || live.size <= 0) {
+      return { coin, side, requestedSize: 0, filledSize: 0, remainingSize: 0, closed: true, exitPrice: null };
+    }
+
+    const assets = await loadAssetIndex();
+    const asset = assets.get(coin);
+    if (!asset) throw new Error(`${coin}: unknown Hyperliquid asset`);
+
+    const mids = await hlInfo<Record<string, string>>({ type: "allMids" });
+    const mark = mids[coin] ? +mids[coin] : live.entryPrice;
+    if (!Number.isFinite(mark) || mark <= 0) throw new Error(`${coin}: invalid market price`);
+
+    const fill = await marketOrder(creds, asset, {
+      isBuy: live.side === "short",
+      size: live.size,
+      markPrice: mark,
+      reduceOnly: true,
+      slippagePct: 1,
+    });
+
+    // Zero-fill means the exchange did not close anything. Do not mutate the
+    // local position to CLOSED in that case.
+    if (fill.size <= 0) {
+      return {
+        coin, side, requestedSize: live.size, filledSize: 0, remainingSize: live.size,
+        closed: false, exitPrice: null, error: "Hyperliquid close order did not fill.",
+      };
+    }
+
+    // Exchange state is authoritative after the order. This also catches
+    // partial fills and avoids reporting a local close that did not happen.
+    const after = await fetchLiveAccount(creds.accountAddress);
+    const remaining = after.positions.find((p) => p.coin === coin && p.side === side)?.size ?? 0;
+    const px = fill.avgPrice || mark;
+    const filled = Math.min(fill.size, live.size);
+    const pnl = live.side === "long"
+      ? (px - live.entryPrice) * filled
+      : (live.entryPrice - px) * filled;
+
+    if (remaining <= 0) {
+      const { error } = await context.supabase
+        .from("paper_positions")
+        .update({
+          status: "closed",
+          exit_price: px,
+          exit_reason: "manual_live",
+          pnl,
+          closed_at: new Date().toISOString(),
+        })
+        .eq("user_id", context.userId)
+        .eq("coin", coin)
+        .eq("side", side)
+        .eq("status", "open");
+      if (error) throw new Error(`Exchange position closed, but local record update failed: ${error.message}`);
+      return { coin, side, requestedSize: live.size, filledSize: filled, remainingSize: 0, closed: true, exitPrice: px };
+    }
+
+    // Partial fill: keep the local record OPEN and reflect the exchange size.
+    const { error } = await context.supabase
+      .from("paper_positions")
+      .update({ size: remaining, notional: remaining * px })
+      .eq("user_id", context.userId)
+      .eq("coin", coin)
+      .eq("side", side)
+      .eq("status", "open");
+    if (error) throw new Error(`Partial live close executed, but local size update failed: ${error.message}`);
+
+    return { coin, side, requestedSize: live.size, filledSize: filled, remainingSize: remaining, closed: false, exitPrice: px };
+  });
+
 /** Emergency: market-close every live Hyperliquid position with reduce-only orders. */
 export const flattenLive = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -90,4 +189,3 @@ export const flattenLive = createServerFn({ method: "POST" })
     }
     return { closed, errors };
   });
-
