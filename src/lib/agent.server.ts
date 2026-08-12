@@ -80,7 +80,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const isLive = s.mode === "live";
       if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
       let canTrade = !isLive || !!creds;
-      const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct: +s.trail_activate_pct, trailDistPct: +s.trail_dist_pct };
+      const trailActivatePct = Number.isFinite(+(s.trail_activate_pct ?? 0)) && +(s.trail_activate_pct ?? 0) > 0 ? +(s.trail_activate_pct ?? 0) : 1;
+      const trailDistPct = Number.isFinite(+(s.trail_dist_pct ?? 0)) && +(s.trail_dist_pct ?? 0) > 0 ? +(s.trail_dist_pct ?? 0) : 0.5;
+      const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct, trailDistPct };
       const shockWindow = Math.max(1, Math.round(+(s.btc_shock_window_min ?? 240)));
       let shockDir: ShockDir = null; let shockMove: number | null = null;
       if (s.btc_shock_enabled !== false) {
@@ -128,15 +130,26 @@ export async function runTradingCycle(): Promise<CycleReport> {
         if (isLive && creds) {
           const asset = (await assets()).get(p.coin);
           if (!asset) { report.errors.push(`${p.coin}: unknown asset on close`); return; }
-          try { await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 }); }
-          catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Failed to close ${p.coin}: ${msg}`); return; }
+          try {
+            const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 });
+            if (fill.size <= 0) { await log(s.user_id, "warn", `Close for ${p.coin} did not fill; local position remains OPEN.`); return; }
+            const after = await fetchLiveAccount(creds.accountAddress);
+            const remaining = after.positions.find((x) => x.coin === p.coin);
+            if (remaining && remaining.size > Math.max(10 ** -(asset.szDecimals + 1), p.size * 0.0001)) {
+              const remainingSize = remaining.size;
+              await supabaseAdmin.from("paper_positions").update({ size: remainingSize, notional: remainingSize * remaining.entryPrice }).eq("id", p.id).eq("status", "open");
+              p.size = remainingSize; p.notional = remainingSize * remaining.entryPrice;
+              await log(s.user_id, "warn", `Partial live close ${p.coin}: ${remainingSize} remains on Hyperliquid.`);
+              return;
+            }
+          } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Failed to close ${p.coin}: ${msg}`); return; }
         }
         const pnl = p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
-        await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: exitReason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id);
+        await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: exitReason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id).eq("status", "open");
         positions = positions.filter((x) => x.id !== p.id);
         held.delete(p.coin);
         report.closed++;
-        await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · ${exitReason} · PnL ${pnl.toFixed(2)}`, { strategy: TRENDLINE_BREAK_KEY });
+        await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · ${exitReason} · PnL ${pnl.toFixed(2)}`, { strategy: s.strategy_key ?? "default" });
       };
 
       if (canTrade && shockDir) {
@@ -152,32 +165,42 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           const previousPeak = p.trail_high ?? p.entry_price;
           const best = p.side === "long" ? Math.max(previousPeak, mark) : Math.min(previousPeak, mark);
-          const activatePct = Math.max(0, +(s.trail_activate_pct ?? 1));
-          const distancePct = Math.max(0.05, +(s.trail_dist_pct ?? 0.5));
-          const dynamicStop = dynamicTrailStop(p.side, p.entry_price, best, p.stop_loss, activatePct, distancePct);
+          const dynamicStop = dynamicTrailStop(p.side, p.entry_price, best, p.stop_loss, trailActivatePct, trailDistPct);
           if (best !== p.trail_high || dynamicStop !== p.stop_loss) {
-            p.trail_high = best;
-            p.stop_loss = dynamicStop;
-            await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, trail_high: p.trail_high }).eq("id", p.id);
+            p.trail_high = best; p.stop_loss = dynamicStop;
+            await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
           }
-
           const series = await loadTbSeries(p.coin);
           const levels = buildCascade(series, tbCfg.timeframes, tbCfg.pivotStrength);
           const safety = safetyLineFor(levels, p.side, mark);
           if (safety != null) {
             p.safety_line = safety;
             const structuralStop = trailToSafety(p.side, p.stop_loss, safety);
-            if (structuralStop !== p.stop_loss) {
-              p.stop_loss = structuralStop;
-              await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety, trail_high: p.trail_high }).eq("id", p.id);
-            } else {
-              await supabaseAdmin.from("paper_positions").update({ safety_line: safety, trail_high: p.trail_high }).eq("id", p.id);
-            }
+            if (structuralStop !== p.stop_loss) p.stop_loss = structuralStop;
+            await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
           }
-
           if (p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss) {
-            const label = p.stop_loss > p.entry_price || (p.side === "long" ? best > p.entry_price : best < p.entry_price) ? "dynamic_trailing_stop" : "safety_stop";
+            const label = p.side === "long" ? (p.stop_loss > p.entry_price ? "dynamic_trailing_stop" : "safety_stop") : (p.stop_loss < p.entry_price ? "dynamic_trailing_stop" : "safety_stop");
             await closeTbPosition(p, mark, label);
+          }
+        }
+      }
+
+      if (!isTb && canTrade) {
+        for (const p of [...positions]) {
+          const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+          const previousPeak = p.trail_high ?? p.entry_price;
+          const best = p.side === "long" ? Math.max(previousPeak, mark) : Math.min(previousPeak, mark);
+          const dynamicStop = dynamicTrailStop(p.side, p.entry_price, best, p.stop_loss, trailActivatePct, trailDistPct);
+          if (best !== p.trail_high || dynamicStop !== p.stop_loss) {
+            p.trail_high = best; p.stop_loss = dynamicStop;
+            await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
+          }
+          const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
+          const hitTp = Number.isFinite(p.take_profit) && (p.side === "long" ? mark >= p.take_profit : mark <= p.take_profit);
+          if (hitStop || hitTp) {
+            const reason = hitStop ? ((p.side === "long" ? p.stop_loss > p.entry_price : p.stop_loss < p.entry_price) ? "dynamic_trailing_stop" : "stop_loss") : "take_profit";
+            await closeTbPosition(p, mark, reason);
           }
         }
       }
@@ -250,7 +273,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           }
           const sl = isTb ? tbStop : sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
           const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
-          const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: tbStop, risk_pct: tbCfg.riskPct } : {};
+          const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: tbStop, risk_pct: tbCfg.riskPct } : { initial_stop: sl };
           const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra });
           if (insErr) { report.errors.push(`record ${sig.coin}: ${insErr.message}`); continue; }
           positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: tbSafety ?? null });
