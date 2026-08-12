@@ -80,9 +80,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const isLive = s.mode === "live";
       if (isLive && !creds) { notes.push("live mode on but API wallet not configured — no orders sent"); await log(s.user_id, "error", "Live mode is on but Hyperliquid API credentials are missing."); }
       let canTrade = !isLive || !!creds;
+      const hardSlPct = Number.isFinite(+(s.scalp_sl_pct ?? 0)) && +(s.scalp_sl_pct ?? 0) > 0 ? +(s.scalp_sl_pct ?? 0) : 1;
       const trailActivatePct = Number.isFinite(+(s.trail_activate_pct ?? 0)) && +(s.trail_activate_pct ?? 0) > 0 ? +(s.trail_activate_pct ?? 0) : 1;
       const trailDistPct = Number.isFinite(+(s.trail_dist_pct ?? 0)) && +(s.trail_dist_pct ?? 0) > 0 ? +(s.trail_dist_pct ?? 0) : 0.5;
-      const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: +s.scalp_sl_pct, trailActivatePct, trailDistPct };
+      const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: hardSlPct, trailActivatePct, trailDistPct };
       const shockWindow = Math.max(1, Math.round(+(s.btc_shock_window_min ?? 240)));
       let shockDir: ShockDir = null; let shockMove: number | null = null;
       if (s.btc_shock_enabled !== false) {
@@ -118,6 +119,34 @@ export async function runTradingCycle(): Promise<CycleReport> {
         riskPct: +(s.tb_risk_pct ?? 1),
         positionSizePct: +(s.tb_position_size_pct ?? s.position_size_pct ?? 5),
       };
+
+      // Legacy Trendline Break rows used the nearby safety line as the initial
+      // stop. Normalize them to the user's configured hard SL before any safety
+      // line is allowed to tighten the trade. The native-stop reconciler below
+      // also replaces stale exchange SLs with this hard stop.
+      if (isTb) {
+        for (const p of positions) {
+          const hardStop = p.side === "long"
+            ? p.entry_price * (1 - hardSlPct / 100)
+            : p.entry_price * (1 + hardSlPct / 100);
+          const best = p.trail_high ?? p.entry_price;
+          const favorablePct = p.side === "long"
+            ? ((best - p.entry_price) / p.entry_price) * 100
+            : ((p.entry_price - best) / p.entry_price) * 100;
+          const profitProtectionActive = favorablePct >= trailActivatePct;
+          if (!profitProtectionActive) {
+            const stopDiff = Math.abs(p.stop_loss - hardStop) / p.entry_price * 100;
+            const initialDiff = Math.abs((p.initial_stop ?? p.stop_loss) - hardStop) / p.entry_price * 100;
+            if (stopDiff > 0.0001 || initialDiff > 0.0001) {
+              p.stop_loss = hardStop;
+              p.initial_stop = hardStop;
+              await supabaseAdmin.from("paper_positions").update({ stop_loss: hardStop, initial_stop: hardStop }).eq("id", p.id).eq("status", "open");
+              await log(s.user_id, "info", `Normalized ${p.coin} Trendline Break hard SL to ${hardSlPct.toFixed(2)}% @ ${hardStop.toFixed(6)}.`);
+            }
+          }
+        }
+      }
+
       const loadTbSeries = async (coin: string): Promise<TbSeries> => {
         const series: TbSeries = {};
         for (const tf of tbCfg.timeframes) {
@@ -188,23 +217,37 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           const previousPeak = p.trail_high ?? p.entry_price;
           const best = p.side === "long" ? Math.max(previousPeak, mark) : Math.min(previousPeak, mark);
+          const favorablePct = p.side === "long"
+            ? ((best - p.entry_price) / p.entry_price) * 100
+            : ((p.entry_price - best) / p.entry_price) * 100;
+          const profitProtectionActive = favorablePct >= trailActivatePct;
           const dynamicStop = dynamicTrailStop(p.side, p.entry_price, best, p.stop_loss, trailActivatePct, trailDistPct);
           if (best !== p.trail_high || dynamicStop !== p.stop_loss) {
             p.trail_high = best; p.stop_loss = dynamicStop;
             await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
           }
+
+          // Keep calculating/displaying the structural safety line, but it may
+          // tighten the stop only after the trade has first earned the configured
+          // trail activation. Even then, it is allowed only when the structural
+          // candidate is at breakeven or better — never while it would realize a
+          // small loss like the old SUI/LINK/BCH safety_stop exits.
           const series = await loadTbSeries(p.coin);
           const levels = buildCascade(series, tbCfg.timeframes, tbCfg.pivotStrength);
           const safety = safetyLineFor(levels, p.side, mark);
           if (safety != null) {
             p.safety_line = safety;
-            const structuralStop = trailToSafety(p.side, p.stop_loss, safety);
-            if (structuralStop !== p.stop_loss) p.stop_loss = structuralStop;
+            if (profitProtectionActive) {
+              const structuralStop = trailToSafety(p.side, p.stop_loss, safety);
+              const protectsProfit = p.side === "long" ? structuralStop >= p.entry_price : structuralStop <= p.entry_price;
+              if (protectsProfit && structuralStop !== p.stop_loss) p.stop_loss = structuralStop;
+            }
             await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
           }
+
           if (p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss) {
-            const label = p.side === "long" ? (p.stop_loss > p.entry_price ? "dynamic_trailing_stop" : "safety_stop") : (p.stop_loss < p.entry_price ? "dynamic_trailing_stop" : "safety_stop");
-            await closeTbPosition(p, mark, label);
+            const protectedProfit = p.side === "long" ? p.stop_loss >= p.entry_price : p.stop_loss <= p.entry_price;
+            await closeTbPosition(p, mark, protectedProfit ? "dynamic_trailing_stop" : "stop_loss");
           }
         }
       }
@@ -265,7 +308,12 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (isTb) {
             if (tbSafety == null) continue;
             leverage = Math.max(1, Math.floor(target.meta.maxLeverage));
-            tbStop = safetyStop(sig.side, tbSafety);
+            // Trendline Break now honors the same configured hard SL percentage
+            // as the rest of Kairos. The safety line is entry structure only;
+            // it cannot tighten the trade until profit protection activates.
+            tbStop = sig.side === "long"
+              ? quotePx * (1 - hardSlPct / 100)
+              : quotePx * (1 + hardSlPct / 100);
             const riskBasedSize = riskSize(equity, tbCfg.riskPct, quotePx, tbStop);
             const positionNotionalCap = equity * (tbCfg.positionSizePct / 100) * leverage;
             const exposureCap = equity * (+s.max_exposure_pct / 100) * leverage;
@@ -295,7 +343,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
               entry = fill.avgPrice || quote; size = fill.size;
             } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; }
           }
-          const sl = isTb ? tbStop : sig.side === "long" ? entry * (1 - exits.slPct / 100) : entry * (1 + exits.slPct / 100);
+          const sl = sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
           const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
 
           // A real-money entry is not considered safely established until the
@@ -314,12 +362,12 @@ export async function runTradingCycle(): Promise<CycleReport> {
             }
           }
 
-          const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: tbStop, risk_pct: tbCfg.riskPct } : { initial_stop: sl };
+          const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: sl, risk_pct: tbCfg.riskPct } : { initial_stop: sl };
           const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra });
           if (insErr) { report.errors.push(`record ${sig.coin}: ${insErr.message}`); continue; }
           positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: tbSafety ?? null });
           held.add(sig.coin); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isTb ? tbCfg.riskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, leverage, nativeStop: isLive ? sl : null });
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isTb ? tbCfg.riskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, hardSlPct, leverage, nativeStop: isLive ? sl : null });
         }
       }
       const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · scanner_cursor=${nextCursor}`;
