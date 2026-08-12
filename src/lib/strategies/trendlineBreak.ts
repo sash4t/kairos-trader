@@ -6,8 +6,6 @@
 import type { Bar } from "../strategy";
 
 export const TRENDLINE_BREAK_KEY = "trendline-break" as const;
-
-/** Hyperliquid candle intervals, highest -> lowest. Monthly is intentionally excluded. */
 export const TB_TIMEFRAMES = ["1w", "1d", "4h", "1h", "30m", "15m"] as const;
 export type TbTimeframe = (typeof TB_TIMEFRAMES)[number];
 
@@ -29,10 +27,7 @@ export const TB_INTERVAL_MS: Record<TbTimeframe, number> = {
 };
 
 export function parseTimeframes(raw: string | null | undefined): TbTimeframe[] {
-  const list = (raw ?? "")
-    .split(",")
-    .map((t) => t.trim())
-    .filter((t): t is TbTimeframe => (TB_TIMEFRAMES as readonly string[]).includes(t));
+  const list = (raw ?? "").split(",").map((t) => t.trim()).filter((t): t is TbTimeframe => (TB_TIMEFRAMES as readonly string[]).includes(t));
   const unique = [...new Set(list)];
   const ordered = TB_TIMEFRAMES.filter((t) => unique.includes(t));
   return ordered.length >= 2 ? [...ordered] : [...TB_DEFAULTS.timeframes];
@@ -73,7 +68,6 @@ function swingHighs(bars: Bar[], strength: number): Pivot[] {
   return out;
 }
 
-/** Tolerance prevents one-tick numerical noise from turning a touch into a break. */
 function tolerance(bars: Bar[]): number {
   const span = bars.slice(-100);
   const avg = span.reduce((s, b) => s + (b.h - b.l), 0) / Math.max(1, span.length);
@@ -88,7 +82,6 @@ function fitSegment(bars: Bar[], a: Pivot, b: Pivot, kind: LineKind, tol: number
   let touches = 0;
   for (let i = a.i; i <= b.i; i++) {
     const line = valueAt(i);
-    // A closed candle may not pierce the line.
     if (kind === "up" ? bars[i].c < line - tol : bars[i].c > line + tol) return null;
     const distance = kind === "up" ? bars[i].l - line : line - bars[i].h;
     if (Math.abs(distance) <= tol) touches++;
@@ -96,18 +89,14 @@ function fitSegment(bars: Bar[], a: Pivot, b: Pivot, kind: LineKind, tol: number
   return { kind, i1: a.i, t1: a.t, p1: a.p, i2: b.i, t2: b.t, p2: b.p, slope, touches, valueAt };
 }
 
-/** Build the chained segments required by the transcript: previous B becomes next A. */
 export function buildChain(bars: Bar[], kind: LineKind, pivotStrength: number, startTime?: number): TbLine[] {
   if (bars.length < pivotStrength * 3 + 5) return [];
   const pivots = kind === "up" ? swingLows(bars, pivotStrength) : swingHighs(bars, pivotStrength);
   let pool = startTime ? pivots.filter((p) => p.t >= startTime) : pivots;
   if (pool.length < 2) pool = pivots;
   if (pool.length < 2) return [];
-
-  // First line starts at the lowest low / highest high visible in this timeframe.
   let anchor = pool[0];
   for (const p of pool) if (kind === "up" ? p.p < anchor.p : p.p > anchor.p) anchor = p;
-
   const tol = tolerance(bars);
   const chain: TbLine[] = [];
   let a = anchor;
@@ -159,7 +148,6 @@ export function analyzeLine(bars: Bar[], kind: LineKind, pivotStrength: number, 
 export interface TbCascadeLevel { timeframe: TbTimeframe; up: TbLineState; down: TbLineState }
 export type TbSeries = Partial<Record<TbTimeframe, Bar[]>>;
 
-/** Refine the structure from weekly down to the execution timeframe. */
 export function buildCascade(series: TbSeries, timeframes: TbTimeframe[], pivotStrength: number): TbCascadeLevel[] {
   const levels: TbCascadeLevel[] = [];
   let upSeed: number | undefined;
@@ -196,7 +184,6 @@ export interface TbConfig {
   positionSizePct?: number;
 }
 
-/** Entry is only a fresh close through the execution-timeframe action line. */
 export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbConfig): TbSignal {
   const levels = buildCascade(series, cfg.timeframes, cfg.pivotStrength);
   const exec = levels.at(-1);
@@ -204,35 +191,26 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
   const price = execBars?.at(-1)?.c ?? 0;
   const base: TbSignal = { coin, side: null, confidence: 0, reasons: [], price, indicators: {}, levels };
   if (!exec || !execBars) return { ...base, reasons: ["Waiting for weekly-to-execution trendline history"] };
-
   const indicators: Record<string, number> = {
     execUpLine: exec.up.value ?? NaN,
     execDownLine: exec.down.value ?? NaN,
     upTouches: exec.up.line?.touches ?? 0,
     downTouches: exec.down.line?.touches ?? 0,
   };
-
   let side: "long" | "short" | null = null;
   let actionLine: number | undefined;
   let safety: number | undefined;
   const reasons: string[] = [];
-
   if (exec.down.freshBreak && exec.down.value != null) {
-    side = "long";
-    actionLine = exec.down.value;
-    safety = safetyLineFor(levels, "long", price);
+    side = "long"; actionLine = exec.down.value; safety = safetyLineFor(levels, "long", price);
     reasons.push(`${exec.timeframe} close above bearish trendline — LONG action-line break`);
   } else if (exec.up.freshBreak && exec.up.value != null) {
-    side = "short";
-    actionLine = exec.up.value;
-    safety = safetyLineFor(levels, "short", price);
+    side = "short"; actionLine = exec.up.value; safety = safetyLineFor(levels, "short", price);
     reasons.push(`${exec.timeframe} close below bullish trendline — SHORT action-line break`);
   } else {
     return { ...base, indicators, reasons: [`No ${exec.timeframe} action-line break`] };
   }
-
   if (safety == null) return { ...base, indicators, reasons: ["Break detected but no valid opposing safety line is available"] };
-
   let agree = 0;
   for (const lvl of levels.slice(0, -1)) {
     const intact = side === "long" ? !!lvl.up.line && !lvl.up.broken : !!lvl.down.line && !lvl.down.broken;
@@ -244,7 +222,6 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
   return { coin, side, confidence, reasons, price, timeframe: exec.timeframe, actionLine, safetyLine: safety, indicators: { ...indicators, agree, touches }, levels };
 }
 
-/** Opposing active line on the correct side of price, nearest execution timeframe first. */
 export function safetyLineFor(levels: TbCascadeLevel[], side: "long" | "short", price: number): number | undefined {
   for (let i = levels.length - 1; i >= 0; i--) {
     const state = side === "long" ? levels[i].up : levels[i].down;
@@ -257,6 +234,29 @@ export function safetyLineFor(levels: TbCascadeLevel[], side: "long" | "short", 
 
 export function safetyStop(side: "long" | "short", safetyLine: number, bufferPct = 0.15): number {
   return side === "long" ? safetyLine * (1 - bufferPct / 100) : safetyLine * (1 + bufferPct / 100);
+}
+
+/**
+ * Dynamic price trail used as the profit-taking layer after a favorable move.
+ * It never loosens: long stops only rise and short stops only fall.
+ */
+export function dynamicTrailStop(
+  side: "long" | "short",
+  entryPrice: number,
+  bestPrice: number,
+  currentStop: number,
+  activatePct = 1,
+  distancePct = 0.5,
+): number {
+  if (!(entryPrice > 0) || !(bestPrice > 0) || !(currentStop > 0)) return currentStop;
+  const favorablePct = side === "long"
+    ? ((bestPrice - entryPrice) / entryPrice) * 100
+    : ((entryPrice - bestPrice) / entryPrice) * 100;
+  if (favorablePct < Math.max(0, activatePct)) return currentStop;
+  const candidate = side === "long"
+    ? bestPrice * (1 - Math.max(0.05, distancePct) / 100)
+    : bestPrice * (1 + Math.max(0.05, distancePct) / 100);
+  return side === "long" ? Math.max(currentStop, candidate) : Math.min(currentStop, candidate);
 }
 
 export function riskSize(equity: number, riskPct: number, entry: number, stop: number): number {
