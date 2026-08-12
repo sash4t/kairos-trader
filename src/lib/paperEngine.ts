@@ -4,7 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 import {
   TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, evaluateTrendlineBreak, buildCascade,
-  safetyLineFor, safetyStop, riskSize, trailToSafety, safetyBreached,
+  safetyLineFor, riskSize, trailToSafety, dynamicTrailStop,
   type TbTimeframe, type TbSeries,
 } from "./strategies/trendlineBreak";
 
@@ -26,7 +26,6 @@ export interface Settings {
   trailing_enabled: boolean;
   bot_enabled: boolean;
   kill_switch_engaged: boolean;
-  // Always-on server agent
   server_agent_enabled: boolean;
   ai_review_enabled: boolean;
   scalp_enabled: boolean;
@@ -36,13 +35,10 @@ export interface Settings {
   trail_dist_pct: number;
   last_cycle_at: string | null;
   last_cycle_note: string | null;
-  /** Max USD of the real account the bot may size positions from in live mode (0 = whole account). */
   live_max_alloc_usd: number;
-  /** Flatten positions fighting a sudden BTC move. */
   btc_shock_enabled?: boolean;
   btc_shock_pct?: number;
   btc_shock_window_min?: number;
-  /** Active strategy. `trendline-break` runs its own independent engine path. */
   strategy_key?: string;
   tb_timeframes?: string;
   tb_pivot_strength?: number;
@@ -62,18 +58,13 @@ export interface OpenPosition {
   take_profit: number;
   trail_high: number | null;
   confidence: number;
-  /** Trendline Break only: the opposing trendline that trails the stop. */
   safety_line?: number | null;
 }
 
 type Log = (level: "info" | "warn" | "error" | "trade", msg: string, meta?: any) => void;
-
-// Backtested (3mo, BTC/SOL/ARB/LINK/DOGE): 1h bars materially outperform 15m —
-// 15m churns (1217 trades, PF 0.66) while 1h fresh-cross entries yield PF 1.78.
 const CANDLE_INTERVAL = "1h";
 const CANDLE_MS = 60 * 60 * 1000;
 const BARS_NEEDED = 220;
-
 interface CoinCache { bars: Bar[]; daily: Bar[]; fourHour: Bar[]; lastFetch: number; nextEval: number }
 const HTF_BARS = 240;
 
@@ -107,11 +98,20 @@ export class PaperEngine {
     this.dayStartEquity = settings.paper_equity;
   }
 
-  /** The browser engine simulates fills; it must never touch a live account. */
   private isLive() { return this.settings.mode === "live"; }
-
-  /** True when the independent "Trendline Break" strategy is selected. */
   private isTrendlineBreak() { return this.settings.strategy_key === TRENDLINE_BREAK_KEY; }
+  private hardSlPct() {
+    const v = Number(this.settings.scalp_sl_pct ?? 0);
+    return Number.isFinite(v) && v > 0 ? v : 1;
+  }
+  private trailActivatePct() {
+    const v = Number(this.settings.trail_activate_pct ?? 0);
+    return Number.isFinite(v) && v > 0 ? v : 1;
+  }
+  private trailDistPct() {
+    const v = Number(this.settings.trail_dist_pct ?? 0);
+    return Number.isFinite(v) && v > 0 ? v : 0.5;
+  }
 
   private tbConfig() {
     return {
@@ -139,11 +139,8 @@ export class PaperEngine {
     return series;
   }
 
-  /** Independent cycle for Trendline Break: trail safety lines, then look for breaks. */
   private async runTrendlineBreakCycle() {
     const cfg = this.tbConfig();
-
-    // 1) Manage open positions against the advancing safety line.
     for (const p of [...this.positions]) {
       const series = await this.tbLoadSeries(p.coin, cfg.timeframes, cfg.refreshMs);
       if (!series) continue;
@@ -152,20 +149,23 @@ export class PaperEngine {
       const safety = safetyLineFor(levels, p.side, mark);
       if (safety == null) continue;
       p.safety_line = safety;
-      const next = trailToSafety(p.side, p.stop_loss, safety);
-      if (next !== p.stop_loss) { p.stop_loss = next; }
-      supabase.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety }).eq("id", p.id).then(() => {});
-      if (safetyBreached(p.side, mark, safety)) await this.closePosition(p, mark, "safety_line");
+      const best = p.trail_high ?? p.entry_price;
+      const favorablePct = p.side === "long"
+        ? ((best - p.entry_price) / p.entry_price) * 100
+        : ((p.entry_price - best) / p.entry_price) * 100;
+      if (favorablePct >= this.trailActivatePct()) {
+        const structuralStop = trailToSafety(p.side, p.stop_loss, safety);
+        const protectsProfit = p.side === "long" ? structuralStop >= p.entry_price : structuralStop <= p.entry_price;
+        if (protectsProfit) p.stop_loss = structuralStop;
+      }
+      supabase.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety, trail_high: p.trail_high }).eq("id", p.id).then(() => {});
     }
 
-    // 2) Look for new action-line breaks.
     const held = new Set(this.positions.map(p => p.coin));
     const EXCLUDED = new Set(["BTC", "ETH"]);
-    const scored = this.meta
-      .map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
+    const scored = this.meta.map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
       .filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED.has(x.meta.name))
-      .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm)
-      .slice(0, 30);
+      .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm).slice(0, 30);
 
     for (const { meta } of scored) {
       if (this.positions.length >= this.settings.max_positions) break;
@@ -181,15 +181,13 @@ export class PaperEngine {
     }
   }
 
-  private async tbOpen(
-    coin: string, side: "long" | "short", price: number, safetyLine: number, actionLine: number,
-    confidence: number, reasons: string[], timeframe: string, riskPct: number, meta: AssetMeta,
-  ) {
+  private async tbOpen(coin: string, side: "long" | "short", price: number, safetyLine: number, actionLine: number,
+    confidence: number, reasons: string[], timeframe: string, riskPct: number, meta: AssetMeta) {
     const b = bucket(coin);
     if (this.positions.filter(p => bucket(p.coin) === b).length >= 3) return;
     const equity = this.currentEquity();
     const leverage = Math.max(1, Math.floor(Math.min(this.settings.max_leverage, meta.maxLeverage)));
-    const stop = safetyStop(side, safetyLine);
+    const stop = side === "long" ? price * (1 - this.hardSlPct() / 100) : price * (1 + this.hardSlPct() / 100);
     let size = riskSize(equity, riskPct, price, stop);
     const room = equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0);
     if (room <= 0) return;
@@ -204,327 +202,158 @@ export class PaperEngine {
       timeframe, initial_stop: stop, risk_pct: riskPct,
     }).select().single();
     if (error || !data) { this.log("error", `Failed to open ${coin}: ${error?.message}`); return; }
-    this.positions.push({
-      id: data.id, coin, side, size, notional: size * price, leverage, entry_price: price,
+    this.positions.push({ id: data.id, coin, side, size, notional: size * price, leverage, entry_price: price,
       stop_loss: stop, take_profit: side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY,
-      trail_high: null, confidence, safety_line: safetyLine,
-    });
-    this.log("trade", `OPEN ${reason} @ ${price.toFixed(6)} · action ${actionLine.toFixed(6)} · safety ${safetyLine.toFixed(6)} · SL ${stop.toFixed(6)} · risk ${riskPct}%`);
+      trail_high: price, confidence, safety_line: safetyLine });
+    this.log("trade", `OPEN ${reason} @ ${price.toFixed(6)} · hard SL ${stop.toFixed(6)} (${this.hardSlPct().toFixed(2)}%) · safety ${safetyLine.toFixed(6)}`);
   }
 
   async start() {
     if (this.running) return;
-    if (this.isLive()) {
-      this.log("info", "Live mode — browser engine stays idle; the server agent handles live trading.");
-      return;
-    }
+    if (this.isLive()) { this.log("info", "Live mode — browser engine stays idle; the server agent handles live trading."); return; }
     this.running = true;
     this.log("info", "Engine starting (paper mode)");
     await this.syncPositions();
-    // Prime meta + prices
     const [m, c] = await fetchMetaAndCtxs();
-    this.meta = m.universe;
-    this.ctxs = c;
+    this.meta = m.universe; this.ctxs = c;
     this.unsubMids = subscribeAllMids(mids => { this.mids = { ...this.mids, ...mids }; });
-    // Tick loop — every 2s check SL/TP/trailing on open positions
     this.tickTimer = setInterval(() => this.tick(), 2000);
-    // Strategy eval — every 15s scan a slice of universe
     this.evalTimer = setInterval(() => this.evalCycle().catch(err => this.log("error", err.message)), 15000);
-    // BTC shock watch — refresh the trailing BTC move every 20s.
-    this.pollBtcShock();
-    this.shockTimer = setInterval(() => this.pollBtcShock(), 20000);
+    this.pollBtcShock(); this.shockTimer = setInterval(() => this.pollBtcShock(), 20000);
   }
 
   async syncPositions() {
-    // Load current open positions from DB so the engine never manages stale rows.
     const { data: openPos } = await supabase.from("paper_positions").select("*").eq("user_id", this.userId).eq("status", "open");
-    this.positions = (openPos ?? []).map(p => ({
-      id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional,
+    this.positions = (openPos ?? []).map(p => ({ id: p.id, coin: p.coin, side: p.side as "long" | "short", size: +p.size, notional: +p.notional,
       leverage: +p.leverage, entry_price: +p.entry_price, stop_loss: +p.stop_loss,
       take_profit: p.take_profit != null ? +p.take_profit : Number.POSITIVE_INFINITY * (p.side === "long" ? 1 : -1),
-      trail_high: p.trail_high != null ? +p.trail_high : null,
-      confidence: +p.confidence,
-      safety_line: p.safety_line != null ? +p.safety_line : null,
-    }));
+      trail_high: p.trail_high != null ? +p.trail_high : null, confidence: +p.confidence,
+      safety_line: p.safety_line != null ? +p.safety_line : null }));
     this.log("info", `Synced ${this.positions.length} open paper position(s)`);
   }
 
   stop() {
-    this.running = false;
-    this.unsubMids?.(); this.unsubMids = null;
-    if (this.tickTimer) clearInterval(this.tickTimer);
-    if (this.evalTimer) clearInterval(this.evalTimer);
-    if (this.shockTimer) clearInterval(this.shockTimer);
+    this.running = false; this.unsubMids?.(); this.unsubMids = null;
+    if (this.tickTimer) clearInterval(this.tickTimer); if (this.evalTimer) clearInterval(this.evalTimer); if (this.shockTimer) clearInterval(this.shockTimer);
     this.log("info", "Engine stopped");
   }
 
   updateSettings(s: Settings) {
     const wasLive = this.settings.mode === "live";
-    // A balance change that isn't a trade (paper reset, manual edit, deposit)
-    // must move the baseline too, otherwise the breaker reads the jump as a
-    // huge daily loss. Only large discontinuities qualify — small deltas are
-    // realised P&L written by the server agent and must stay in the day's P&L.
-    const prevEq = this.settings.paper_equity;
-    const delta = s.paper_equity - prevEq;
-    if (prevEq > 0 && Math.abs(delta) > prevEq * 0.2) {
-      this.startEquity += delta;
-      this.dayStartEquity += delta;
-    }
-
+    const prevEq = this.settings.paper_equity; const delta = s.paper_equity - prevEq;
+    if (prevEq > 0 && Math.abs(delta) > prevEq * 0.2) { this.startEquity += delta; this.dayStartEquity += delta; }
     this.settings = s;
-    if (s.mode === "live" && this.running) {
-
-      this.log("warn", "Switched to live mode — browser engine stopped; the server agent owns live trading.");
-      this.stop();
-    } else if (wasLive && s.mode === "paper" && !this.running) {
-      this.start().catch(err => this.log("error", err.message));
-    }
+    if (s.mode === "live" && this.running) { this.log("warn", "Switched to live mode — browser engine stopped; the server agent owns live trading."); this.stop(); }
+    else if (wasLive && s.mode === "paper" && !this.running) this.start().catch(err => this.log("error", err.message));
   }
 
   getPositions() { return this.positions; }
   getMids() { return this.mids; }
   getMeta() { return this.meta; }
-
-  private mid(coin: string): number | null {
-    const v = this.mids[coin]; return v ? +v : null;
-  }
-
-  private unrealizedPnl(p: OpenPosition, mark: number): number {
-    return p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
-  }
-
-  private currentEquity(): number {
-    let u = 0;
-    for (const p of this.positions) {
-      const m = this.mid(p.coin); if (m == null) continue;
-      u += this.unrealizedPnl(p, m);
-    }
-    return this.startEquity + u;
-  }
+  private mid(coin: string): number | null { const v = this.mids[coin]; return v ? +v : null; }
+  private unrealizedPnl(p: OpenPosition, mark: number): number { return p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size; }
+  private currentEquity(): number { let u = 0; for (const p of this.positions) { const m = this.mid(p.coin); if (m != null) u += this.unrealizedPnl(p, m); } return this.startEquity + u; }
 
   private async pollBtcShock() {
     if (this.settings.btc_shock_enabled === false) { this.shockDir = null; return; }
     const win = Math.max(1, Math.round(Number(this.settings.btc_shock_window_min ?? 15)));
-    const move = await fetchBtcMovePct(win);
-    const dir = shockDirection(move, Number(this.settings.btc_shock_pct ?? 2.0));
-    if (dir && dir !== this.shockDir) {
-      this.log("warn", `BTC shock ${dir} ${move!.toFixed(2)}% over ${win}m — closing ${dir === "down" ? "longs" : "shorts"}.`);
-    }
+    const move = await fetchBtcMovePct(win); const dir = shockDirection(move, Number(this.settings.btc_shock_pct ?? 2.0));
+    if (dir && dir !== this.shockDir) this.log("warn", `BTC shock ${dir} ${move!.toFixed(2)}% over ${win}m — closing ${dir === "down" ? "longs" : "shorts"}.`);
     this.shockDir = dir;
   }
 
   private tick() {
-    // Never manage positions or write snapshots while the account is live.
     if (this.isLive()) return;
-    // Reset day start at UTC midnight
     const dayStart = new Date().setUTCHours(0, 0, 0, 0);
-    if (dayStart !== this.dayStartTs) {
-      this.dayStartTs = dayStart;
-      this.dayStartEquity = this.currentEquity();
-    }
-
-    // Daily circuit breaker
-    const eq = this.currentEquity();
-    const dayPnl = eq - this.dayStartEquity;
-    const dayPnlPct = (dayPnl / this.dayStartEquity) * 100;
+    if (dayStart !== this.dayStartTs) { this.dayStartTs = dayStart; this.dayStartEquity = this.currentEquity(); }
+    const eq = this.currentEquity(); const dayPnl = eq - this.dayStartEquity; const dayPnlPct = (dayPnl / this.dayStartEquity) * 100;
     if (dayPnlPct <= -this.settings.daily_loss_pct && this.settings.bot_enabled) {
       this.log("warn", `Daily loss limit hit (${dayPnlPct.toFixed(2)}%). Flattening & disabling bot.`);
       this.flattenAll("daily_loss_limit").catch(() => {});
       supabase.from("bot_settings").update({ bot_enabled: false }).eq("user_id", this.userId).then(() => {});
     }
 
-    // Manage each open position
     for (const p of [...this.positions]) {
       const m = this.mid(p.coin); if (m == null) continue;
-      // A sudden BTC move against the position closes it instantly, ahead of SL/TP.
       if (shockHitsSide(this.shockDir, p.side)) { this.closePosition(p, m, "btc_shock").catch(() => {}); continue; }
       if (this.isTrendlineBreak()) {
-        // Trendline Break stops follow the safety line (trailed in its own cycle).
-        const label = (p.side === "long" ? p.stop_loss > p.entry_price : p.stop_loss < p.entry_price) ? "safety_trail" : "safety_stop";
-        if (p.side === "long" ? m <= p.stop_loss : m >= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
+        const previousPeak = p.trail_high ?? p.entry_price;
+        const best = p.side === "long" ? Math.max(previousPeak, m) : Math.min(previousPeak, m);
+        const next = dynamicTrailStop(p.side, p.entry_price, best, p.stop_loss, this.trailActivatePct(), this.trailDistPct());
+        if (best !== p.trail_high || next !== p.stop_loss) { p.trail_high = best; p.stop_loss = next; this.persistPositionUpdate(p); }
+        if (p.side === "long" ? m <= p.stop_loss : m >= p.stop_loss) {
+          const protectedProfit = p.side === "long" ? p.stop_loss >= p.entry_price : p.stop_loss <= p.entry_price;
+          this.closePosition(p, m, protectedProfit ? "dynamic_trailing_stop" : "stop_loss").catch(() => {});
+        }
         continue;
       }
-      // trailing
+
       if (this.settings.trailing_enabled) {
         if (p.side === "long") {
           const th = p.trail_high == null ? p.entry_price : Math.max(p.trail_high, m);
-          if (th !== p.trail_high) {
-            p.trail_high = th;
-            const r = p.entry_price - p.stop_loss;
-            if (m > p.entry_price + r) {
-              const newSl = Math.max(p.stop_loss, th - r);
-              if (newSl > p.stop_loss) { p.stop_loss = newSl; this.persistPositionUpdate(p); }
-            }
-          }
+          if (th !== p.trail_high) { p.trail_high = th; const r = p.entry_price - p.stop_loss; if (m > p.entry_price + r) { const newSl = Math.max(p.stop_loss, th - r); if (newSl > p.stop_loss) { p.stop_loss = newSl; this.persistPositionUpdate(p); } } }
         } else {
           const th = p.trail_high == null ? p.entry_price : Math.min(p.trail_high, m);
-          if (th !== p.trail_high) {
-            p.trail_high = th;
-            const r = p.stop_loss - p.entry_price;
-            if (m < p.entry_price - r) {
-              const newSl = Math.min(p.stop_loss, th + r);
-              if (newSl < p.stop_loss) { p.stop_loss = newSl; this.persistPositionUpdate(p); }
-            }
-          }
+          if (th !== p.trail_high) { p.trail_high = th; const r = p.stop_loss - p.entry_price; if (m < p.entry_price - r) { const newSl = Math.min(p.stop_loss, th + r); if (newSl < p.stop_loss) { p.stop_loss = newSl; this.persistPositionUpdate(p); } } }
         }
       }
-      // SL / TP — a stop trailed past entry is a trailing-stop exit, not a loss
-      if (p.side === "long") {
-        const label = p.stop_loss > p.entry_price ? "trailing_stop" : "stop_loss";
-        if (m <= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
-        else if (m >= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
-      } else {
-        const label = p.stop_loss < p.entry_price ? "trailing_stop" : "stop_loss";
-        if (m >= p.stop_loss) this.closePosition(p, m, label).catch(() => {});
-        else if (m <= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {});
-      }
+      if (p.side === "long") { const label = p.stop_loss > p.entry_price ? "trailing_stop" : "stop_loss"; if (m <= p.stop_loss) this.closePosition(p, m, label).catch(() => {}); else if (m >= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {}); }
+      else { const label = p.stop_loss < p.entry_price ? "trailing_stop" : "stop_loss"; if (m >= p.stop_loss) this.closePosition(p, m, label).catch(() => {}); else if (m <= p.take_profit) this.closePosition(p, m, "take_profit").catch(() => {}); }
     }
 
-    // Equity snapshot every 60s
     const now = Date.now();
-    if (now - this.snapshotTs > 60_000) {
-      this.snapshotTs = now;
-      const unreal = eq - this.startEquity;
-      supabase.from("equity_snapshots").insert({
-        user_id: this.userId, equity: eq, realized_pnl: 0, unrealized_pnl: unreal,
-        mode: "paper",
-      }).then(() => {});
-    }
+    if (now - this.snapshotTs > 60_000) { this.snapshotTs = now; const unreal = eq - this.startEquity; supabase.from("equity_snapshots").insert({ user_id: this.userId, equity: eq, realized_pnl: 0, unrealized_pnl: unreal, mode: "paper" }).then(() => {}); }
   }
 
   private async evalCycle() {
     if (!this.settings.bot_enabled || this.settings.kill_switch_engaged) return;
-    if (this.settings.mode !== "paper") return; // safety
-    // The always-on server agent owns entries when it is enabled; running both
-    // races and can open two positions in the same coin.
-    if (this.settings.server_agent_enabled) return;
-    // Cycles can outlive the 15s timer (network waits) — never overlap them.
-    if (this.evaluating) return;
-    this.evaluating = true;
-    try {
-      if (this.isTrendlineBreak()) await this.runTrendlineBreakCycle();
-      else await this.runEvalCycle();
-    } finally {
-      this.evaluating = false;
-    }
+    if (this.settings.mode !== "paper" || this.settings.server_agent_enabled || this.evaluating) return;
+    this.evaluating = true; try { if (this.isTrendlineBreak()) await this.runTrendlineBreakCycle(); else await this.runEvalCycle(); } finally { this.evaluating = false; }
   }
 
   private async runEvalCycle() {
-    // scan up to 8 coins per cycle prioritising liquid ones without positions
-    const held = new Set(this.positions.map(p => p.coin));
-    const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
-
-    const scored = this.meta
-      .map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
-      .filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED_COINS.has(x.meta.name))
-      .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
-
+    const held = new Set(this.positions.map(p => p.coin)); const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
+    const scored = this.meta.map((m, i) => ({ meta: m, ctx: this.ctxs[i] })).filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
     for (const { meta } of scored) {
-      if (this.positions.length >= this.settings.max_positions) break;
-      if (held.has(meta.name)) continue;
-      const now = Date.now();
-      const cached = this.cache.get(meta.name);
-      if (cached && now < cached.nextEval) continue;
-      // fetch/refresh candles (throttled)
-      let bars: Bar[] | undefined = cached?.bars;
-      let daily: Bar[] | undefined = cached?.daily;
-      let fourHour: Bar[] | undefined = cached?.fourHour;
+      if (this.positions.length >= this.settings.max_positions) break; if (held.has(meta.name)) continue;
+      const now = Date.now(); const cached = this.cache.get(meta.name); if (cached && now < cached.nextEval) continue;
+      let bars = cached?.bars, daily = cached?.daily, fourHour = cached?.fourHour;
       if (!bars || !daily || !fourHour || now - (cached?.lastFetch ?? 0) > 5 * 60 * 1000) {
-        try {
-          const end = now;
-          // Gen-2 needs real Daily and 4H history; aggregating a 1H window cannot
-          // produce the 80 daily bars the trend-line evaluator requires.
-          const [cs, cd, c4] = await Promise.all([
-            fetchCandles(meta.name, CANDLE_INTERVAL, end - BARS_NEEDED * CANDLE_MS, end),
-            fetchCandles(meta.name, "1d", end - HTF_BARS * 24 * 60 * 60 * 1000, end),
-            fetchCandles(meta.name, "4h", end - HTF_BARS * 4 * 60 * 60 * 1000, end),
-          ]);
-          bars = candlesToBars(cs); daily = candlesToBars(cd); fourHour = candlesToBars(c4);
-          this.cache.set(meta.name, { bars, daily, fourHour, lastFetch: now, nextEval: now + 30_000 });
-        } catch { continue; }
+        try { const end = now; const [cs, cd, c4] = await Promise.all([fetchCandles(meta.name, CANDLE_INTERVAL, end - BARS_NEEDED * CANDLE_MS, end), fetchCandles(meta.name, "1d", end - HTF_BARS * 24 * 60 * 60 * 1000, end), fetchCandles(meta.name, "4h", end - HTF_BARS * 4 * 60 * 60 * 1000, end)]); bars = candlesToBars(cs); daily = candlesToBars(cd); fourHour = candlesToBars(c4); this.cache.set(meta.name, { bars, daily, fourHour, lastFetch: now, nextEval: now + 30_000 }); } catch { continue; }
       }
-      if (!bars || bars.length < BARS_NEEDED) continue;
-      if (daily.length < 80 || fourHour.length < 80) continue;
-      const sig = evaluateMultiTimeframeSignal(meta.name, daily, fourHour, bars);
-      this.cache.get(meta.name)!.nextEval = now + 60_000;
-      if (!sig.side) continue;
-      if (shockHitsSide(this.shockDir, sig.side)) continue;
-      const threshold = Math.max(this.settings.min_confidence, MODE_MIN_CONFIDENCE[this.settings.strategy_mode]);
-      if (sig.confidence < threshold) continue;
-      if (this.positions.some(p => p.coin === meta.name)) continue; // opened meanwhile
-      held.add(meta.name);
-      await this.tryOpen(sig, meta);
+      if (!bars || bars.length < BARS_NEEDED || !daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
+      const sig = evaluateMultiTimeframeSignal(meta.name, daily, fourHour, bars); this.cache.get(meta.name)!.nextEval = now + 60_000;
+      if (!sig.side || shockHitsSide(this.shockDir, sig.side)) continue;
+      const threshold = Math.max(this.settings.min_confidence, MODE_MIN_CONFIDENCE[this.settings.strategy_mode]); if (sig.confidence < threshold || this.positions.some(p => p.coin === meta.name)) continue;
+      held.add(meta.name); await this.tryOpen(sig, meta);
     }
   }
 
   private async tryOpen(sig: Signal, meta: AssetMeta) {
-    const side = sig.side!; // caller ensured non-null
-    // correlation guard
-    const b = bucket(sig.coin);
-    const bucketCount = this.positions.filter(p => bucket(p.coin) === b).length;
-    if (bucketCount >= 3) { this.log("info", `Skip ${sig.coin}: correlation bucket ${b} full`); return; }
-
-    const equity = this.currentEquity();
-    const notionalCap = equity * (this.settings.position_size_pct / 100) * Math.min(this.settings.max_leverage, meta.maxLeverage);
-    // check exposure
-    const currentExposure = this.positions.reduce((s, p) => s + p.notional, 0);
-    if (currentExposure + notionalCap > equity * (this.settings.max_exposure_pct / 100) * this.settings.max_leverage) {
-      this.log("info", `Skip ${sig.coin}: portfolio exposure would exceed limit`); return;
-    }
-
-    const leverage = Math.min(this.settings.max_leverage, meta.maxLeverage);
-    const size = notionalCap / sig.price;
-    const stopDist = this.settings.sl_type === "atr"
-      ? sig.atrValue * this.settings.sl_atr_mult
-      : sig.price * (this.settings.sl_fixed_pct / 100);
-    const sl = side === "long" ? sig.price - stopDist : sig.price + stopDist;
-    const tp = side === "long" ? sig.price + stopDist * this.settings.tp_rr : sig.price - stopDist * this.settings.tp_rr;
-
+    const side = sig.side!; const b = bucket(sig.coin); if (this.positions.filter(p => bucket(p.coin) === b).length >= 3) return;
+    const equity = this.currentEquity(); const notionalCap = equity * (this.settings.position_size_pct / 100) * Math.min(this.settings.max_leverage, meta.maxLeverage);
+    const currentExposure = this.positions.reduce((s, p) => s + p.notional, 0); if (currentExposure + notionalCap > equity * (this.settings.max_exposure_pct / 100) * this.settings.max_leverage) return;
+    const leverage = Math.min(this.settings.max_leverage, meta.maxLeverage); const size = notionalCap / sig.price;
+    const stopDist = this.settings.sl_type === "atr" ? sig.atrValue * this.settings.sl_atr_mult : sig.price * (this.settings.sl_fixed_pct / 100);
+    const sl = side === "long" ? sig.price - stopDist : sig.price + stopDist; const tp = side === "long" ? sig.price + stopDist * this.settings.tp_rr : sig.price - stopDist * this.settings.tp_rr;
     const reason = `${side.toUpperCase()} ${sig.coin} — ${sig.reasons.join(" + ")}`;
-    const { data, error } = await supabase.from("paper_positions").insert({
-      user_id: this.userId, coin: sig.coin, side, size, notional: size * sig.price,
-      leverage, entry_price: sig.price, stop_loss: sl, take_profit: tp,
-      confidence: sig.confidence, reason, indicators: sig.indicators,
-    }).select().single();
-    if (error || !data) { this.log("error", `Failed to open ${sig.coin}: ${error?.message}`); return; }
-    this.positions.push({
-      id: data.id, coin: sig.coin, side, size, notional: size * sig.price,
-      leverage, entry_price: sig.price, stop_loss: sl, take_profit: tp,
-      trail_high: null, confidence: sig.confidence,
-    });
+    const { data, error } = await supabase.from("paper_positions").insert({ user_id: this.userId, coin: sig.coin, side, size, notional: size * sig.price, leverage, entry_price: sig.price, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators }).select().single();
+    if (error || !data) return;
+    this.positions.push({ id: data.id, coin: sig.coin, side, size, notional: size * sig.price, leverage, entry_price: sig.price, stop_loss: sl, take_profit: tp, trail_high: null, confidence: sig.confidence });
     this.log("trade", `OPEN ${reason} @ ${sig.price.toFixed(6)} · SL ${sl.toFixed(6)} · TP ${tp.toFixed(6)} · conf ${sig.confidence}`);
   }
 
   private async closePosition(p: OpenPosition, price: number, exitReason: string) {
-    // A live row mirrors a real Hyperliquid position. Marking it "closed" here would
-    // leave the exchange position open while the app thinks it's flat — refuse.
-    if (this.isLive()) {
-      this.log("error", `Refused to close ${p.coin} from the browser: live positions must be closed by the server agent via a real order.`);
-      return;
-    }
-    const pnl = this.unrealizedPnl(p, price);
-    this.positions = this.positions.filter(x => x.id !== p.id);
-    this.startEquity += pnl; // realise
-    await supabase.from("paper_positions").update({
-      status: "closed", exit_price: price, exit_reason: exitReason, pnl, closed_at: new Date().toISOString(),
-    }).eq("id", p.id);
+    if (this.isLive()) { this.log("error", `Refused to close ${p.coin} from the browser: live positions must be closed by the server agent via a real order.`); return; }
+    const pnl = this.unrealizedPnl(p, price); this.positions = this.positions.filter(x => x.id !== p.id); this.startEquity += pnl;
+    await supabase.from("paper_positions").update({ status: "closed", exit_price: price, exit_reason: exitReason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id);
     this.log("trade", `CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${price.toFixed(6)} · PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · ${exitReason}`);
   }
 
   async flattenAll(reason: string) {
-    if (this.isLive()) {
-      this.log("error", "Refused to flatten from the browser in live mode — engage the kill switch so the server agent closes positions with real orders.");
-      return;
-    }
-    for (const p of [...this.positions]) {
-      const m = this.mid(p.coin) ?? p.entry_price;
-      await this.closePosition(p, m, reason);
-    }
+    if (this.isLive()) { this.log("error", "Refused to flatten from the browser in live mode — engage the kill switch so the server agent closes positions with real orders."); return; }
+    for (const p of [...this.positions]) { const m = this.mid(p.coin) ?? p.entry_price; await this.closePosition(p, m, reason); }
   }
 
-  private persistPositionUpdate(p: OpenPosition) {
-    supabase.from("paper_positions").update({
-      stop_loss: p.stop_loss, trail_high: p.trail_high,
-    }).eq("id", p.id).then(() => {});
-  }
+  private persistPositionUpdate(p: OpenPosition) { supabase.from("paper_positions").update({ stop_loss: p.stop_loss, trail_high: p.trail_high }).eq("id", p.id).then(() => {}); }
 }
