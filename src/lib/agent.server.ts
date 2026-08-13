@@ -4,7 +4,7 @@ import { evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 import {
   TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, buildCascade, evaluateTrendlineBreak,
-  safetyLineFor, safetyStop, riskSize, trailToSafety, safetyBreached, dynamicTrailStop,
+  safetyLineFor, riskSize, trailToSafety, dynamicTrailStop,
   type TbTimeframe, type TbSeries,
 } from "./strategies/trendlineBreak";
 
@@ -120,29 +120,25 @@ export async function runTradingCycle(): Promise<CycleReport> {
         positionSizePct: +(s.tb_position_size_pct ?? s.position_size_pct ?? 5),
       };
 
-      // Legacy Trendline Break rows used the nearby safety line as the initial
-      // stop. Normalize them to the user's configured hard SL before any safety
-      // line is allowed to tighten the trade. The native-stop reconciler below
-      // also replaces stale exchange SLs with this hard stop.
-      if (isTb) {
-        for (const p of positions) {
-          const hardStop = p.side === "long"
-            ? p.entry_price * (1 - hardSlPct / 100)
-            : p.entry_price * (1 + hardSlPct / 100);
-          const best = p.trail_high ?? p.entry_price;
-          const favorablePct = p.side === "long"
-            ? ((best - p.entry_price) / p.entry_price) * 100
-            : ((p.entry_price - best) / p.entry_price) * 100;
-          const profitProtectionActive = favorablePct >= trailActivatePct;
-          if (!profitProtectionActive) {
-            const stopDiff = Math.abs(p.stop_loss - hardStop) / p.entry_price * 100;
-            const initialDiff = Math.abs((p.initial_stop ?? p.stop_loss) - hardStop) / p.entry_price * 100;
-            if (stopDiff > 0.0001 || initialDiff > 0.0001) {
-              p.stop_loss = hardStop;
-              p.initial_stop = hardStop;
-              await supabaseAdmin.from("paper_positions").update({ stop_loss: hardStop, initial_stop: hardStop }).eq("id", p.id).eq("status", "open");
-              await log(s.user_id, "info", `Normalized ${p.coin} Trendline Break hard SL to ${hardSlPct.toFixed(2)}% @ ${hardStop.toFixed(6)}.`);
-            }
+      // Always derive the hard stop from entry + configured percentage. Do not
+      // trust a stale DB stop to enforce the user's loss cap.
+      for (const p of positions) {
+        const hardStop = p.side === "long"
+          ? p.entry_price * (1 - hardSlPct / 100)
+          : p.entry_price * (1 + hardSlPct / 100);
+        const best = p.trail_high ?? p.entry_price;
+        const favorablePct = p.side === "long"
+          ? ((best - p.entry_price) / p.entry_price) * 100
+          : ((p.entry_price - best) / p.entry_price) * 100;
+        const profitProtectionActive = favorablePct >= trailActivatePct;
+        if (!profitProtectionActive) {
+          const stopDiff = Math.abs(p.stop_loss - hardStop) / p.entry_price * 100;
+          const initialDiff = Math.abs((p.initial_stop ?? p.stop_loss) - hardStop) / p.entry_price * 100;
+          if (stopDiff > 0.0001 || initialDiff > 0.0001) {
+            p.stop_loss = hardStop;
+            p.initial_stop = hardStop;
+            await supabaseAdmin.from("paper_positions").update({ stop_loss: hardStop, initial_stop: hardStop }).eq("id", p.id).eq("status", "open");
+            await log(s.user_id, "info", `Normalized ${p.coin} hard SL to ${hardSlPct.toFixed(2)}% @ ${hardStop.toFixed(6)}.`);
           }
         }
       }
@@ -160,15 +156,24 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const asset = (await assets()).get(p.coin);
           if (!asset) { report.errors.push(`${p.coin}: unknown asset on close`); return; }
           try {
-            const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: p.size, markPrice: mark, reduceOnly: true, slippagePct: 1 });
-            if (fill.size <= 0) { await log(s.user_id, "warn", `Close for ${p.coin} did not fill; local position remains OPEN.`); return; }
-            const after = await fetchLiveAccount(creds.accountAddress);
-            const remaining = after.positions.find((x) => x.coin === p.coin);
-            if (remaining && remaining.size > Math.max(10 ** -(asset.szDecimals + 1), p.size * 0.0001)) {
-              const remainingSize = remaining.size;
-              await supabaseAdmin.from("paper_positions").update({ size: remainingSize, notional: remainingSize * remaining.entryPrice }).eq("id", p.id).eq("status", "open");
-              p.size = remainingSize; p.notional = remainingSize * remaining.entryPrice;
-              await log(s.user_id, "warn", `Partial live close ${p.coin}: ${remainingSize} remains on Hyperliquid.`);
+            let remainingTarget = p.size;
+            let tries = 0;
+            let lastMark = mark;
+            while (remainingTarget > Math.max(10 ** -(asset.szDecimals + 1), p.size * 0.0001) && tries < 3) {
+              const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: remainingTarget, markPrice: lastMark, reduceOnly: true, slippagePct: 2 });
+              tries++;
+              if (fill.size <= 0) break;
+              const after = await fetchLiveAccount(creds.accountAddress);
+              const remaining = after.positions.find((x) => x.coin === p.coin && x.side === p.side);
+              if (!remaining) { remainingTarget = 0; break; }
+              remainingTarget = remaining.size;
+              lastMark = mids[p.coin] ? +mids[p.coin] : remaining.entryPrice;
+            }
+            if (remainingTarget > Math.max(10 ** -(asset.szDecimals + 1), p.size * 0.0001)) {
+              await supabaseAdmin.from("paper_positions").update({ size: remainingTarget, notional: remainingTarget * lastMark }).eq("id", p.id).eq("status", "open");
+              p.size = remainingTarget; p.notional = remainingTarget * lastMark;
+              await log(s.user_id, "error", `URGENT: ${p.coin} stop triggered but ${remainingTarget} remains after 3 reduce-only close attempts.`);
+              report.errors.push(`${p.coin}: stop triggered but ${remainingTarget} remains after retry`);
               return;
             }
           } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Failed to close ${p.coin}: ${msg}`); return; }
@@ -181,25 +186,32 @@ export async function runTradingCycle(): Promise<CycleReport> {
         await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · ${exitReason} · PnL ${pnl.toFixed(2)}`, { strategy: s.strategy_key ?? "default" });
       };
 
-      // The 1-minute server cycle remains a second line of defense, but every
-      // live position should also have a real Hyperliquid Stop Market resting at
-      // its original protective stop. This removes the polling gap seen when a
-      // price crosses a 1% stop between cron ticks.
-      if (isLive && canTrade && creds) {
-        for (const p of positions) {
-          const trigger = p.initial_stop ?? p.stop_loss;
+      // Hard-stop enforcement runs BEFORE any other strategy logic. If price has
+      // crossed the configured loss cap, close immediately this cycle. Otherwise
+      // maintain a real exchange-native Stop Market as the primary protection.
+      if (canTrade) {
+        for (const p of [...positions]) {
+          const hardStop = p.side === "long"
+            ? p.entry_price * (1 - hardSlPct / 100)
+            : p.entry_price * (1 + hardSlPct / 100);
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
-          const alreadyBreached = p.side === "long" ? mark <= trigger : mark >= trigger;
-          if (alreadyBreached) continue; // software path below will close immediately this cycle
-          const asset = (await assets()).get(p.coin);
-          if (!asset) { await log(s.user_id, "error", `${p.coin}: cannot install native SL; asset metadata missing.`); continue; }
-          try {
-            const native = await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: trigger });
-            if (!native.alreadyPresent) await log(s.user_id, "info", `Installed native Hyperliquid SL for ${p.coin} @ ${trigger.toFixed(6)}.`, { oid: native.oid, trigger });
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            report.errors.push(`native SL ${p.coin}: ${msg}`);
-            await log(s.user_id, "error", `Could not install native Hyperliquid SL for ${p.coin}: ${msg}`);
+          const breached = p.side === "long" ? mark <= hardStop : mark >= hardStop;
+          if (breached) {
+            await log(s.user_id, "warn", `${p.coin} breached hard ${hardSlPct.toFixed(2)}% stop (${hardStop.toFixed(6)}); forcing close now.`, { mark, hardStop, side: p.side });
+            await closeTbPosition(p, mark, "hard_stop_loss");
+            continue;
+          }
+          if (isLive && creds) {
+            const asset = (await assets()).get(p.coin);
+            if (!asset) { await log(s.user_id, "error", `${p.coin}: cannot install native SL; asset metadata missing.`); continue; }
+            try {
+              const native = await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
+              if (!native.alreadyPresent) await log(s.user_id, "info", `Installed/updated native Hyperliquid SL for ${p.coin} @ ${p.stop_loss.toFixed(6)}.`, { oid: native.oid, trigger: p.stop_loss });
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              report.errors.push(`native SL ${p.coin}: ${msg}`);
+              await log(s.user_id, "error", `Could not install native Hyperliquid SL for ${p.coin}: ${msg}`);
+            }
           }
         }
       }
@@ -225,13 +237,12 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (best !== p.trail_high || dynamicStop !== p.stop_loss) {
             p.trail_high = best; p.stop_loss = dynamicStop;
             await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
+            if (isLive && creds) {
+              const asset = (await assets()).get(p.coin);
+              if (asset) await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
+            }
           }
 
-          // Keep calculating/displaying the structural safety line, but it may
-          // tighten the stop only after the trade has first earned the configured
-          // trail activation. Even then, it is allowed only when the structural
-          // candidate is at breakeven or better — never while it would realize a
-          // small loss like the old SUI/LINK/BCH safety_stop exits.
           const series = await loadTbSeries(p.coin);
           const levels = buildCascade(series, tbCfg.timeframes, tbCfg.pivotStrength);
           const safety = safetyLineFor(levels, p.side, mark);
@@ -240,7 +251,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
             if (profitProtectionActive) {
               const structuralStop = trailToSafety(p.side, p.stop_loss, safety);
               const protectsProfit = p.side === "long" ? structuralStop >= p.entry_price : structuralStop <= p.entry_price;
-              if (protectsProfit && structuralStop !== p.stop_loss) p.stop_loss = structuralStop;
+              if (protectsProfit && structuralStop !== p.stop_loss) {
+                p.stop_loss = structuralStop;
+                if (isLive && creds) {
+                  const asset = (await assets()).get(p.coin);
+                  if (asset) await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
+                }
+              }
             }
             await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
           }
@@ -261,6 +278,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (best !== p.trail_high || dynamicStop !== p.stop_loss) {
             p.trail_high = best; p.stop_loss = dynamicStop;
             await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
+            if (isLive && creds) {
+              const asset = (await assets()).get(p.coin);
+              if (asset) await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
+            }
           }
           const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
           const hitTp = Number.isFinite(p.take_profit) && (p.side === "long" ? mark >= p.take_profit : mark <= p.take_profit);
@@ -308,9 +329,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (isTb) {
             if (tbSafety == null) continue;
             leverage = Math.max(1, Math.floor(target.meta.maxLeverage));
-            // Trendline Break now honors the same configured hard SL percentage
-            // as the rest of Kairos. The safety line is entry structure only;
-            // it cannot tighten the trade until profit protection activates.
             tbStop = sig.side === "long"
               ? quotePx * (1 - hardSlPct / 100)
               : quotePx * (1 + hardSlPct / 100);
@@ -346,16 +364,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const sl = sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
           const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
 
-          // A real-money entry is not considered safely established until the
-          // exchange itself has accepted its protective Stop Market. If that
-          // native SL cannot be installed, immediately flatten the fresh entry.
           if (isLive && creds && liveAsset) {
             try {
               await ensureNativeStopLoss(creds, liveAsset, { positionSide: sig.side, size, triggerPrice: sl });
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
               await log(s.user_id, "error", `Native SL placement failed for new ${sig.coin} position; flattening immediately: ${msg}`);
-              try { await marketOrder(creds, liveAsset, { isBuy: sig.side === "short", size, markPrice: entry, reduceOnly: true, slippagePct: 1 }); }
+              try { await marketOrder(creds, liveAsset, { isBuy: sig.side === "short", size, markPrice: entry, reduceOnly: true, slippagePct: 2 }); }
               catch (flattenErr) { report.errors.push(`UNPROTECTED ${sig.coin}: ${flattenErr instanceof Error ? flattenErr.message : String(flattenErr)}`); }
               report.errors.push(`native SL ${sig.coin}: ${msg}`);
               continue;
@@ -363,9 +378,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
           }
 
           const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: sl, risk_pct: tbCfg.riskPct } : { initial_stop: sl };
-          const { error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra });
-          if (insErr) { report.errors.push(`record ${sig.coin}: ${insErr.message}`); continue; }
-          positions.push({ id: crypto.randomUUID(), coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: tbSafety ?? null });
+          const { data: inserted, error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra }).select("id").single();
+          if (insErr || !inserted) { report.errors.push(`record ${sig.coin}: ${insErr?.message ?? "insert returned no row"}`); continue; }
+          positions.push({ id: inserted.id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: tbSafety ?? null });
           held.add(sig.coin); report.opened++;
           await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isTb ? tbCfg.riskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, hardSlPct, leverage, nativeStop: isLive ? sl : null });
         }
