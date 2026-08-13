@@ -49,7 +49,7 @@ export function TrendlineBreakPanel() {
     <div className="panel space-y-5 p-4 sm:p-5">
       <div>
         <div className="text-sm font-semibold">Trendline Price Action</div>
-        <p className="mt-1 text-xs text-muted-foreground">Weekly → Daily → 4H → 1H → 30m → 15m. Pure price action. Action-line break enters; opposing safety line trails the stop.</p>
+        <p className="mt-1 text-xs text-muted-foreground">Daily → 4H → 1H hybrid. Trendline break confirmed by EMA20/50/200 alignment, an ATR14 volatility gate and 2 of 3 momentum checks (RSI14, MACD histogram, volume). The opposing safety line is the stop and trails from entry; no fixed take-profit.</p>
       </div>
       <div>
         <div className="mb-2 text-xs uppercase tracking-widest text-muted-foreground">Timeframe cascade</div>

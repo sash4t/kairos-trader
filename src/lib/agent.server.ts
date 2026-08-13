@@ -4,7 +4,7 @@ import { evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 import {
   TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, buildCascade, evaluateTrendlineBreak,
-  safetyLineFor, riskSize, trailToSafety, dynamicTrailStop,
+  safetyLineFor, riskSize, trailToSafety, dynamicTrailStop, safetyStop, TB_SAFETY_BUFFER_PCT, TB_MIN_STOP_PCT, TB_DEFAULTS,
   type TbTimeframe, type TbSeries,
 } from "./strategies/trendlineBreak";
 
@@ -12,7 +12,7 @@ const HL_INFO = "https://api.hyperliquid.xyz/info";
 const BARS = 230;
 const HTF_BARS = 240;
 const SCAN_PER_CYCLE = 35;
-const MIN_24H_VOLUME = 100_000;
+const MIN_24H_VOLUME = 5_000_000;
 
 type Level = "info" | "warn" | "error" | "trade";
 async function hl<T>(body: unknown): Promise<T> {
@@ -131,11 +131,12 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const tbCfg = {
         timeframes: parseTimeframes(s.tb_timeframes),
         pivotStrength: Math.round(+(s.tb_pivot_strength ?? 3)),
-        riskPct: +(s.tb_risk_pct ?? 1),
+        riskPct: +(s.tb_risk_pct ?? TB_DEFAULTS.riskPct),
         positionSizePct: +(s.tb_position_size_pct ?? s.position_size_pct ?? 5),
       };
 
       for (const p of positions) {
+        if (isTb) continue; // Trendline Break uses a structural safety-line stop, not the fixed hard stop
         const hardStop = p.side === "long"
           ? p.entry_price * (1 - hardSlPct / 100)
           : p.entry_price * (1 + hardSlPct / 100);
@@ -271,10 +272,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           const previousPeak = p.trail_high ?? p.entry_price;
           const best = p.side === "long" ? Math.max(previousPeak, mark) : Math.min(previousPeak, mark);
-          const favorablePct = p.side === "long"
-            ? ((best - p.entry_price) / p.entry_price) * 100
-            : ((p.entry_price - best) / p.entry_price) * 100;
-          const profitProtectionActive = favorablePct >= trailActivatePct;
           const dynamicStop = dynamicTrailStop(p.side, p.entry_price, best, p.stop_loss, trailActivatePct, trailDistPct);
           if (best !== p.trail_high || dynamicStop !== p.stop_loss) {
             p.trail_high = best; p.stop_loss = dynamicStop;
@@ -290,19 +287,18 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const safety = safetyLineFor(levels, p.side, mark);
           if (safety != null) {
             p.safety_line = safety;
-            if (profitProtectionActive) {
-              const structuralStop = trailToSafety(p.side, p.stop_loss, safety);
-              const protectsProfit = p.side === "long" ? structuralStop >= p.entry_price : structuralStop <= p.entry_price;
-              if (protectsProfit && structuralStop !== p.stop_loss) {
-                p.stop_loss = structuralStop;
-                if (isLive && creds) {
-                  const asset = (await assets()).get(p.coin);
-                  if (asset) await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
-                }
+            // Structural stop trails from the start and never loosens.
+            const structuralStop = trailToSafety(p.side, p.stop_loss, safety, TB_SAFETY_BUFFER_PCT);
+            if (structuralStop !== p.stop_loss) {
+              p.stop_loss = structuralStop;
+              if (isLive && creds) {
+                const asset = (await assets()).get(p.coin);
+                if (asset) await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
               }
             }
             await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
           }
+
 
           if (p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss) {
             const protectedProfit = p.side === "long" ? p.stop_loss >= p.entry_price : p.stop_loss <= p.entry_price;
@@ -370,10 +366,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
           let leverage: number; let size: number; let tbStop = 0;
           if (isTb) {
             if (tbSafety == null) continue;
-            leverage = Math.max(1, Math.floor(target.meta.maxLeverage));
-            tbStop = sig.side === "long"
-              ? quotePx * (1 - hardSlPct / 100)
-              : quotePx * (1 + hardSlPct / 100);
+            leverage = Math.max(1, Math.floor(Math.min(+s.max_leverage, target.meta.maxLeverage)));
+            tbStop = safetyStop(sig.side, tbSafety, TB_SAFETY_BUFFER_PCT);
+            const stopOnWrongSide = sig.side === "long" ? tbStop >= quotePx : tbStop <= quotePx;
+            const stopDistPct = Math.abs(quotePx - tbStop) / quotePx * 100;
+            if (stopOnWrongSide) { await log(s.user_id, "info", `Skipped ${sig.coin}: safety-line stop is on the wrong side of price.`); continue; }
+            if (stopDistPct < TB_MIN_STOP_PCT) { await log(s.user_id, "info", `Skipped ${sig.coin}: safety-line stop only ${stopDistPct.toFixed(3)}% away.`); continue; }
+            if (stopDistPct > hardSlPct) { await log(s.user_id, "info", `Skipped ${sig.coin}: safety-line stop ${stopDistPct.toFixed(2)}% exceeds the ${hardSlPct.toFixed(2)}% hard stop limit.`); continue; }
             const riskBasedSize = riskSize(equity, tbCfg.riskPct, quotePx, tbStop);
             const positionNotionalCap = equity * (tbCfg.positionSizePct / 100) * leverage;
             const exposureCap = equity * (+s.max_exposure_pct / 100) * leverage;
@@ -396,14 +395,16 @@ export async function runTradingCycle(): Promise<CycleReport> {
             size = Number(size.toFixed(liveAsset.szDecimals));
             if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${liveAsset.szDecimals} decimals.`); continue; }
             try {
-              leverage = isTb ? Math.max(1, Math.floor(liveAsset.maxLeverage)) : leverage;
+              leverage = isTb ? Math.max(1, Math.floor(Math.min(+s.max_leverage, liveAsset.maxLeverage))) : leverage;
               await setLeverage(creds, liveAsset, leverage);
               const fill = await marketOrder(creds, liveAsset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 });
               if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; }
               entry = fill.avgPrice || quote; size = fill.size;
             } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; }
           }
-          const sl = sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
+          const sl = isTb && tbStop > 0
+            ? tbStop
+            : sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
           const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
 
           if (isLive && creds && liveAsset) {
