@@ -106,8 +106,23 @@ export async function runTradingCycle(): Promise<CycleReport> {
       })) as PositionRow[];
       let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
       if (isLive && creds) {
-        try { liveAcct = await fetchLiveAccount(creds.accountAddress); }
-        catch (err) { canTrade = false; const msg = err instanceof Error ? err.message : String(err); notes.push(`live account read failed: ${msg}`); await log(s.user_id, "error", `Could not read Hyperliquid account — trading paused this cycle: ${msg}`); }
+        try {
+          liveAcct = await fetchLiveAccount(creds.accountAddress);
+          const liveKeys = new Set(liveAcct.positions.map((p) => `${p.coin}:${p.side}`));
+          const stale = positions.filter((p) => !liveKeys.has(`${p.coin}:${p.side}`));
+          for (const p of stale) {
+            const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+            const pnl = p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
+            await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: "exchange_already_closed", pnl, closed_at: new Date().toISOString() }).eq("id", p.id).eq("status", "open");
+            await log(s.user_id, "info", `Reconciled ${p.coin}: exchange position is already closed; removed stale local open position.`);
+          }
+          if (stale.length) positions = positions.filter((p) => liveKeys.has(`${p.coin}:${p.side}`));
+        } catch (err) {
+          canTrade = false;
+          const msg = err instanceof Error ? err.message : String(err);
+          notes.push(`live account read failed: ${msg}`);
+          await log(s.user_id, "error", `Could not read Hyperliquid account — trading paused this cycle: ${msg}`);
+        }
       }
       const equityNow = isLive && liveAcct ? liveAcct.accountValue : +s.paper_equity;
       const held = new Set(positions.map(p => p.coin));
@@ -120,8 +135,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
         positionSizePct: +(s.tb_position_size_pct ?? s.position_size_pct ?? 5),
       };
 
-      // Always derive the hard stop from entry + configured percentage. Do not
-      // trust a stale DB stop to enforce the user's loss cap.
       for (const p of positions) {
         const hardStop = p.side === "long"
           ? p.entry_price * (1 - hardSlPct / 100)
@@ -156,10 +169,22 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const asset = (await assets()).get(p.coin);
           if (!asset) { report.errors.push(`${p.coin}: unknown asset on close`); return; }
           try {
-            let remainingTarget = p.size;
+            const before = await fetchLiveAccount(creds.accountAddress);
+            const current = before.positions.find((x) => x.coin === p.coin && x.side === p.side);
+            if (!current || current.size <= 0) {
+              const pnl = p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
+              await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: "exchange_already_closed", pnl, closed_at: new Date().toISOString() }).eq("id", p.id).eq("status", "open");
+              positions = positions.filter((x) => x.id !== p.id);
+              held.delete(p.coin);
+              report.closed++;
+              await log(s.user_id, "info", `${p.coin} was already closed on Hyperliquid; reconciled local record without sending another reduce-only order.`);
+              return;
+            }
+
+            let remainingTarget = current.size;
             let tries = 0;
             let lastMark = mark;
-            while (remainingTarget > Math.max(10 ** -(asset.szDecimals + 1), p.size * 0.0001) && tries < 3) {
+            while (remainingTarget > Math.max(10 ** -(asset.szDecimals + 1), current.size * 0.0001) && tries < 3) {
               const fill = await marketOrder(creds, asset, { isBuy: p.side === "short", size: remainingTarget, markPrice: lastMark, reduceOnly: true, slippagePct: 2 });
               tries++;
               if (fill.size <= 0) break;
@@ -169,14 +194,34 @@ export async function runTradingCycle(): Promise<CycleReport> {
               remainingTarget = remaining.size;
               lastMark = mids[p.coin] ? +mids[p.coin] : remaining.entryPrice;
             }
-            if (remainingTarget > Math.max(10 ** -(asset.szDecimals + 1), p.size * 0.0001)) {
+            if (remainingTarget > Math.max(10 ** -(asset.szDecimals + 1), current.size * 0.0001)) {
               await supabaseAdmin.from("paper_positions").update({ size: remainingTarget, notional: remainingTarget * lastMark }).eq("id", p.id).eq("status", "open");
               p.size = remainingTarget; p.notional = remainingTarget * lastMark;
               await log(s.user_id, "error", `URGENT: ${p.coin} stop triggered but ${remainingTarget} remains after 3 reduce-only close attempts.`);
               report.errors.push(`${p.coin}: stop triggered but ${remainingTarget} remains after retry`);
               return;
             }
-          } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`close ${p.coin}: ${msg}`); await log(s.user_id, "error", `Failed to close ${p.coin}: ${msg}`); return; }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (/reduce only order would increase position/i.test(msg)) {
+              try {
+                const after = await fetchLiveAccount(creds.accountAddress);
+                const stillOpen = after.positions.find((x) => x.coin === p.coin && x.side === p.side);
+                if (!stillOpen || stillOpen.size <= 0) {
+                  const pnl = p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
+                  await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: "exchange_already_closed", pnl, closed_at: new Date().toISOString() }).eq("id", p.id).eq("status", "open");
+                  positions = positions.filter((x) => x.id !== p.id);
+                  held.delete(p.coin);
+                  report.closed++;
+                  await log(s.user_id, "info", `${p.coin} close skipped because Hyperliquid reports no matching live position; reconciled local record.`);
+                  return;
+                }
+              } catch {}
+            }
+            report.errors.push(`close ${p.coin}: ${msg}`);
+            await log(s.user_id, "error", `Failed to close ${p.coin}: ${msg}`);
+            return;
+          }
         }
         const pnl = p.side === "long" ? (mark - p.entry_price) * p.size : (p.entry_price - mark) * p.size;
         await supabaseAdmin.from("paper_positions").update({ status: "closed", exit_price: mark, exit_reason: exitReason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id).eq("status", "open");
@@ -186,9 +231,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
         await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${mark.toFixed(6)} · ${exitReason} · PnL ${pnl.toFixed(2)}`, { strategy: s.strategy_key ?? "default" });
       };
 
-      // Hard-stop enforcement runs BEFORE any other strategy logic. If price has
-      // crossed the configured loss cap, close immediately this cycle. Otherwise
-      // maintain a real exchange-native Stop Market as the primary protection.
       if (canTrade) {
         for (const p of [...positions]) {
           const hardStop = p.side === "long"
