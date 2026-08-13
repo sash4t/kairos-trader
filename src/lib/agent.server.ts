@@ -366,10 +366,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
           let leverage: number; let size: number; let tbStop = 0;
           if (isTb) {
             if (tbSafety == null) continue;
-            leverage = Math.max(1, Math.floor(target.meta.maxLeverage));
-            tbStop = sig.side === "long"
-              ? quotePx * (1 - hardSlPct / 100)
-              : quotePx * (1 + hardSlPct / 100);
+            leverage = Math.max(1, Math.floor(Math.min(+s.max_leverage, target.meta.maxLeverage)));
+            tbStop = safetyStop(sig.side, tbSafety, TB_SAFETY_BUFFER_PCT);
+            const stopOnWrongSide = sig.side === "long" ? tbStop >= quotePx : tbStop <= quotePx;
+            const stopDistPct = Math.abs(quotePx - tbStop) / quotePx * 100;
+            if (stopOnWrongSide) { await log(s.user_id, "info", `Skipped ${sig.coin}: safety-line stop is on the wrong side of price.`); continue; }
+            if (stopDistPct < TB_MIN_STOP_PCT) { await log(s.user_id, "info", `Skipped ${sig.coin}: safety-line stop only ${stopDistPct.toFixed(3)}% away.`); continue; }
+            if (stopDistPct > hardSlPct) { await log(s.user_id, "info", `Skipped ${sig.coin}: safety-line stop ${stopDistPct.toFixed(2)}% exceeds the ${hardSlPct.toFixed(2)}% hard stop limit.`); continue; }
             const riskBasedSize = riskSize(equity, tbCfg.riskPct, quotePx, tbStop);
             const positionNotionalCap = equity * (tbCfg.positionSizePct / 100) * leverage;
             const exposureCap = equity * (+s.max_exposure_pct / 100) * leverage;
@@ -392,14 +395,16 @@ export async function runTradingCycle(): Promise<CycleReport> {
             size = Number(size.toFixed(liveAsset.szDecimals));
             if (size <= 0) { await log(s.user_id, "warn", `Skipped ${sig.coin}: order size rounds to zero at ${liveAsset.szDecimals} decimals.`); continue; }
             try {
-              leverage = isTb ? Math.max(1, Math.floor(liveAsset.maxLeverage)) : leverage;
+              leverage = isTb ? Math.max(1, Math.floor(Math.min(+s.max_leverage, liveAsset.maxLeverage))) : leverage;
               await setLeverage(creds, liveAsset, leverage);
               const fill = await marketOrder(creds, liveAsset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 });
               if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; }
               entry = fill.avgPrice || quote; size = fill.size;
             } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; }
           }
-          const sl = sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
+          const sl = isTb && tbStop > 0
+            ? tbStop
+            : sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
           const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
 
           if (isLive && creds && liveAsset) {
