@@ -10,12 +10,18 @@ export const TB_TIMEFRAMES = ["1w", "1d", "4h", "1h", "30m", "15m"] as const;
 export type TbTimeframe = (typeof TB_TIMEFRAMES)[number];
 
 export const TB_DEFAULTS = {
-  timeframes: ["1w", "1d", "4h", "1h", "30m", "15m"] as TbTimeframe[],
+  timeframes: ["1d", "4h", "1h"] as TbTimeframe[],
   pivotStrength: 3,
-  riskPct: 1,
+  riskPct: 0.5,
   positionSizePct: 5,
   refreshMin: 15,
 };
+
+/** Buffer beyond the structural safety line used for the initial stop. */
+export const TB_SAFETY_BUFFER_PCT = 0.15;
+/** Reject setups whose structural stop sits closer than this to entry. */
+export const TB_MIN_STOP_PCT = 0.2;
+
 
 export const TB_INTERVAL_MS: Record<TbTimeframe, number> = {
   "1w": 7 * 24 * 60 * 60 * 1000,
