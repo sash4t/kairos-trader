@@ -136,6 +136,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       };
 
       for (const p of positions) {
+        if (isTb) continue; // Trendline Break uses a structural safety-line stop, not the fixed hard stop
         const hardStop = p.side === "long"
           ? p.entry_price * (1 - hardSlPct / 100)
           : p.entry_price * (1 + hardSlPct / 100);
