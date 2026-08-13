@@ -23,11 +23,12 @@ export const getLiveStatus = createServerFn({ method: "POST" }).middleware([requ
 /** Close one LIVE Hyperliquid position, verify the exchange, then reconcile the local record. */
 export const closeLivePosition = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
+  .inputValidator((d: { coin: string; side: "long" | "short" }) => d)
   .handler(async ({ data, context }) => {
     const { readHlCreds, fetchLiveAccount, loadAssetIndex, marketOrder, hlInfo } = await import("./hyperliquidExchange.server");
     const creds = readHlCreds();
     if (!creds) throw new Error("Hyperliquid credentials are not configured.");
-    const { coin, side } = data as { coin: string; side: "long" | "short" };
+    const { coin, side } = data;
     if (!coin || (side !== "long" && side !== "short")) throw new Error("Invalid live position.");
 
     const account = await fetchLiveAccount(creds.accountAddress);
