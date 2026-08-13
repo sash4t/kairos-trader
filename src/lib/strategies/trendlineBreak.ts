@@ -190,13 +190,61 @@ export interface TbConfig {
   positionSizePct?: number;
 }
 
+/** Execution-timeframe momentum / volatility confirmation gate. */
+export interface TbConfirmation {
+  ok: boolean;
+  reasons: string[];
+  score: number;
+  indicators: Record<string, number>;
+  reject?: string;
+}
+
+export function confirmExecution(bars: Bar[], side: "long" | "short"): TbConfirmation {
+  const closes = bars.map((b) => b.c);
+  const price = closes.at(-1) ?? 0;
+  const e20 = last(ema(closes, 20)) ?? NaN;
+  const e50 = last(ema(closes, 50)) ?? NaN;
+  const e200 = last(ema(closes, 200)) ?? NaN;
+  const atrVal = last(atr(bars, 14)) ?? NaN;
+  const atrPct = price > 0 ? (atrVal / price) * 100 : NaN;
+  const rsiSeries = rsi(closes, 14);
+  const rsiVal = last(rsiSeries) ?? NaN;
+  const { hist } = macd(closes);
+  const h0 = hist.at(-1) ?? NaN;
+  const h1 = hist.at(-2) ?? NaN;
+  const volAvg = bars.slice(-21, -1).reduce((s, b) => s + b.v, 0) / 20;
+  const vol = bars.at(-1)?.v ?? 0;
+  const volRatio = volAvg > 0 ? vol / volAvg : 0;
+  const indicators = { ema20: e20, ema50: e50, ema200: e200, atrPct, rsi: rsiVal, macdHist: h0, volRatio };
+
+  if (bars.length < 210 || !Number.isFinite(e200) || !Number.isFinite(atrPct)) {
+    return { ok: false, reasons: [], score: 0, indicators, reject: "insufficient execution history for EMA/ATR confirmation" };
+  }
+  const trendAligned = side === "long"
+    ? e20 > e50 && e50 > e200 && price > e20
+    : e20 < e50 && e50 < e200 && price < e20;
+  if (!trendAligned) return { ok: false, reasons: [], score: 0, indicators, reject: "EMA20/50/200 trend alignment failed" };
+  if (!(atrPct >= 0.15 && atrPct <= 6)) return { ok: false, reasons: [], score: 0, indicators, reject: `ATR14 volatility ${atrPct.toFixed(2)}% outside 0.15–6% gate` };
+
+  const reasons = [`EMA20/50/200 aligned ${side === "long" ? "bullish" : "bearish"}`, `ATR14 ${atrPct.toFixed(2)}% inside volatility gate`];
+  let score = 0;
+  const rsiOk = side === "long" ? rsiVal >= 50 && rsiVal <= 74 : rsiVal >= 26 && rsiVal <= 50;
+  if (rsiOk) { score++; reasons.push(`RSI14 ${rsiVal.toFixed(1)} in momentum band`); }
+  const macdOk = Number.isFinite(h1) && (side === "long" ? h0 > 0 && h0 > h1 : h0 < 0 && h0 < h1);
+  if (macdOk) { score++; reasons.push("MACD histogram confirms and is strengthening"); }
+  const volOk = volRatio >= 1.1;
+  if (volOk) { score++; reasons.push(`Volume ${volRatio.toFixed(2)}x the prior 20-bar average`); }
+  if (score < 2) return { ok: false, reasons, score, indicators, reject: `only ${score}/3 momentum confirmations (RSI/MACD/volume)` };
+  return { ok: true, reasons, score, indicators };
+}
+
 export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbConfig): TbSignal {
   const levels = buildCascade(series, cfg.timeframes, cfg.pivotStrength);
   const exec = levels.at(-1);
   const execBars = exec ? series[exec.timeframe] : undefined;
   const price = execBars?.at(-1)?.c ?? 0;
   const base: TbSignal = { coin, side: null, confidence: 0, reasons: [], price, indicators: {}, levels };
-  if (!exec || !execBars) return { ...base, reasons: ["Waiting for weekly-to-execution trendline history"] };
+  if (!exec || !execBars) return { ...base, reasons: ["Waiting for Daily → 4H → 1H trendline history"] };
   const indicators: Record<string, number> = {
     execUpLine: exec.up.value ?? NaN,
     execDownLine: exec.down.value ?? NaN,
@@ -207,28 +255,44 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
   let actionLine: number | undefined;
   let safety: number | undefined;
   const reasons: string[] = [];
+  // A fresh close ABOVE the falling (down) resistance line is a LONG break.
+  // A fresh close BELOW the rising (up) support line is a SHORT break.
   if (exec.down.freshBreak && exec.down.value != null) {
-  side = "short";
-  actionLine = exec.down.value;
-  safety = safetyLineFor(levels, "short", price);
-} else if (exec.up.freshBreak && exec.up.value != null) {
-  side = "long";
-  actionLine = exec.up.value;
-  safety = safetyLineFor(levels, "long", price);
-} else {
+    side = "long";
+    actionLine = exec.down.value;
+    safety = safetyLineFor(levels, "long", price);
+  } else if (exec.up.freshBreak && exec.up.value != null) {
+    side = "short";
+    actionLine = exec.up.value;
+    safety = safetyLineFor(levels, "short", price);
+  } else {
     return { ...base, indicators, reasons: [`No ${exec.timeframe} action-line break`] };
   }
   if (safety == null) return { ...base, indicators, reasons: ["Break detected but no valid opposing safety line is available"] };
+
+  const htf = levels.slice(0, -1);
   let agree = 0;
-  for (const lvl of levels.slice(0, -1)) {
-    const intact = side === "long" ? !!lvl.up.line && !lvl.up.broken : !!lvl.down.line && !lvl.down.broken;
-    if (intact) { agree++; reasons.push(`${lvl.timeframe} opposing trend structure remains intact`); }
+  for (const lvl of htf) {
+    const structural = side === "long"
+      ? (!!lvl.up.line && !lvl.up.broken) || (!!lvl.down.line && lvl.down.broken)
+      : (!!lvl.down.line && !lvl.down.broken) || (!!lvl.up.line && lvl.up.broken);
+    if (structural) { agree++; reasons.push(`${lvl.timeframe} structure agrees with the ${side} break`); }
   }
+  if (htf.length > 0 && agree === 0) {
+    return { ...base, indicators, reasons: ["Higher-timeframe (Daily/4H) structure does not agree with the break"] };
+  }
+
+  const confirm = confirmExecution(execBars, side);
+  Object.assign(indicators, confirm.indicators);
+  if (!confirm.ok) return { ...base, indicators, reasons: [`${exec.timeframe} break rejected: ${confirm.reject}`] };
+  reasons.push(...confirm.reasons);
+
   const touches = side === "long" ? exec.down.line?.touches ?? 0 : exec.up.line?.touches ?? 0;
   reasons.push(`Action line captured ${touches} touch points`);
-  const confidence = Math.min(95, 60 + Math.min(touches, 5) * 5 + agree * 8);
-  return { coin, side, confidence, reasons, price, timeframe: exec.timeframe, actionLine, safetyLine: safety, indicators: { ...indicators, agree, touches }, levels };
+  const confidence = Math.min(95, 52 + Math.min(touches, 5) * 4 + agree * 8 + confirm.score * 5);
+  return { coin, side, confidence, reasons, price, timeframe: exec.timeframe, actionLine, safetyLine: safety, indicators: { ...indicators, agree, touches, confirmations: confirm.score }, levels };
 }
+
 
 export function safetyLineFor(levels: TbCascadeLevel[], side: "long" | "short", price: number): number | undefined {
   for (let i = levels.length - 1; i >= 0; i--) {
