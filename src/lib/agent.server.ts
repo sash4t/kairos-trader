@@ -4,7 +4,7 @@ import { evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 import {
   TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, buildCascade, evaluateTrendlineBreak,
-  safetyLineFor, riskSize, trailToSafety, dynamicTrailStop,
+  safetyLineFor, riskSize, trailToSafety, dynamicTrailStop, safetyStop, TB_SAFETY_BUFFER_PCT, TB_MIN_STOP_PCT, TB_DEFAULTS,
   type TbTimeframe, type TbSeries,
 } from "./strategies/trendlineBreak";
 
@@ -12,7 +12,7 @@ const HL_INFO = "https://api.hyperliquid.xyz/info";
 const BARS = 230;
 const HTF_BARS = 240;
 const SCAN_PER_CYCLE = 35;
-const MIN_24H_VOLUME = 100_000;
+const MIN_24H_VOLUME = 5_000_000;
 
 type Level = "info" | "warn" | "error" | "trade";
 async function hl<T>(body: unknown): Promise<T> {
@@ -131,7 +131,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const tbCfg = {
         timeframes: parseTimeframes(s.tb_timeframes),
         pivotStrength: Math.round(+(s.tb_pivot_strength ?? 3)),
-        riskPct: +(s.tb_risk_pct ?? 1),
+        riskPct: +(s.tb_risk_pct ?? TB_DEFAULTS.riskPct),
         positionSizePct: +(s.tb_position_size_pct ?? s.position_size_pct ?? 5),
       };
 
@@ -272,10 +272,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           const previousPeak = p.trail_high ?? p.entry_price;
           const best = p.side === "long" ? Math.max(previousPeak, mark) : Math.min(previousPeak, mark);
-          const favorablePct = p.side === "long"
-            ? ((best - p.entry_price) / p.entry_price) * 100
-            : ((p.entry_price - best) / p.entry_price) * 100;
-          const profitProtectionActive = favorablePct >= trailActivatePct;
           const dynamicStop = dynamicTrailStop(p.side, p.entry_price, best, p.stop_loss, trailActivatePct, trailDistPct);
           if (best !== p.trail_high || dynamicStop !== p.stop_loss) {
             p.trail_high = best; p.stop_loss = dynamicStop;
