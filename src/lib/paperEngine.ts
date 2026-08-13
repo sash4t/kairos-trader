@@ -4,7 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 import {
   TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, evaluateTrendlineBreak, buildCascade,
-  safetyLineFor, riskSize, trailToSafety, dynamicTrailStop,
+  safetyLineFor, riskSize, trailToSafety, dynamicTrailStop, safetyStop, TB_SAFETY_BUFFER_PCT, TB_MIN_STOP_PCT, TB_DEFAULTS,
   type TbTimeframe, type TbSeries,
 } from "./strategies/trendlineBreak";
 
@@ -117,8 +117,8 @@ export class PaperEngine {
     return {
       timeframes: parseTimeframes(this.settings.tb_timeframes),
       pivotStrength: Math.round(Number(this.settings.tb_pivot_strength ?? 3)),
-      riskPct: Number(this.settings.tb_risk_pct ?? 1),
-      refreshMs: Math.max(1, Number(this.settings.tb_refresh_min ?? 60)) * 60_000,
+      riskPct: Number(this.settings.tb_risk_pct ?? TB_DEFAULTS.riskPct),
+      refreshMs: Math.max(1, Number(this.settings.tb_refresh_min ?? TB_DEFAULTS.refreshMin)) * 60_000,
     };
   }
 
@@ -149,22 +149,15 @@ export class PaperEngine {
       const safety = safetyLineFor(levels, p.side, mark);
       if (safety == null) continue;
       p.safety_line = safety;
-      const best = p.trail_high ?? p.entry_price;
-      const favorablePct = p.side === "long"
-        ? ((best - p.entry_price) / p.entry_price) * 100
-        : ((p.entry_price - best) / p.entry_price) * 100;
-      if (favorablePct >= this.trailActivatePct()) {
-        const structuralStop = trailToSafety(p.side, p.stop_loss, safety);
-        const protectsProfit = p.side === "long" ? structuralStop >= p.entry_price : structuralStop <= p.entry_price;
-        if (protectsProfit) p.stop_loss = structuralStop;
-      }
+      // Structural stop trails from the start and never loosens.
+      p.stop_loss = trailToSafety(p.side, p.stop_loss, safety, TB_SAFETY_BUFFER_PCT);
       supabase.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety, trail_high: p.trail_high }).eq("id", p.id).then(() => {});
     }
 
     const held = new Set(this.positions.map(p => p.coin));
     const EXCLUDED = new Set(["BTC", "ETH"]);
     const scored = this.meta.map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
-      .filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED.has(x.meta.name))
+      .filter(x => x.ctx && +x.ctx.dayNtlVlm > 5_000_000 && !EXCLUDED.has(x.meta.name))
       .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm).slice(0, 30);
 
     for (const { meta } of scored) {
@@ -187,7 +180,12 @@ export class PaperEngine {
     if (this.positions.filter(p => bucket(p.coin) === b).length >= 3) return;
     const equity = this.currentEquity();
     const leverage = Math.max(1, Math.floor(Math.min(this.settings.max_leverage, meta.maxLeverage)));
-    const stop = side === "long" ? price * (1 - this.hardSlPct() / 100) : price * (1 + this.hardSlPct() / 100);
+    const stop = safetyStop(side, safetyLine, TB_SAFETY_BUFFER_PCT);
+    const stopOnWrongSide = side === "long" ? stop >= price : stop <= price;
+    const stopDistPct = Math.abs(price - stop) / price * 100;
+    if (stopOnWrongSide) { this.log("info", `Skipped ${coin}: safety-line stop is on the wrong side of price.`); return; }
+    if (stopDistPct < TB_MIN_STOP_PCT) { this.log("info", `Skipped ${coin}: safety-line stop only ${stopDistPct.toFixed(3)}% away.`); return; }
+    if (stopDistPct > this.hardSlPct()) { this.log("info", `Skipped ${coin}: safety-line stop ${stopDistPct.toFixed(2)}% exceeds the ${this.hardSlPct().toFixed(2)}% hard stop limit.`); return; }
     let size = riskSize(equity, riskPct, price, stop);
     const room = equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0);
     if (room <= 0) return;
@@ -205,7 +203,7 @@ export class PaperEngine {
     this.positions.push({ id: data.id, coin, side, size, notional: size * price, leverage, entry_price: price,
       stop_loss: stop, take_profit: side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY,
       trail_high: price, confidence, safety_line: safetyLine });
-    this.log("trade", `OPEN ${reason} @ ${price.toFixed(6)} · hard SL ${stop.toFixed(6)} (${this.hardSlPct().toFixed(2)}%) · safety ${safetyLine.toFixed(6)}`);
+    this.log("trade", `OPEN ${reason} @ ${price.toFixed(6)} · structural SL ${stop.toFixed(6)} · safety ${safetyLine.toFixed(6)}`);
   }
 
   async start() {
@@ -313,7 +311,7 @@ export class PaperEngine {
 
   private async runEvalCycle() {
     const held = new Set(this.positions.map(p => p.coin)); const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
-    const scored = this.meta.map((m, i) => ({ meta: m, ctx: this.ctxs[i] })).filter(x => x.ctx && +x.ctx.dayNtlVlm > 100_000 && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
+    const scored = this.meta.map((m, i) => ({ meta: m, ctx: this.ctxs[i] })).filter(x => x.ctx && +x.ctx.dayNtlVlm > 5_000_000 && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
     for (const { meta } of scored) {
       if (this.positions.length >= this.settings.max_positions) break; if (held.has(meta.name)) continue;
       const now = Date.now(); const cached = this.cache.get(meta.name); if (cached && now < cached.nextEval) continue;
