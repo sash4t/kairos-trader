@@ -4,6 +4,7 @@
  * safety-line trailing stops. No indicator is required for an entry.
  */
 import type { Bar } from "../strategy";
+import { ema, rsi, macd, atr, last } from "../indicators";
 
 export const TRENDLINE_BREAK_KEY = "trendline-break" as const;
 export const TB_TIMEFRAMES = ["1w", "1d", "4h", "1h", "30m", "15m"] as const;
