@@ -25,7 +25,7 @@ export interface ScannerConfig {
 }
 
 export const DEFAULT_SCANNER_CONFIG: ScannerConfig = {
-  min24hVolume: 250_000,
+  min24hVolume: 5_000_000,
   minOpenInterest: 100_000,
   minPrice: 0.000001,
   maxAbsFundingRate: 0.01,
