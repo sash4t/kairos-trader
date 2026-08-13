@@ -202,12 +202,14 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
   let safety: number | undefined;
   const reasons: string[] = [];
   if (exec.down.freshBreak && exec.down.value != null) {
-    side = "long"; actionLine = exec.down.value; safety = safetyLineFor(levels, "long", price);
-    reasons.push(`${exec.timeframe} close above bearish trendline — LONG action-line break`);
-  } else if (exec.up.freshBreak && exec.up.value != null) {
-    side = "short"; actionLine = exec.up.value; safety = safetyLineFor(levels, "short", price);
-    reasons.push(`${exec.timeframe} close below bullish trendline — SHORT action-line break`);
-  } else {
+  side = "short";
+  actionLine = exec.down.value;
+  safety = safetyLineFor(levels, "short", price);
+} else if (exec.up.freshBreak && exec.up.value != null) {
+  side = "long";
+  actionLine = exec.up.value;
+  safety = safetyLineFor(levels, "long", price);
+} else {
     return { ...base, indicators, reasons: [`No ${exec.timeframe} action-line break`] };
   }
   if (safety == null) return { ...base, indicators, reasons: ["Break detected but no valid opposing safety line is available"] };
