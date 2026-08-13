@@ -291,19 +291,18 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const safety = safetyLineFor(levels, p.side, mark);
           if (safety != null) {
             p.safety_line = safety;
-            if (profitProtectionActive) {
-              const structuralStop = trailToSafety(p.side, p.stop_loss, safety);
-              const protectsProfit = p.side === "long" ? structuralStop >= p.entry_price : structuralStop <= p.entry_price;
-              if (protectsProfit && structuralStop !== p.stop_loss) {
-                p.stop_loss = structuralStop;
-                if (isLive && creds) {
-                  const asset = (await assets()).get(p.coin);
-                  if (asset) await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
-                }
+            // Structural stop trails from the start and never loosens.
+            const structuralStop = trailToSafety(p.side, p.stop_loss, safety, TB_SAFETY_BUFFER_PCT);
+            if (structuralStop !== p.stop_loss) {
+              p.stop_loss = structuralStop;
+              if (isLive && creds) {
+                const asset = (await assets()).get(p.coin);
+                if (asset) await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
               }
             }
             await supabaseAdmin.from("paper_positions").update({ stop_loss: p.stop_loss, safety_line: safety, trail_high: p.trail_high }).eq("id", p.id).eq("status", "open");
           }
+
 
           if (p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss) {
             const protectedProfit = p.side === "long" ? p.stop_loss >= p.entry_price : p.stop_loss <= p.entry_price;
