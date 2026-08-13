@@ -5,27 +5,26 @@ import { useServerFn } from "@tanstack/react-start";
 import { getLiveStatus } from "@/lib/live.functions";
 import { supabase } from "@/integrations/supabase/client";
 import { useBot } from "@/lib/botContext";
-import { KillSwitch } from "@/components/KillSwitch";
+import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
+import { TrendingUp, TrendingDown, Wallet, Activity } from "lucide-react";
 
-export const Route = createFileRoute("/_authenticated/dashboard")({ component: Dashboard });
+export const Route = createFileRoute("/_authenticated/dashboard")({
+  component: Dashboard,
+});
 
-function fmt(n: number, d = 2) {
-  return n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
-}
+function fmt(n: number, d = 2) { return n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }); }
 
-function ageLabel(date: string) {
-  const mins = Math.max(0, Math.floor((Date.now() - new Date(date).getTime()) / 60000));
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  return hours < 24 ? `${hours}h ${mins % 60}m` : `${Math.floor(hours / 24)}d ${hours % 24}h`;
-}
-
-function holdLabel(ms: number) {
-  if (!ms) return "—";
-  const mins = Math.round(ms / 60000);
-  if (mins < 60) return `${mins}m`;
-  const hours = mins / 60;
-  return hours < 24 ? `${hours.toFixed(1)}h` : `${(hours / 24).toFixed(1)}d`;
+function Metric({ label, value, sub, color, icon: Icon }: any) {
+  return (
+    <div className="panel p-4">
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{label}</div>
+        {Icon && <Icon className="h-3.5 w-3.5 text-muted-foreground" />}
+      </div>
+      <div className={`mono mt-2 text-2xl font-semibold ${color ?? ""}`}>{value}</div>
+      {sub && <div className="mt-1 text-xs text-muted-foreground">{sub}</div>}
+    </div>
+  );
 }
 
 function Dashboard() {
@@ -34,138 +33,227 @@ function Dashboard() {
   useEffect(() => { const t = setInterval(() => tick(x => x + 1), 1500); return () => clearInterval(t); }, []);
 
   const { data: openPos = [] } = useQuery({
-    queryKey: ["positions-open", userId, positionsVersion], enabled: !!userId,
+    queryKey: ["positions-open", userId, positionsVersion],
+    enabled: !!userId,
     queryFn: async () => (await supabase.from("paper_positions").select("*").eq("user_id", userId!).eq("status", "open").order("opened_at", { ascending: false })).data ?? [],
     refetchInterval: 3000,
   });
+
   const { data: closed = [] } = useQuery({
-    queryKey: ["positions-closed", userId, positionsVersion], enabled: !!userId,
+    queryKey: ["positions-closed", userId, positionsVersion],
+    enabled: !!userId,
     queryFn: async () => (await supabase.from("paper_positions").select("*").eq("user_id", userId!).eq("status", "closed").order("closed_at", { ascending: false }).limit(500)).data ?? [],
     refetchInterval: 10000,
   });
-  const { data: events = [] } = useQuery({
-    queryKey: ["dashboard-events", userId], enabled: !!userId,
-    queryFn: async () => (await supabase.from("bot_events").select("*").eq("user_id", userId!).order("ts", { ascending: false }).limit(30)).data ?? [],
-    refetchInterval: 5000,
+
+  const { data: equitySeries = [] } = useQuery({
+    queryKey: ["equity", userId, settings?.mode],
+    enabled: !!userId,
+    queryFn: async () => (await supabase.from("equity_snapshots").select("ts, equity").eq("user_id", userId!).eq("mode", settings?.mode ?? "paper").order("ts", { ascending: true }).limit(500)).data ?? [],
+    refetchInterval: 30000,
   });
 
   const startEquity = settings?.paper_equity ?? 10000;
-  const realizedPnl = closed.reduce((s, p) => s + +(p.pnl ?? 0), 0);
+  const realizedPnl = closed.reduce((s, p) => s + (+(p.pnl ?? 0)), 0);
   const unrealizedPnl = openPos.reduce((s, p: any) => {
-    const mark = +(mids[p.coin] ?? p.entry_price);
-    return s + (p.side === "long" ? (mark - +p.entry_price) * +p.size : (+p.entry_price - mark) * +p.size);
+    const m = mids[p.coin]; if (!m) return s;
+    const mk = +m;
+    return s + (p.side === "long" ? (mk - +p.entry_price) * +p.size : (+p.entry_price - mk) * +p.size);
   }, 0);
-  const paperEquity = startEquity + realizedPnl + unrealizedPnl;
-  const wins = closed.filter(p => +(p.pnl ?? 0) > 0);
-  const winRate = closed.length ? wins.length / closed.length * 100 : 0;
-  const completedHolds = closed.filter(p => p.closed_at && p.opened_at);
-  const avgHoldMs = completedHolds.length ? completedHolds.reduce((sum, p) => sum + (new Date(p.closed_at!).getTime() - new Date(p.opened_at).getTime()), 0) / completedHolds.length : 0;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const todayRealized = closed.filter(p => p.closed_at && new Date(p.closed_at).getTime() >= today.getTime()).reduce((s, p) => s + +(p.pnl ?? 0), 0);
+  const equity = startEquity + realizedPnl + unrealizedPnl;
+
+  const wins = closed.filter(c => +(c.pnl ?? 0) > 0);
+  const losses = closed.filter(c => +(c.pnl ?? 0) <= 0);
+  const winRate = closed.length ? (wins.length / closed.length) * 100 : 0;
+  const avgWin = wins.length ? wins.reduce((s, c) => s + +(c.pnl ?? 0), 0) / wins.length : 0;
+  const avgLoss = losses.length ? losses.reduce((s, c) => s + +(c.pnl ?? 0), 0) / losses.length : 0;
+  const profitFactor = losses.length && avgLoss !== 0
+    ? Math.abs((wins.reduce((s, c) => s + +(c.pnl ?? 0), 0)) / (losses.reduce((s, c) => s + +(c.pnl ?? 0), 0)))
+    : wins.length ? Infinity : 0;
 
   const isLive = settings?.mode === "live";
   const statusFn = useServerFn(getLiveStatus);
   const { data: live } = useQuery({
-    queryKey: ["live-status", userId], enabled: !!isLive,
-    queryFn: () => statusFn({ data: undefined }), refetchInterval: 15000,
+    queryKey: ["live-status", userId],
+    enabled: !!isLive,
+    queryFn: () => statusFn({ data: undefined }),
+    refetchInterval: 15000,
   });
   const liveAcct = live?.account ?? null;
-  const displayEquity = isLive && liveAcct ? liveAcct.accountValue : paperEquity;
-  const displayUnrealized = isLive && liveAcct ? liveAcct.positions.reduce((s, p) => s + p.unrealizedPnl, 0) : unrealizedPnl;
-  const todayPnl = todayRealized + displayUnrealized;
-  const todayPct = displayEquity ? todayPnl / (displayEquity - todayPnl || displayEquity) * 100 : 0;
-  const positions: any[] = isLive && liveAcct ? liveAcct.positions.map(p => ({
-    id: `live-${p.coin}`, coin: p.coin, side: p.side, entry_price: p.entryPrice, size: p.size,
-    opened_at: openPos.find((x: any) => x.coin === p.coin)?.opened_at ?? new Date().toISOString(), livePnl: p.unrealizedPnl,
-  })) : openPos;
+  const displayEquity = isLive && liveAcct ? liveAcct.accountValue : equity;
+  const displayUnrealized = isLive && liveAcct
+    ? liveAcct.positions.reduce((s, p) => s + p.unrealizedPnl, 0)
+    : unrealizedPnl;
+
+  const historicalChartData = equitySeries.map(p => ({ t: new Date(p.ts).getTime(), v: +p.equity }));
+  const now = Date.now();
+  const chartData = historicalChartData.length
+    ? [...historicalChartData, { t: now, v: displayEquity }]
+    : [{ t: now - 60_000, v: startEquity }, { t: now, v: displayEquity }];
 
   return (
-    <div className="dashboard-v2 min-h-full bg-[#0A0B0E] p-4 sm:p-6 lg:p-8">
-      <div className="mx-auto max-w-[1500px] overflow-hidden border border-[#1C2030] bg-[#0A0B0E]">
-        <header className="flex min-h-16 flex-wrap items-center justify-between gap-4 border-b border-[#1C2030] px-5 py-4 sm:px-6">
-          <div className="flex items-center gap-4">
-            <span className="mono text-base font-semibold tracking-[0.14em] text-[#E8EAF0]">KAIROS</span>
-            <span className="h-5 w-px bg-[#1C2030]" />
-            <div className="flex items-center gap-2 text-xs text-[#6B7280]">
-              <span className={`live-pulse ${settings?.bot_enabled && !settings?.kill_switch_engaged ? "is-live" : ""}`} />
-              <span>{isLive ? "LIVE" : "PAPER"} · Hyperliquid</span>
+    <div className="p-4 sm:p-6 lg:p-8 space-y-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-semibold">Portfolio</h1>
+          <p className="text-sm text-muted-foreground">
+            {isLive ? "Live trading · real Hyperliquid account" : "Paper trading · Hyperliquid USDC perpetuals"}
+          </p>
+        </div>
+        <div className="mono text-xs text-muted-foreground sm:text-right">
+          <div>Bot: <span className={settings?.bot_enabled ? "text-bull" : "text-warning"}>{settings?.bot_enabled ? "RUNNING" : "STOPPED"}</span></div>
+          <div>Mode: <span className={isLive ? "text-bear" : "text-foreground"}>{isLive ? "LIVE" : "PAPER"}</span> · <span className="text-foreground">{settings?.strategy_mode?.toUpperCase()}</span></div>
+        </div>
+      </div>
+
+      {isLive && !liveAcct && (
+        <div className="panel border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+          Live mode is on but the real account balance couldn’t be read
+          {live?.detail ? ` — ${live.detail}` : ""}. Check the API wallet in Settings → Hyperliquid live trading.
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
+        <Metric
+          label={isLive ? "Live account equity" : "Account equity"}
+          value={fmt(displayEquity)}
+          sub={isLive ? `Withdrawable ${fmt(liveAcct?.withdrawable ?? 0)} USDC` : `Start ${fmt(startEquity)} USDC`}
+          icon={Wallet}
+        />
+        <Metric label="Unrealized PnL" value={`${displayUnrealized >= 0 ? "+" : ""}${fmt(displayUnrealized)}`} color={displayUnrealized >= 0 ? "text-bull" : "text-bear"} icon={displayUnrealized >= 0 ? TrendingUp : TrendingDown} />
+        <Metric label="Realized PnL" value={`${realizedPnl >= 0 ? "+" : ""}${fmt(realizedPnl)}`} color={realizedPnl >= 0 ? "text-bull" : "text-bear"} icon={Activity} />
+      </div>
+
+      {isLive && liveAcct && (
+        <div className="panel p-4 sm:p-5">
+          <div className="mb-3 text-sm font-semibold">Live Hyperliquid positions ({liveAcct.positions.length})</div>
+          {liveAcct.positions.length === 0 ? (
+            <div className="py-6 text-center text-sm text-muted-foreground">No live positions open on your account.</div>
+          ) : (
+            <div className="space-y-2">
+              {liveAcct.positions.map(p => (
+                <div key={p.coin} className="mono flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-panel-border/50 py-2 text-xs sm:text-sm">
+                  <span className="font-semibold">{p.coin}</span>
+                  <span className={p.side === "long" ? "text-bull" : "text-bear"}>{p.side.toUpperCase()} {p.size}</span>
+                  <span>@ {p.entryPrice}</span>
+                  <span>{p.leverage}x</span>
+                  <span className={p.unrealizedPnl >= 0 ? "text-bull" : "text-bear"}>
+                    {p.unrealizedPnl >= 0 ? "+" : ""}{fmt(p.unrealizedPnl)}
+                  </span>
+                </div>
+              ))}
             </div>
+          )}
+        </div>
+      )}
+
+      <div className="panel p-4 sm:p-5">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-semibold">Equity curve</div>
+            <div className="text-xs text-muted-foreground">Historical snapshots + current total equity</div>
           </div>
-          <div className="flex items-center gap-4 sm:gap-6">
-            <div className="text-right">
-              <div className="text-[10px] uppercase tracking-[0.16em] text-[#6B7280]">Equity</div>
-              <div className="mono mt-0.5 text-sm font-semibold text-[#E8EAF0]">${fmt(displayEquity)}</div>
-            </div>
-            <div className="w-36"><KillSwitch /></div>
-          </div>
-        </header>
+          <div className="mono text-sm font-semibold">{fmt(displayEquity)} USDC</div>
+        </div>
+        <div className="h-64">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={chartData}>
+              <CartesianGrid stroke="var(--panel-border)" strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="t" type="number" domain={["auto", "auto"]} tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
+                tickFormatter={t => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} />
+              <YAxis tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} domain={["auto", "auto"]} width={68} tickFormatter={v => fmt(+v, 0)} />
+              <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--panel-border)", fontSize: 12 }}
+                labelFormatter={t => new Date(Number(t)).toLocaleString()} formatter={(v: any) => [fmt(+v), "Equity"]} />
+              <Line dataKey="v" type="monotone" stroke="var(--primary)" strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
 
-        {isLive && !liveAcct && <div className="border-b border-[#1C2030] bg-[#22100F] px-5 py-2 text-xs text-[#F04040]">Live account data unavailable{live?.detail ? ` · ${live.detail}` : ""}</div>}
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
+        <Metric label="Win rate" value={`${winRate.toFixed(1)}%`} sub={`${wins.length}W / ${losses.length}L`} />
+        <Metric label="Avg winner" value={fmt(avgWin)} color="text-bull" />
+        <Metric label="Avg loser" value={fmt(avgLoss)} color="text-bear" />
+        <Metric label="Profit factor" value={isFinite(profitFactor) ? profitFactor.toFixed(2) : "∞"} />
+      </div>
 
-        <section className="grid grid-cols-2 border-b border-[#1C2030] lg:grid-cols-4">
-          {[
-            ["TODAY'S P&L", `${todayPnl >= 0 ? "+" : "-"}$${fmt(Math.abs(todayPnl))}`, `${todayPct >= 0 ? "+" : ""}${todayPct.toFixed(2)}% of equity`, todayPnl >= 0 ? "text-[#00C896]" : "text-[#F04040]"],
-            ["OPEN POSITIONS", `${positions.length}`, `${positions.length} of ${settings?.max_positions ?? "—"} max`, "text-[#E8EAF0]"],
-            ["WIN RATE", `${winRate.toFixed(0)}%`, `${wins.length} of ${closed.length} trades`, "text-[#E8EAF0]"],
-            ["AVG HOLD", holdLabel(avgHoldMs), completedHolds.length ? `${completedHolds.length} closed trades` : "No closed trades", "text-[#E8EAF0]"],
-          ].map(([label, value, sub, color], i) => (
-            <div key={label} className={`bg-[#111420] px-5 py-5 sm:px-6 ${i % 2 ? "border-l border-[#1C2030]" : ""} ${i > 1 ? "border-t border-[#1C2030] lg:border-t-0" : ""} ${i === 2 ? "lg:border-l lg:border-[#1C2030]" : ""}`}>
-              <div className="text-[10px] uppercase tracking-[0.16em] text-[#6B7280]">{label}</div>
-              <div className={`mono mt-2 text-xl font-semibold sm:text-2xl ${color}`}>{value}</div>
-              <div className="mt-1 text-[11px] text-[#6B7280]">{sub}</div>
-            </div>
-          ))}
-        </section>
-
-        <section className="grid min-h-[520px] lg:grid-cols-[1.35fr_0.85fr]">
-          <div className="min-w-0 border-b border-[#1C2030] lg:border-b-0 lg:border-r">
-            <div className="flex items-center justify-between border-b border-[#1C2030] px-5 py-3.5">
-              <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-[#E8EAF0]">Active Positions</h2>
-              <span className="mono text-[10px] text-[#6B7280]">{positions.length} OPEN</span>
-            </div>
-            {positions.length === 0 ? <div className="flex h-48 items-center justify-center text-sm text-[#6B7280]">No active positions.</div> : (
-              <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs">
-                <thead><tr className="border-b border-[#1C2030] text-[9px] uppercase tracking-[0.14em] text-[#6B7280]">
-                  <th className="px-5 py-3 font-medium">Market</th><th className="px-3 py-3 font-medium">Entry price</th><th className="px-3 py-3 font-medium">Current price</th><th className="px-3 py-3 font-medium">Size</th><th className="px-3 py-3 font-medium">Unrealized P&L</th><th className="px-5 py-3 font-medium">Age</th>
-                </tr></thead>
-                <tbody>{positions.map((p: any) => {
-                  const mark = +(mids[p.coin] ?? p.entry_price);
-                  const pnl = p.livePnl ?? (p.side === "long" ? (mark - +p.entry_price) * +p.size : (+p.entry_price - mark) * +p.size);
-                  return <tr key={p.id} className="border-b border-[#1C2030] transition-colors hover:bg-[#0F1118]">
-                    <td className="px-5 py-4"><div className="flex items-center gap-2"><span className="mono font-semibold text-[#E8EAF0]">{p.coin}</span><span className={`mono px-1.5 py-0.5 text-[9px] font-semibold ${p.side === "long" ? "bg-[#0D2420] text-[#00C896]" : "bg-[#22100F] text-[#F04040]"}`}>{p.side.toUpperCase()}</span></div></td>
-                    <td className="mono px-3 py-4 text-[#A7ADBA]">${fmt(+p.entry_price, +p.entry_price < 10 ? 4 : 2)}</td>
-                    <td className="mono px-3 py-4 text-[#E8EAF0]">${fmt(mark, mark < 10 ? 4 : 2)}</td>
-                    <td className="mono px-3 py-4 text-[#A7ADBA]">{fmt(+p.size, 4)}</td>
-                    <td className={`mono px-3 py-4 font-semibold ${pnl >= 0 ? "text-[#00C896]" : "text-[#F04040]"}`}>{pnl >= 0 ? "+" : "-"}${fmt(Math.abs(pnl))}</td>
-                    <td className="mono px-5 py-4 text-[#6B7280]">{ageLabel(p.opened_at)}</td>
-                  </tr>;
-                })}</tbody>
-              </table></div>
-            )}
-          </div>
-
-          <div className="min-w-0">
-            <div className="flex items-center justify-between border-b border-[#1C2030] px-5 py-3.5"><h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-[#E8EAF0]">Signal Feed</h2><span className="text-[10px] text-[#6B7280]">auto-scroll</span></div>
-            <div className="max-h-[620px] overflow-y-auto">
-              {events.length === 0 ? <div className="flex h-48 items-center justify-center text-sm text-[#6B7280]">Waiting for bot events…</div> : events.map((event: any) => {
-                const meta = event.meta && typeof event.meta === "object" ? event.meta as any : {};
-                const confidence = Number(meta.confidence ?? meta.score ?? 0);
-                const negative = event.level === "error" || /closed|stop|loss|short/i.test(event.message);
-                const skipped = /skip|threshold|no signal/i.test(event.message);
-                const dot = skipped ? "bg-[#47739B]" : negative ? "bg-[#F04040]" : "bg-[#00C896]";
-                return <div key={event.id} className="border-b border-[#1C2030] px-5 py-3.5 hover:bg-[#0F1118]">
-                  <div className="grid grid-cols-[44px_8px_1fr] gap-2.5">
-                    <span className="mono text-[10px] text-[#4D5565]">{new Date(event.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</span>
-                    <span className={`mt-1 h-1.5 w-1.5 rounded-full ${dot}`} />
-                    <div className="min-w-0"><div className="text-[11px] leading-4 text-[#C7CBD4]">{event.message}</div>
-                      {confidence > 0 && <div className="mt-2 flex items-center gap-2"><div className="h-0.5 w-20 bg-[#1C2030]"><div className="h-full bg-[#00C896]" style={{ width: `${Math.min(100, confidence)}%` }} /></div><span className="mono text-[9px] text-[#6B7280]">CONF {confidence.toFixed(0)}%</span></div>}
+      <div className="panel p-4 sm:p-5">
+        <div className="mb-3 text-sm font-semibold">Open positions ({openPos.length})</div>
+        {openPos.length === 0 ? (
+          <div className="py-10 text-center text-sm text-muted-foreground">No open positions. The bot will open positions when a high-confidence signal appears.</div>
+        ) : (
+          <><div className="space-y-3 md:hidden">
+            {openPos.map((p: any) => {
+              const mark = +(mids[p.coin] ?? p.entry_price);
+              const pnl = p.side === "long" ? (mark - +p.entry_price) * +p.size : (+p.entry_price - mark) * +p.size;
+              const margin = +p.notional / Math.max(1, +p.leverage);
+              const dir = p.side === "long" ? 1 : -1;
+              const pricePct = ((mark - +p.entry_price) / +p.entry_price) * 100 * dir;
+              const stopPct = ((+p.stop_loss - +p.entry_price) / +p.entry_price) * 100 * dir;
+              return (
+                <div key={p.id} className="rounded-md border border-panel-border p-3">
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                    <div className="min-w-0">
+                      <span className="mono truncate text-sm font-semibold">{p.coin}</span>
+                      <span className={`mono ml-2 text-xs font-semibold ${p.side === "long" ? "text-bull" : "text-bear"}`}>{p.side.toUpperCase()}</span>
+                    </div>
+                    <div className={`mono shrink-0 text-right text-sm font-semibold ${pnl >= 0 ? "text-bull" : "text-bear"}`}>
+                      {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
+                      <span className="ml-1 text-xs opacity-70" title="Return on margin (leveraged)">({pnl >= 0 ? "+" : ""}{(margin > 0 ? (pnl / margin) * 100 : 0).toFixed(1)}% ROE)</span>
                     </div>
                   </div>
-                </div>;
-              })}
-            </div>
+                  <div className="mono mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                    <div className="flex justify-between"><span className="text-muted-foreground">Entry</span><span>{(+p.entry_price).toFixed(6)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Mark</span><span>{mark.toFixed(6)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">SL</span><span className="text-bear">{(+p.stop_loss).toFixed(6)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">TP</span><span className="text-bull">{(+p.take_profit).toFixed(6)}</span></div>
+                    <div className="col-span-2 flex justify-between text-muted-foreground">
+                      <span>Price vs entry</span>
+                      <span className={pricePct >= 0 ? "text-bull" : "text-bear"}>
+                        {pricePct >= 0 ? "+" : ""}{pricePct.toFixed(2)}% · stop at {stopPct.toFixed(2)}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        </section>
+          <div className="hidden overflow-x-auto md:block"><table className="w-full min-w-[720px] text-sm">
+            <thead className="text-xs uppercase tracking-widest text-muted-foreground">
+              <tr className="border-b border-panel-border"><th className="py-2 text-left">Coin</th><th className="text-right">PnL</th><th>Side</th><th className="text-right">Entry</th><th className="text-right">Mark</th><th className="text-right">Size</th><th className="text-right">SL / TP</th></tr>
+            </thead>
+            <tbody>
+              {openPos.map((p: any) => {
+                const mark = +(mids[p.coin] ?? p.entry_price);
+                const pnl = p.side === "long" ? (mark - +p.entry_price) * +p.size : (+p.entry_price - mark) * +p.size;
+                const margin = +p.notional / Math.max(1, +p.leverage);
+                const dir = p.side === "long" ? 1 : -1;
+                const pricePct = ((mark - +p.entry_price) / +p.entry_price) * 100 * dir;
+                const stopPct = ((+p.stop_loss - +p.entry_price) / +p.entry_price) * 100 * dir;
+                return (
+                  <tr key={p.id} className="border-b border-panel-border/50 mono">
+                    <td className="py-2">{p.coin}</td>
+                    <td className={`text-right ${pnl >= 0 ? "text-bull" : "text-bear"}`}>
+                      <span className="font-semibold">{pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}</span>
+                      <span className="ml-1 text-xs opacity-70" title="Return on margin (leveraged)">({pnl >= 0 ? "+" : ""}{(margin > 0 ? (pnl / margin) * 100 : 0).toFixed(1)}% ROE)</span>
+                    </td>
+                    <td className={p.side === "long" ? "text-bull" : "text-bear"}>{p.side.toUpperCase()}</td>
+                    <td className="text-right">{(+p.entry_price).toFixed(6)}</td>
+                    <td className="text-right">
+                      {mark.toFixed(6)}
+                      <span className={`ml-1 text-xs ${pricePct >= 0 ? "text-bull" : "text-bear"}`}>({pricePct >= 0 ? "+" : ""}{pricePct.toFixed(2)}%)</span>
+                    </td>
+                    <td className="text-right">{(+p.size).toFixed(4)}</td>
+                    <td className="text-right text-xs text-muted-foreground">
+                      {(+p.stop_loss).toFixed(6)} / {(+p.take_profit).toFixed(6)}
+                      <div className="opacity-70">stop at {stopPct.toFixed(2)}%</div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table></div></>
+        )}
       </div>
     </div>
   );
