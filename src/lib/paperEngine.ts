@@ -7,6 +7,10 @@ import {
   safetyLineFor, riskSize, trailToSafety, dynamicTrailStop, safetyStop, TB_SAFETY_BUFFER_PCT, TB_MIN_STOP_PCT, TB_DEFAULTS,
   type TbTimeframe, type TbSeries,
 } from "./strategies/trendlineBreak";
+import {
+  INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS, evaluateIntradayPullback,
+  riskSizedQuantity, targetFromR, intradayRTrail,
+} from "./strategies/intradayMomentumPullback";
 
 export interface Settings {
   user_id: string;
@@ -44,6 +48,7 @@ export interface Settings {
   tb_pivot_strength?: number;
   tb_risk_pct?: number;
   tb_refresh_min?: number;
+  tb_position_size_pct?: number;
 }
 
 export interface OpenPosition {
@@ -59,6 +64,7 @@ export interface OpenPosition {
   trail_high: number | null;
   confidence: number;
   safety_line?: number | null;
+  initial_stop?: number | null;
 }
 
 type Log = (level: "info" | "warn" | "error" | "trade", msg: string, meta?: any) => void;
@@ -100,6 +106,7 @@ export class PaperEngine {
 
   private isLive() { return this.settings.mode === "live"; }
   private isTrendlineBreak() { return this.settings.strategy_key === TRENDLINE_BREAK_KEY; }
+  private isIntraday() { return this.settings.strategy_key === INTRADAY_PULLBACK_KEY; }
   private hardSlPct() {
     const v = Number(this.settings.scalp_sl_pct ?? 0);
     return Number.isFinite(v) && v > 0 ? v : 1;
@@ -137,6 +144,64 @@ export class PaperEngine {
     if (Object.keys(series).length < timeframes.length) return null;
     this.tbSeries.set(coin, { series, ts: end });
     return series;
+  }
+
+
+  private async runIntradayCycle() {
+    const held = new Set(this.positions.map(p => p.coin));
+    const EXCLUDED = new Set(["BTC", "ETH"]);
+    const HOUR = 60 * 60 * 1000;
+    const FOUR_HOUR = 4 * HOUR;
+    const FIFTEEN = 15 * 60 * 1000;
+    const scored = this.meta.map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
+      .filter(x => x.ctx && +x.ctx.dayNtlVlm > 5_000_000 && !EXCLUDED.has(x.meta.name))
+      .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm).slice(0, 35);
+    for (const { meta } of scored) {
+      if (this.positions.length >= this.settings.max_positions) break;
+      if (held.has(meta.name)) continue;
+      const end = Date.now();
+      try {
+        const [cs4h, cs1h, cs15m] = await Promise.all([
+          fetchCandles(meta.name, "4h", end - 180 * FOUR_HOUR, end),
+          fetchCandles(meta.name, "1h", end - 220 * HOUR, end),
+          fetchCandles(meta.name, "15m", end - 240 * FIFTEEN, end),
+        ]);
+        const h4  = candlesToBars(cs4h).slice(0, -1);
+        const h1  = candlesToBars(cs1h).slice(0, -1);
+        const m15 = candlesToBars(cs15m).slice(0, -1);
+        const sig = evaluateIntradayPullback(meta.name, h4, h1, m15);
+        if (!sig.side || sig.stopLoss == null) continue;
+        if (sig.confidence < Math.max(65, this.settings.min_confidence)) continue;
+        if (shockHitsSide(this.shockDir, sig.side)) continue;
+        const equity = this.currentEquity();
+        const leverage = Math.max(1, Math.floor(Math.min(this.settings.max_leverage, meta.maxLeverage)));
+        const riskQty = riskSizedQuantity(equity, INTRADAY_DEFAULTS.riskPct, sig.price, sig.stopLoss);
+        const capQty  = (equity * (INTRADAY_DEFAULTS.positionSizePct / 100) * leverage) / sig.price;
+        const room    = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage
+          - this.positions.reduce((s, p) => s + p.notional, 0));
+        const size = Math.min(riskQty, capQty, room / sig.price);
+        if (!(size > 0)) continue;
+        const tp = targetFromR(sig.side, sig.price, sig.stopLoss);
+        const b = bucket(meta.name);
+        if (this.positions.filter(p => bucket(p.coin) === b).length >= 3) continue;
+        const reason = `${sig.side.toUpperCase()} ${meta.name} — ${sig.reasons.join(" + ")}`;
+        const { data, error } = await supabase.from("paper_positions").insert({
+          user_id: this.userId, coin: meta.name, side: sig.side, size,
+          notional: size * sig.price, leverage, entry_price: sig.price,
+          stop_loss: sig.stopLoss, take_profit: tp, confidence: sig.confidence,
+          reason, indicators: sig.indicators, initial_stop: sig.stopLoss,
+          risk_pct: INTRADAY_DEFAULTS.riskPct,
+        }).select().single();
+        if (error || !data) { this.log("error", `Failed to open ${meta.name}: ${error?.message}`); continue; }
+        this.positions.push({
+          id: data.id, coin: meta.name, side: sig.side, size, notional: size * sig.price,
+          leverage, entry_price: sig.price, stop_loss: sig.stopLoss, take_profit: tp,
+          trail_high: sig.price, confidence: sig.confidence, safety_line: null,
+        });
+        this.log("trade", `OPEN ${reason} @ ${sig.price.toFixed(6)} · SL ${sig.stopLoss.toFixed(6)} · TP ${tp.toFixed(6)} · risk ${INTRADAY_DEFAULTS.riskPct}%`);
+        held.add(meta.name);
+      } catch { continue; }
+    }
   }
 
   private async runTrendlineBreakCycle() {
@@ -274,6 +339,24 @@ export class PaperEngine {
     for (const p of [...this.positions]) {
       const m = this.mid(p.coin); if (m == null) continue;
       if (shockHitsSide(this.shockDir, p.side)) { this.closePosition(p, m, "btc_shock").catch(() => {}); continue; }
+      if (this.isIntraday()) {
+        // IMP: R-based trail derived from the structural ATR stop distance
+        const initialStop = p.initial_stop ?? p.stop_loss;
+        const previousBest = p.trail_high ?? p.entry_price;
+        const best = p.side === "long" ? Math.max(previousBest, m) : Math.min(previousBest, m);
+        const newStop = intradayRTrail(p.side, p.entry_price, initialStop, best, p.stop_loss);
+        if (best !== previousBest || newStop !== p.stop_loss) {
+          p.trail_high = best; p.stop_loss = newStop; this.persistPositionUpdate(p);
+        }
+        const hitStop = p.side === "long" ? m <= p.stop_loss : m >= p.stop_loss;
+        const hitTp = Number.isFinite(p.take_profit) && (p.side === "long" ? m >= p.take_profit : m <= p.take_profit);
+        if (hitStop) {
+          const protected_ = p.side === "long" ? p.stop_loss >= p.entry_price : p.stop_loss <= p.entry_price;
+          this.closePosition(p, m, protected_ ? "r_trailing_stop" : "stop_loss").catch(() => {});
+        } else if (hitTp) this.closePosition(p, m, "take_profit").catch(() => {});
+        continue;
+      }
+
       if (this.isTrendlineBreak()) {
         const previousPeak = p.trail_high ?? p.entry_price;
         const best = p.side === "long" ? Math.max(previousPeak, m) : Math.min(previousPeak, m);
@@ -306,7 +389,7 @@ export class PaperEngine {
   private async evalCycle() {
     if (!this.settings.bot_enabled || this.settings.kill_switch_engaged) return;
     if (this.settings.mode !== "paper" || this.settings.server_agent_enabled || this.evaluating) return;
-    this.evaluating = true; try { if (this.isTrendlineBreak()) await this.runTrendlineBreakCycle(); else await this.runEvalCycle(); } finally { this.evaluating = false; }
+    this.evaluating = true; try { if (this.isIntraday()) await this.runIntradayCycle(); else if (this.isTrendlineBreak()) await this.runTrendlineBreakCycle(); else await this.runEvalCycle(); } finally { this.evaluating = false; }
   }
 
   private async runEvalCycle() {

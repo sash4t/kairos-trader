@@ -73,6 +73,7 @@ export type Database = {
           strategy_key: string
           strategy_mode: string
           tb_pivot_strength: number
+          tb_position_size_pct: number
           tb_refresh_min: number
           tb_risk_pct: number
           tb_timeframes: string
@@ -115,6 +116,7 @@ export type Database = {
           strategy_key?: string
           strategy_mode?: string
           tb_pivot_strength?: number
+          tb_position_size_pct?: number
           tb_refresh_min?: number
           tb_risk_pct?: number
           tb_timeframes?: string
@@ -157,6 +159,7 @@ export type Database = {
           strategy_key?: string
           strategy_mode?: string
           tb_pivot_strength?: number
+          tb_position_size_pct?: number
           tb_refresh_min?: number
           tb_risk_pct?: number
           tb_timeframes?: string

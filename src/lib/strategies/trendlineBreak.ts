@@ -191,11 +191,26 @@ export interface TbConfig {
   positionSizePct?: number;
 }
 
-/** Execution-timeframe momentum / volatility confirmation gate. */
+/**
+ * Execution-timeframe confirmation.
+ *
+ * Hard gates (rejecting the trade outright):
+ *   - ATR14 volatility must be inside the 0.15–6% band.
+ *
+ * Confidence scoring (additive, never veto):
+ *   - EMA20/50/200 trend alignment          → +10 pts (strong alignment)  or +5 (partial)
+ *   - RSI14 in momentum band (not extreme)  → +6 pts
+ *   - MACD histogram confirms & strengthens → +6 pts
+ *   - Volume ≥ 1.1× 20-bar average          → +5 pts
+ *
+ * A confirmed structural trendline break is already a high-quality signal;
+ * momentum indicators sharpen confidence rather than gate entry.
+ */
 export interface TbConfirmation {
   ok: boolean;
   reasons: string[];
-  score: number;
+  score: number;      // 0–4 momentum checks
+  bonus: number;      // raw confidence bonus from indicators
   indicators: Record<string, number>;
   reject?: string;
 }
@@ -218,25 +233,52 @@ export function confirmExecution(bars: Bar[], side: "long" | "short"): TbConfirm
   const volRatio = volAvg > 0 ? vol / volAvg : 0;
   const indicators = { ema20: e20, ema50: e50, ema200: e200, atrPct, rsi: rsiVal, macdHist: h0, volRatio };
 
-  if (bars.length < 210 || !Number.isFinite(e200) || !Number.isFinite(atrPct)) {
-    return { ok: false, reasons: [], score: 0, indicators, reject: "insufficient execution history for EMA/ATR confirmation" };
+  // ── Hard gate: ATR volatility only ──────────────────────────────────────────
+  if (!Number.isFinite(atrPct)) {
+    return { ok: false, reasons: [], score: 0, bonus: 0, indicators, reject: "insufficient bars for ATR14" };
   }
-  const trendAligned = side === "long"
-    ? e20 > e50 && e50 > e200 && price > e20
-    : e20 < e50 && e50 < e200 && price < e20;
-  if (!trendAligned) return { ok: false, reasons: [], score: 0, indicators, reject: "EMA20/50/200 trend alignment failed" };
-  if (!(atrPct >= 0.15 && atrPct <= 6)) return { ok: false, reasons: [], score: 0, indicators, reject: `ATR14 volatility ${atrPct.toFixed(2)}% outside 0.15–6% gate` };
+  if (!(atrPct >= 0.15 && atrPct <= 6)) {
+    return { ok: false, reasons: [], score: 0, bonus: 0, indicators, reject: `ATR14 volatility ${atrPct.toFixed(2)}% outside 0.15–6% gate` };
+  }
 
-  const reasons = [`EMA20/50/200 aligned ${side === "long" ? "bullish" : "bearish"}`, `ATR14 ${atrPct.toFixed(2)}% inside volatility gate`];
+  // ── Confidence scoring ───────────────────────────────────────────────────────
+  const reasons: string[] = [`ATR14 ${atrPct.toFixed(2)}% inside volatility gate`];
   let score = 0;
-  const rsiOk = side === "long" ? rsiVal >= 50 && rsiVal <= 74 : rsiVal >= 26 && rsiVal <= 50;
-  if (rsiOk) { score++; reasons.push(`RSI14 ${rsiVal.toFixed(1)} in momentum band`); }
+  let bonus = 0;
+
+  // EMA alignment — full or partial credit
+  if (Number.isFinite(e200)) {
+    const fullAlign = side === "long"
+      ? e20 > e50 && e50 > e200 && price > e20
+      : e20 < e50 && e50 < e200 && price < e20;
+    const partialAlign = side === "long"
+      ? (e20 > e50 || price > e50)
+      : (e20 < e50 || price < e50);
+    if (fullAlign) {
+      bonus += 10;
+      reasons.push(`EMA20/50/200 fully aligned ${side === "long" ? "bullish" : "bearish"}`);
+    } else if (partialAlign) {
+      bonus += 5;
+      reasons.push(`EMA partial alignment (${side === "long" ? "bullish" : "bearish"} lean)`);
+    } else {
+      reasons.push("EMA alignment absent (structural break sufficient)");
+    }
+  }
+
+  // RSI momentum
+  const rsiOk = side === "long" ? rsiVal >= 45 && rsiVal <= 76 : rsiVal >= 24 && rsiVal <= 55;
+  if (rsiOk) { score++; bonus += 6; reasons.push(`RSI14 ${rsiVal.toFixed(1)} in momentum band`); }
+  else if (Number.isFinite(rsiVal)) reasons.push(`RSI14 ${rsiVal.toFixed(1)} outside ideal band (not blocking)`);
+
+  // MACD histogram
   const macdOk = Number.isFinite(h1) && (side === "long" ? h0 > 0 && h0 > h1 : h0 < 0 && h0 < h1);
-  if (macdOk) { score++; reasons.push("MACD histogram confirms and is strengthening"); }
+  if (macdOk) { score++; bonus += 6; reasons.push("MACD histogram confirms and is strengthening"); }
+
+  // Volume
   const volOk = volRatio >= 1.1;
-  if (volOk) { score++; reasons.push(`Volume ${volRatio.toFixed(2)}x the prior 20-bar average`); }
-  if (score < 2) return { ok: false, reasons, score, indicators, reject: `only ${score}/3 momentum confirmations (RSI/MACD/volume)` };
-  return { ok: true, reasons, score, indicators };
+  if (volOk) { score++; bonus += 5; reasons.push(`Volume ${volRatio.toFixed(2)}x the prior 20-bar average`); }
+
+  return { ok: true, reasons, score, bonus, indicators };
 }
 
 export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbConfig): TbSignal {
@@ -245,7 +287,7 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
   const execBars = exec ? series[exec.timeframe] : undefined;
   const price = execBars?.at(-1)?.c ?? 0;
   const base: TbSignal = { coin, side: null, confidence: 0, reasons: [], price, indicators: {}, levels };
-  if (!exec || !execBars) return { ...base, reasons: ["Waiting for Daily → 4H → 1H trendline history"] };
+  if (!exec || !execBars) return { ...base, reasons: ["Waiting for trendline history"] };
   const indicators: Record<string, number> = {
     execUpLine: exec.up.value ?? NaN,
     execDownLine: exec.down.value ?? NaN,
@@ -256,8 +298,6 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
   let actionLine: number | undefined;
   let safety: number | undefined;
   const reasons: string[] = [];
-  // A fresh close ABOVE the falling (down) resistance line is a LONG break.
-  // A fresh close BELOW the rising (up) support line is a SHORT break.
   if (exec.down.freshBreak && exec.down.value != null) {
     side = "long";
     actionLine = exec.down.value;
@@ -280,7 +320,7 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
     if (structural) { agree++; reasons.push(`${lvl.timeframe} structure agrees with the ${side} break`); }
   }
   if (htf.length > 0 && agree === 0) {
-    return { ...base, indicators, reasons: ["Higher-timeframe (Daily/4H) structure does not agree with the break"] };
+    return { ...base, indicators, reasons: ["Higher-timeframe structure does not agree with the break"] };
   }
 
   const confirm = confirmExecution(execBars, side);
@@ -290,8 +330,15 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
 
   const touches = side === "long" ? exec.down.line?.touches ?? 0 : exec.up.line?.touches ?? 0;
   reasons.push(`Action line captured ${touches} touch points`);
-  const confidence = Math.min(95, 52 + Math.min(touches, 5) * 4 + agree * 8 + confirm.score * 5);
-  return { coin, side, confidence, reasons, price, timeframe: exec.timeframe, actionLine, safetyLine: safety, indicators: { ...indicators, agree, touches, confirmations: confirm.score }, levels };
+
+  // Base confidence: 52 pts structural break + touches + HTF agreement + indicator bonus
+  const confidence = Math.min(95, 52 + Math.min(touches, 5) * 4 + agree * 8 + confirm.bonus);
+  return {
+    coin, side, confidence, reasons, price,
+    timeframe: exec.timeframe, actionLine, safetyLine: safety,
+    indicators: { ...indicators, agree, touches, confirmations: confirm.score },
+    levels,
+  };
 }
 
 
