@@ -9,7 +9,7 @@ import {
 } from "./strategies/trendlineBreak";
 import {
   INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS, evaluateIntradayPullback,
-  riskSizedQuantity, targetFromR,
+  riskSizedQuantity, targetFromR, intradayRTrail,
 } from "./strategies/intradayMomentumPullback";
 
 export interface Settings {
@@ -182,21 +182,30 @@ export class PaperEngine {
 
   private rTrail(p: OpenPosition, mark: number) {
     const initialStop = p.initial_stop ?? p.stop_loss;
-    const r = Math.abs(p.entry_price - initialStop);
-    if (!(r > 0)) return;
     const previousBest = p.trail_high ?? p.entry_price;
     const best = p.side === "long" ? Math.max(previousBest, mark) : Math.min(previousBest, mark);
     p.trail_high = best;
-    const favorableR = p.side === "long" ? (best - p.entry_price) / r : (p.entry_price - best) / r;
-    let candidate = p.stop_loss;
-    if (favorableR >= 1) {
-      const breakEven = p.side === "long" ? p.entry_price + r * 0.05 : p.entry_price - r * 0.05;
-      candidate = p.side === "long" ? Math.max(candidate, breakEven) : Math.min(candidate, breakEven);
-    }
-    if (favorableR >= 1.5) {
-      const trailed = p.side === "long" ? best - r * 0.75 : best + r * 0.75;
-      candidate = p.side === "long" ? Math.max(candidate, trailed) : Math.min(candidate, trailed);
-    }
+
+    // Intraday Momentum Pullback uses its own R-based trail that reflects
+    // the variable stop distance (structure + ATR) rather than fixed thresholds.
+    const candidate = this.isIntraday()
+      ? intradayRTrail(p.side, p.entry_price, initialStop, best, p.stop_loss)
+      : (() => {
+          const r = Math.abs(p.entry_price - initialStop);
+          if (!(r > 0)) return p.stop_loss;
+          const favorableR = p.side === "long" ? (best - p.entry_price) / r : (p.entry_price - best) / r;
+          let c = p.stop_loss;
+          if (favorableR >= 1) {
+            const be = p.side === "long" ? p.entry_price + r * 0.05 : p.entry_price - r * 0.05;
+            c = p.side === "long" ? Math.max(c, be) : Math.min(c, be);
+          }
+          if (favorableR >= 1.5) {
+            const trailed = p.side === "long" ? best - r * 0.75 : best + r * 0.75;
+            c = p.side === "long" ? Math.max(c, trailed) : Math.min(c, trailed);
+          }
+          return c;
+        })();
+
     if (candidate !== p.stop_loss || best !== previousBest) {
       p.stop_loss = candidate;
       this.persistPositionUpdate(p);

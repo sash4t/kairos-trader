@@ -65,7 +65,7 @@ export function TrendlineBreakPanel() {
         <label className="block"><div className="mb-1.5 text-xs uppercase tracking-widest text-muted-foreground">Position-size cap</div><input type="number" step="0.5" value={positionSize} onChange={e => setPositionSize(e.target.value)} className="w-full rounded-md border border-panel-border bg-background px-3 py-2 mono text-sm" /><div className="mt-1 text-[11px] text-muted-foreground">% equity allocated before leverage</div></label>
         <label className="block"><div className="mb-1.5 text-xs uppercase tracking-widest text-muted-foreground">Line refresh</div><input type="number" value={refresh} onChange={e => setRefresh(e.target.value)} className="w-full rounded-md border border-panel-border bg-background px-3 py-2 mono text-sm" /><div className="mt-1 text-[11px] text-muted-foreground">minutes</div></label>
       </div>
-      <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">BTC emergency default: 1.5% adverse move within a rolling 4-hour window. BTC down closes longs; BTC up closes shorts. Trendline trades use each asset's maximum Hyperliquid leverage.</div>
+      <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">BTC emergency default: 1.5% adverse move within a rolling 4-hour window. BTC down closes longs; BTC up closes shorts. Effective leverage per trade is <code>min(your Max Leverage setting, asset max leverage)</code> — the user cap always applies.</div>
       <button onClick={save} disabled={saving} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50">{saving ? "Saving…" : "Save Trendline settings"}</button>
     </div>
   );
