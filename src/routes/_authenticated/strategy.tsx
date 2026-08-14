@@ -82,20 +82,20 @@ function Strategy() {
             active={key === TRENDLINE_STRATEGY_KEY}
             title="Trendline Price Action"
             description="Daily → 4H → 1H directional structure. Safety-line stop with ~0.40% equity risk and 2.2R target."
-            onClick={() => set({ strategy_key: TRENDLINE_STRATEGY_KEY })}
+            onClick={() => set(strategySelectionPatch(TRENDLINE_STRATEGY_KEY))}
           />
           <StrategyCard
             active={isTb}
             title="Trendline Break"
             description="Multi-timeframe action-line breakout. Opposing safety-line stop; ATR volatility gate; RSI/MACD/volume improve confidence rather than blocking entry."
-            onClick={() => set({ strategy_key: TRENDLINE_BREAK_KEY })}
+            onClick={() => set(strategySelectionPatch(TRENDLINE_BREAK_KEY))}
           />
           <StrategyCard
             active={isIntraday}
             badge="High frequency"
             title="Intraday Momentum Pullback"
             description="4H regime → 1H trend → 15m entry. Enters EMA20 pullback rejections inside an established trend. Structural + ATR stop sized to ~0.40% equity risk."
-            onClick={() => set({ strategy_key: INTRADAY_PULLBACK_KEY, min_confidence: 65, trailing_enabled: true })}
+            onClick={() => set(strategySelectionPatch(INTRADAY_PULLBACK_KEY))}
           />
         </div>
       </section>
