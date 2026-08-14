@@ -67,3 +67,9 @@ export function exitReasonFor(side: ScalpSide, mark: number, stopLoss: number, t
   else { if (mark >= stopLoss) return stopLabel; if (mark <= takeProfit) return "take_profit"; }
   return null;
 }
+
+/** Shared strategy-selection patch used by both the Settings and Strategy screens. */
+export function strategySelectionPatch(key: StrategyKey): Record<string, unknown> {
+  if (key === INTRADAY_PULLBACK_KEY) return { strategy_key: key, min_confidence: 65, trailing_enabled: true };
+  return { strategy_key: key };
+}

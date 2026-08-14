@@ -10,13 +10,13 @@ import { AgentPanel } from "@/components/AgentPanel";
 import { LiveTradingPanel } from "@/components/LiveTradingPanel";
 import { resetPaperAccount } from "@/lib/paper.functions";
 import { Loader2, RotateCcw } from "lucide-react";
-import { STRATEGY_OPTIONS, type StrategyKey } from "@/lib/scalp";
+import { STRATEGY_OPTIONS, strategySelectionPatch, type StrategyKey } from "@/lib/scalp";
 import { TrendlineBreakPanel } from "@/components/TrendlineBreakPanel";
 
 export const Route = createFileRoute("/_authenticated/settings")({ component: SettingsPage });
 
 function SettingsPage() {
-  const { userId, syncPositions } = useBot();
+  const { userId, syncPositions, saveSettings } = useBot();
   const [wallet, setWallet] = useState("");
   const [saving, setSaving] = useState(false);
   const [userState, setUserState] = useState<UserState | null>(null);
@@ -56,10 +56,8 @@ function SettingsPage() {
   const saveStrategy = async (next: StrategyKey) => {
     if (!userId) return;
     setStrategyKey(next); setSavingStrategy(true);
-    const db = supabase as any;
-    const { error } = await db.from("bot_settings").update({ strategy_key: next, updated_at: new Date().toISOString() }).eq("user_id", userId);
+    await saveSettings(strategySelectionPatch(next) as any);
     setSavingStrategy(false);
-    if (error) { toast.error(error.message); return; }
     await queryClient.invalidateQueries({ queryKey: ["bot-settings-strategy", userId] });
     toast.success(`Strategy changed to ${STRATEGY_OPTIONS.find(s => s.key === next)?.name}.`);
   };
