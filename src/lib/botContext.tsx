@@ -78,10 +78,12 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
   const saveSettings = async (patch: Partial<Settings>) => {
     if (!userId || !settings) return;
-    const next = { ...settings, ...patch };
-    setSettings(next);
     const { error } = await supabase.from("bot_settings").update(patch).eq("user_id", userId);
-    if (error) toast.error(error.message);
+    if (error) {
+      toast.error(error.message);
+      throw error;
+    }
+    setSettings(prev => prev ? { ...prev, ...patch } : prev);
   };
 
   const killSwitch = async () => {
