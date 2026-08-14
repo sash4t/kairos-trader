@@ -56,10 +56,8 @@ function SettingsPage() {
   const saveStrategy = async (next: StrategyKey) => {
     if (!userId) return;
     setStrategyKey(next); setSavingStrategy(true);
-    const db = supabase as any;
-    const { error } = await db.from("bot_settings").update({ strategy_key: next, updated_at: new Date().toISOString() }).eq("user_id", userId);
+    await saveSettings(strategySelectionPatch(next) as any);
     setSavingStrategy(false);
-    if (error) { toast.error(error.message); return; }
     await queryClient.invalidateQueries({ queryKey: ["bot-settings-strategy", userId] });
     toast.success(`Strategy changed to ${STRATEGY_OPTIONS.find(s => s.key === next)?.name}.`);
   };
