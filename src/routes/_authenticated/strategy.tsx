@@ -4,6 +4,7 @@ import { useBot } from "@/lib/botContext";
 import { MODE_MIN_CONFIDENCE, TRENDLINE_STRATEGY_KEY } from "@/lib/strategy";
 import { TRENDLINE_BREAK_KEY, TB_DEFAULTS, TB_TIMEFRAMES, parseTimeframes } from "@/lib/strategies/trendlineBreak";
 import { INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS } from "@/lib/strategies/intradayMomentumPullback";
+import { strategySelectionPatch } from "@/lib/scalp";
 
 export const Route = createFileRoute("/_authenticated/strategy")({ component: Strategy });
 
