@@ -1,6 +1,6 @@
 import { evaluateMultiTimeframeSignal, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
-import { TRENDLINE_BREAK_KEY, TB_DEFAULTS } from "./strategies/trendlineBreak";
-import { INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS } from "./strategies/intradayMomentumPullback";
+import { TRENDLINE_BREAK_KEY } from "./strategies/trendlineBreak";
+import { INTRADAY_PULLBACK_KEY } from "./strategies/intradayMomentumPullback";
 
 export type ScalpSide = "long" | "short";
 export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDLINE_BREAK_KEY | typeof INTRADAY_PULLBACK_KEY;
@@ -68,53 +68,8 @@ export function exitReasonFor(side: ScalpSide, mark: number, stopLoss: number, t
   return null;
 }
 
-/**
- * Canonical optimal preset for each strategy.
- * Selecting a strategy always reapplies its preset; edits made afterwards are
- * persisted and used until the user selects a strategy again.
- */
+/** Shared strategy-selection patch used by both the Settings and Strategy screens. */
 export function strategySelectionPatch(key: StrategyKey): Record<string, unknown> {
-  const sharedRisk = {
-    max_leverage: 5,
-    max_exposure_pct: 30,
-    max_positions: 5,
-    daily_loss_pct: 3,
-    trailing_enabled: true,
-  };
-
-  if (key === TRENDLINE_BREAK_KEY) {
-    return {
-      ...sharedRisk,
-      strategy_key: key,
-      min_confidence: 65,
-      tb_timeframes: TB_DEFAULTS.timeframes.join(","),
-      tb_pivot_strength: TB_DEFAULTS.pivotStrength,
-      tb_risk_pct: TB_DEFAULTS.riskPct,
-      tb_position_size_pct: TB_DEFAULTS.positionSizePct,
-      tb_refresh_min: TB_DEFAULTS.refreshMin,
-    };
-  }
-
-  if (key === INTRADAY_PULLBACK_KEY) {
-    return {
-      ...sharedRisk,
-      strategy_key: key,
-      min_confidence: 65,
-      position_size_pct: INTRADAY_DEFAULTS.positionSizePct,
-      sl_type: "atr",
-      sl_atr_mult: INTRADAY_DEFAULTS.atrStopBuffer,
-      tp_rr: INTRADAY_DEFAULTS.takeProfitR,
-    };
-  }
-
-  return {
-    ...sharedRisk,
-    strategy_key: TRENDLINE_STRATEGY_KEY,
-    strategy_mode: "balanced",
-    min_confidence: 70,
-    position_size_pct: 6,
-    sl_type: "atr",
-    sl_atr_mult: 1.25,
-    tp_rr: 2.2,
-  };
+  if (key === INTRADAY_PULLBACK_KEY) return { strategy_key: key, min_confidence: 65, trailing_enabled: true };
+  return { strategy_key: key };
 }
