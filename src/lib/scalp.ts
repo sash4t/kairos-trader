@@ -1,9 +1,10 @@
 import { evaluateMultiTimeframeSignal, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
 import { TRENDLINE_BREAK_KEY } from "./strategies/trendlineBreak";
 import { INTRADAY_PULLBACK_KEY } from "./strategies/intradayMomentumPullback";
+import { ORIGINAL_TREND_PRICE_ACTION_KEY } from "./strategies/originalTrendPriceAction";
 
 export type ScalpSide = "long" | "short";
-export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDLINE_BREAK_KEY | typeof INTRADAY_PULLBACK_KEY;
+export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDLINE_BREAK_KEY | typeof INTRADAY_PULLBACK_KEY | typeof ORIGINAL_TREND_PRICE_ACTION_KEY;
 
 export interface ScalpSignal {
   coin: string; side: ScalpSide | null; family: string; confidence: number; reasons: string[]; price: number; atrPct: number; indicators: Record<string, number>;
@@ -14,6 +15,7 @@ export const STRATEGY_OPTIONS = [
   { key: TRENDLINE_STRATEGY_KEY, name: "Trendline Price Action", description: "Top-down trend lines: Daily → 4H → 1H. Daily sets the major bias, 4H confirms it, and 1H provides the action-line break." },
   { key: TRENDLINE_BREAK_KEY, name: "Trendline Break", description: "Chained multi-timeframe trendlines. Close through an upward line goes short; close through a downward line goes long; the opposing line is the structural safety stop." },
   { key: INTRADAY_PULLBACK_KEY, name: "Intraday Momentum Pullback", description: "Paper-mode 4H → 1H → 15m momentum pullbacks with EMA20 rejection entries, structure + ATR stops, risk-based sizing and R-based profit protection." },
+  { key: ORIGINAL_TREND_PRICE_ACTION_KEY, name: "Original Trend Price Action", description: "1H trend-line execution with EMA20/50, RSI, MACD, volume and ATR confidence scoring, gated by aligned Daily and 4H direction." },
 ] as const;
 
 export function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
@@ -71,5 +73,6 @@ export function exitReasonFor(side: ScalpSide, mark: number, stopLoss: number, t
 /** Shared strategy-selection patch used by both the Settings and Strategy screens. */
 export function strategySelectionPatch(key: StrategyKey): Record<string, unknown> {
   if (key === INTRADAY_PULLBACK_KEY) return { strategy_key: key, min_confidence: 65, trailing_enabled: true };
+  if (key === ORIGINAL_TREND_PRICE_ACTION_KEY) return { strategy_key: key, min_confidence: 65, trailing_enabled: true };
   return { strategy_key: key };
 }

@@ -11,6 +11,9 @@ import {
   INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS, evaluateIntradayPullback,
   riskSizedQuantity, targetFromR, intradayRTrail,
 } from "./strategies/intradayMomentumPullback";
+import {
+  ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS, evaluateOriginalTrendPriceAction,
+} from "./strategies/originalTrendPriceAction";
 
 export interface Settings {
   user_id: string;
@@ -107,6 +110,7 @@ export class PaperEngine {
   private isLive() { return this.settings.mode === "live"; }
   private isTb() { return this.settings.strategy_key === TRENDLINE_BREAK_KEY; }
   private isIntraday() { return this.settings.strategy_key === INTRADAY_PULLBACK_KEY; }
+  private isOriginalTpa() { return this.settings.strategy_key === ORIGINAL_TREND_PRICE_ACTION_KEY; }
   private mid(coin: string): number | null { const v = this.mids[coin]; return v ? +v : null; }
 
   async start() {
@@ -186,8 +190,6 @@ export class PaperEngine {
     const best = p.side === "long" ? Math.max(previousBest, mark) : Math.min(previousBest, mark);
     p.trail_high = best;
 
-    // Intraday Momentum Pullback uses its own R-based trail that reflects
-    // the variable stop distance (structure + ATR) rather than fixed thresholds.
     const candidate = this.isIntraday()
       ? intradayRTrail(p.side, p.entry_price, initialStop, best, p.stop_loss)
       : (() => {
@@ -249,6 +251,7 @@ export class PaperEngine {
     try {
       if (this.isIntraday()) await this.runIntradayCycle();
       else if (this.isTb()) await this.runTrendlineBreakCycle();
+      else if (this.isOriginalTpa()) await this.runOriginalTrendPriceActionCycle();
       else await this.runTrendlinePriceActionCycle();
     } finally { this.evaluating = false; }
   }
@@ -297,6 +300,23 @@ export class PaperEngine {
     }
   }
 
+  private async runOriginalTrendPriceActionCycle() {
+    const held = new Set(this.positions.map((p) => p.coin));
+    for (const { meta } of this.candidates()) {
+      if (this.positions.length >= this.settings.max_positions) break;
+      if (held.has(meta.name)) continue;
+      const [daily, four, hourly] = await Promise.all([
+        this.bars(meta.name, "1d", 240, DAY), this.bars(meta.name, "4h", 240, FOUR_HOUR), this.bars(meta.name, "1h", 230, HOUR),
+      ]);
+      if (!daily || !four || !hourly || daily.length < 80 || four.length < 80 || hourly.length < 80) continue;
+      const sig = evaluateOriginalTrendPriceAction(meta.name, daily, four, hourly);
+      const threshold = Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, this.settings.min_confidence);
+      if (!sig.side || sig.confidence < threshold || shockHitsSide(this.shockDir, sig.side)) continue;
+      await this.openRiskManagedSignal(sig, meta, ORIGINAL_TPA_DEFAULTS.riskPct, ORIGINAL_TPA_DEFAULTS.positionSizePct, ORIGINAL_TPA_DEFAULTS.takeProfitR);
+      held.add(meta.name);
+    }
+  }
+
   private async runTrendlinePriceActionCycle() {
     const held = new Set(this.positions.map((p) => p.coin));
     for (const { meta } of this.candidates()) {
@@ -309,12 +329,12 @@ export class PaperEngine {
       const sig = evaluateMultiTimeframeSignal(meta.name, daily, four, hourly);
       const threshold = Math.max(this.settings.min_confidence, Math.min(70, MODE_MIN_CONFIDENCE[this.settings.strategy_mode]));
       if (!sig.side || sig.confidence < threshold || shockHitsSide(this.shockDir, sig.side)) continue;
-      await this.openRiskManagedSignal(sig, meta, 0.4, 6);
+      await this.openRiskManagedSignal(sig, meta, 0.4, 6, 2.2);
       held.add(meta.name);
     }
   }
 
-  private async openRiskManagedSignal(sig: Signal, meta: AssetMeta, riskPct: number, capPct: number) {
+  private async openRiskManagedSignal(sig: Signal, meta: AssetMeta, riskPct: number, capPct: number, takeProfitR: number) {
     const side = sig.side!;
     const price = sig.price;
     const fallback = Math.max(sig.atrValue * 1.25, price * 0.0035);
@@ -327,7 +347,7 @@ export class PaperEngine {
     const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / price;
     const size = Math.min(riskQty, capQty, roomQty);
     if (!(size > 0)) return;
-    const tp = targetFromR(side, price, stop, 2.2);
+    const tp = targetFromR(side, price, stop, takeProfitR);
     await this.openPaper(sig.coin, side, size, leverage, price, stop, tp, sig.confidence, sig.reasons, sig.indicators, riskPct);
   }
 
