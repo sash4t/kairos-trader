@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { PaperEngine, type Settings } from "./paperEngine";
+import { PaperEngine, type Settings } from "./paperEngineOptimized";
 import { subscribeAllMids } from "./hyperliquid";
 import { toast } from "sonner";
 import { flattenLive } from "./live.functions";
@@ -9,7 +9,7 @@ interface BotCtx {
   userId: string | null;
   settings: Settings | null;
   mids: Record<string, string>;
-  positionsVersion: number;      // bumped when engine mutates
+  positionsVersion: number;
   saveSettings: (patch: Partial<Settings>) => Promise<void>;
   killSwitch: () => Promise<void>;
   syncPositions: () => Promise<void>;
@@ -25,12 +25,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [version, setVersion] = useState(0);
   const engineRef = useRef<PaperEngine | null>(null);
 
-  // Get user
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id ?? null));
   }, []);
 
-  // Live mark prices — independent of the engine, which stays idle in live mode.
   useEffect(() => {
     let pending: Record<string, string> = {};
     const unsub = subscribeAllMids(m => { pending = { ...pending, ...m }; });
@@ -40,28 +38,23 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     return () => { unsub(); clearInterval(t); };
   }, []);
 
-
-  // Load + poll settings (the server agent mutates them too)
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
     const load = async () => {
       let { data } = await supabase.from("bot_settings").select("*").eq("user_id", userId).maybeSingle();
       if (!data) {
-        // No settings row yet (new or reset account) — create defaults so the UI can render.
         const ins = await supabase.from("bot_settings").insert({ user_id: userId }).select().maybeSingle();
         if (ins.error) { if (!cancelled) toast.error(ins.error.message); return; }
         data = ins.data;
       }
       if (!cancelled && data) setSettings(prev => (prev && JSON.stringify(prev) === JSON.stringify(data) ? prev : (data as any)));
     };
-
     load();
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
   }, [userId]);
 
-  // Start/stop engine
   useEffect(() => {
     if (!userId || !settings) return;
     if (!engineRef.current) {
@@ -76,9 +69,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     } else {
       engineRef.current.updateSettings(settings);
     }
-    // Mark prices are published by the dedicated allMids subscription above.
-
-    return () => { /* keep engine alive across renders */ };
+    return () => {};
   }, [userId, settings]);
 
   useEffect(() => () => {
@@ -95,7 +86,6 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
   const killSwitch = async () => {
     if (settings?.mode === "live") {
-      // Live positions exist on the exchange — only real reduce-only orders can flatten them.
       const res = await flattenLive();
       await saveSettings({ bot_enabled: false, kill_switch_engaged: true });
       if (res.errors.length) toast.error(`Closed ${res.closed} live position(s); errors: ${res.errors.join("; ")}`);

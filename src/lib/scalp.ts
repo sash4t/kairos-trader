@@ -1,8 +1,9 @@
 import { evaluateMultiTimeframeSignal, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
 import { TRENDLINE_BREAK_KEY } from "./strategies/trendlineBreak";
+import { INTRADAY_PULLBACK_KEY } from "./strategies/intradayMomentumPullback";
 
 export type ScalpSide = "long" | "short";
-export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDLINE_BREAK_KEY;
+export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDLINE_BREAK_KEY | typeof INTRADAY_PULLBACK_KEY;
 
 export interface ScalpSignal {
   coin: string; side: ScalpSide | null; family: string; confidence: number; reasons: string[]; price: number; atrPct: number; indicators: Record<string, number>;
@@ -11,7 +12,8 @@ export interface ScalpSignal {
 
 export const STRATEGY_OPTIONS = [
   { key: TRENDLINE_STRATEGY_KEY, name: "Trendline Price Action", description: "Top-down trend lines: Daily → 4H → 1H. Daily sets the major bias, 4H confirms it, and 1H provides the action-line break." },
-  { key: TRENDLINE_BREAK_KEY, name: "Trendline Break", description: "Chained multi-timeframe trendlines (1M → 1H). Close through an upward line goes short, close through a downward line goes long; the opposing line is the trailing safety-line stop." },
+  { key: TRENDLINE_BREAK_KEY, name: "Trendline Break", description: "Chained multi-timeframe trendlines. Close through an upward line goes short; close through a downward line goes long; the opposing line is the structural safety stop." },
+  { key: INTRADAY_PULLBACK_KEY, name: "Intraday Momentum Pullback", description: "Paper-mode 4H → 1H → 15m momentum pullbacks with EMA20 rejection entries, structure + ATR stops, risk-based sizing and R-based profit protection." },
 ] as const;
 
 export function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
@@ -32,7 +34,6 @@ function toSignal(coin: string, sig: ReturnType<typeof evaluateMultiTimeframeSig
   return { coin, side: sig.side, family: TRENDLINE_STRATEGY_KEY, confidence: sig.confidence, reasons: sig.reasons, price: sig.price, atrPct: sig.indicators["atrPct"] ?? 0, indicators: sig.indicators, actionLine: sig.actionLine, safetyLine: sig.safetyLine };
 }
 
-/** Preferred entry point: real Daily / 4H / 1H candle series. */
 export function evaluateScalpMulti(
   coin: string,
   series: { daily: Bar[]; fourHour: Bar[]; hourly: Bar[] },
@@ -40,7 +41,6 @@ export function evaluateScalpMulti(
   return toSignal(coin, evaluateMultiTimeframeSignal(coin, series.daily, series.fourHour, series.hourly));
 }
 
-/** Convenience wrapper when only a 1H series is available (aggregates higher timeframes). */
 export function evaluateScalp(coin: string, bars: Bar[]): ScalpSignal {
   return evaluateScalpMulti(coin, { daily: aggregateBars(bars, DAY_MS), fourHour: aggregateBars(bars, FOUR_HOUR_MS), hourly: bars });
 }
