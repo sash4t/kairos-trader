@@ -47,6 +47,7 @@ export interface Settings {
   btc_shock_pct?: number;
   btc_shock_window_min?: number;
   strategy_key?: string;
+  trendline_risk_pct?: number;
   tb_timeframes?: string;
   tb_pivot_strength?: number;
   tb_risk_pct?: number;
@@ -302,6 +303,7 @@ export class PaperEngine {
 
   private async runOriginalTrendPriceActionCycle() {
     const held = new Set(this.positions.map((p) => p.coin));
+    const riskPct = Math.min(5, Math.max(0.05, Number(this.settings.trendline_risk_pct ?? ORIGINAL_TPA_DEFAULTS.riskPct)));
     for (const { meta } of this.candidates()) {
       if (this.positions.length >= this.settings.max_positions) break;
       if (held.has(meta.name)) continue;
@@ -312,7 +314,7 @@ export class PaperEngine {
       const sig = evaluateOriginalTrendPriceAction(meta.name, daily, four, hourly);
       const threshold = Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, this.settings.min_confidence);
       if (!sig.side || sig.confidence < threshold || shockHitsSide(this.shockDir, sig.side)) continue;
-      await this.openRiskManagedSignal(sig, meta, ORIGINAL_TPA_DEFAULTS.riskPct, ORIGINAL_TPA_DEFAULTS.positionSizePct, ORIGINAL_TPA_DEFAULTS.takeProfitR);
+      await this.openRiskManagedSignal(sig, meta, riskPct, ORIGINAL_TPA_DEFAULTS.positionSizePct, ORIGINAL_TPA_DEFAULTS.takeProfitR);
       held.add(meta.name);
     }
   }
