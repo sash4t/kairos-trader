@@ -55,11 +55,18 @@ function SettingsPage() {
 
   const saveStrategy = async (next: StrategyKey) => {
     if (!userId) return;
-    setStrategyKey(next); setSavingStrategy(true);
-    await saveSettings(strategySelectionPatch(next) as any);
-    setSavingStrategy(false);
-    await queryClient.invalidateQueries({ queryKey: ["bot-settings-strategy", userId] });
-    toast.success(`Strategy changed to ${STRATEGY_OPTIONS.find(s => s.key === next)?.name}.`);
+    const previous = strategyKey;
+    setSavingStrategy(true);
+    try {
+      await saveSettings(strategySelectionPatch(next) as any);
+      setStrategyKey(next);
+      await queryClient.invalidateQueries({ queryKey: ["bot-settings-strategy", userId] });
+      toast.success(`Strategy changed to ${STRATEGY_OPTIONS.find(s => s.key === next)?.name}.`);
+    } catch {
+      setStrategyKey(previous);
+    } finally {
+      setSavingStrategy(false);
+    }
   };
 
   const [walletTouched, setWalletTouched] = useState(false);
