@@ -1,0 +1,1 @@
+ALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS tb_position_size_pct numeric NOT NULL DEFAULT 6;
