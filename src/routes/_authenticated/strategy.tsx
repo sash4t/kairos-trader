@@ -113,13 +113,22 @@ function Strategy() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Execution</span><div className="mt-1 mono text-base">1H trend line</div></div>
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Volatility gate</span><div className="mt-1 mono text-base">ATR14 {ORIGINAL_TPA_DEFAULTS.atrMinPct}–{ORIGINAL_TPA_DEFAULTS.atrMaxPct}%</div></div>
-            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Risk / trade</span><div className="mt-1 mono text-base">{ORIGINAL_TPA_DEFAULTS.riskPct}%</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Risk / trade</span><div className="mt-1 mono text-base">{Number(s.trendline_risk_pct ?? ORIGINAL_TPA_DEFAULTS.riskPct)}%</div></div>
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Target</span><div className="mt-1 mono text-base">{ORIGINAL_TPA_DEFAULTS.takeProfitR}R</div></div>
+          </div>
+          <div className="max-w-sm">
+            <NumField
+              label="Risk per trade"
+              value={Number(s.trendline_risk_pct ?? ORIGINAL_TPA_DEFAULTS.riskPct)}
+              onChange={v => set({ trendline_risk_pct: Math.min(5, Math.max(0.05, v)) })}
+              step={0.05}
+              suffix="% equity"
+            />
           </div>
           <p className="text-xs text-muted-foreground">
             Daily and 4H must agree first. A fresh 1H trend-line break establishes direction. EMA20/50,
             RSI, MACD histogram, relative volume and trend-line touch quality then raise or lower the confidence score.
-            ATR is the hard volatility filter.
+            ATR is the hard volatility filter. Risk per trade is user-configurable from 0.05% to 5% of equity.
           </p>
         </section>
       )}
