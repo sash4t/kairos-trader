@@ -48,6 +48,7 @@ export interface Settings {
   tb_pivot_strength?: number;
   tb_risk_pct?: number;
   tb_refresh_min?: number;
+  tb_position_size_pct?: number;
 }
 
 export interface OpenPosition {
@@ -63,6 +64,7 @@ export interface OpenPosition {
   trail_high: number | null;
   confidence: number;
   safety_line?: number | null;
+  initial_stop?: number | null;
 }
 
 type Log = (level: "info" | "warn" | "error" | "trade", msg: string, meta?: any) => void;
