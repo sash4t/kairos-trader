@@ -1,8 +1,3 @@
-/**
- * Trendline Price Action / Trendline Break strategy.
- * Pure price action: chained trendlines, action-line breaks and opposing
- * safety-line trailing stops. No indicator is required for an entry.
- */
 import type { Bar } from "../strategy";
 import { ema, rsi, macd, atr, last } from "../indicators";
 
@@ -16,13 +11,12 @@ export const TB_DEFAULTS = {
   riskPct: 0.5,
   positionSizePct: 5,
   refreshMin: 15,
+  // Break candle plus the next two execution candles remain actionable.
+  breakWindowBars: 2,
 };
 
-/** Buffer beyond the structural safety line used for the initial stop. */
 export const TB_SAFETY_BUFFER_PCT = 0.15;
-/** Reject setups whose structural stop sits closer than this to entry. */
 export const TB_MIN_STOP_PCT = 0.2;
-
 
 export const TB_INTERVAL_MS: Record<TbTimeframe, number> = {
   "1w": 7 * 24 * 60 * 60 * 1000,
@@ -147,9 +141,9 @@ export function analyzeLine(bars: Bar[], kind: LineKind, pivotStrength: number, 
   for (let i = line.i2 + 1; i < bars.length; i++) {
     if (pierced(i)) { broken = true; brokenAt = bars[i].t; break; }
   }
-  const last = bars.length - 1;
-  const freshBreak = last > line.i2 && pierced(last) && (last - 1 <= line.i2 || !pierced(last - 1));
-  return { timeframe, kind, line, value: line.valueAt(last), broken, freshBreak, brokenAt, endTime: line.t2 };
+  const lastIdx = bars.length - 1;
+  const freshBreak = lastIdx > line.i2 && pierced(lastIdx) && (lastIdx - 1 <= line.i2 || !pierced(lastIdx - 1));
+  return { timeframe, kind, line, value: line.valueAt(lastIdx), broken, freshBreak, brokenAt, endTime: line.t2 };
 }
 
 export interface TbCascadeLevel { timeframe: TbTimeframe; up: TbLineState; down: TbLineState }
@@ -191,26 +185,11 @@ export interface TbConfig {
   positionSizePct?: number;
 }
 
-/**
- * Execution-timeframe confirmation.
- *
- * Hard gates (rejecting the trade outright):
- *   - ATR14 volatility must be inside the 0.15–6% band.
- *
- * Confidence scoring (additive, never veto):
- *   - EMA20/50/200 trend alignment          → +10 pts (strong alignment)  or +5 (partial)
- *   - RSI14 in momentum band (not extreme)  → +6 pts
- *   - MACD histogram confirms & strengthens → +6 pts
- *   - Volume ≥ 1.1× 20-bar average          → +5 pts
- *
- * A confirmed structural trendline break is already a high-quality signal;
- * momentum indicators sharpen confidence rather than gate entry.
- */
 export interface TbConfirmation {
   ok: boolean;
   reasons: string[];
-  score: number;      // 0–4 momentum checks
-  bonus: number;      // raw confidence bonus from indicators
+  score: number;
+  bonus: number;
   indicators: Record<string, number>;
   reject?: string;
 }
@@ -223,8 +202,7 @@ export function confirmExecution(bars: Bar[], side: "long" | "short"): TbConfirm
   const e200 = last(ema(closes, 200)) ?? NaN;
   const atrVal = last(atr(bars, 14)) ?? NaN;
   const atrPct = price > 0 ? (atrVal / price) * 100 : NaN;
-  const rsiSeries = rsi(closes, 14);
-  const rsiVal = last(rsiSeries) ?? NaN;
+  const rsiVal = last(rsi(closes, 14)) ?? NaN;
   const { hist } = macd(closes);
   const h0 = hist.at(-1) ?? NaN;
   const h1 = hist.at(-2) ?? NaN;
@@ -233,52 +211,54 @@ export function confirmExecution(bars: Bar[], side: "long" | "short"): TbConfirm
   const volRatio = volAvg > 0 ? vol / volAvg : 0;
   const indicators = { ema20: e20, ema50: e50, ema200: e200, atrPct, rsi: rsiVal, macdHist: h0, volRatio };
 
-  // ── Hard gate: ATR volatility only ──────────────────────────────────────────
-  if (!Number.isFinite(atrPct)) {
-    return { ok: false, reasons: [], score: 0, bonus: 0, indicators, reject: "insufficient bars for ATR14" };
-  }
+  if (!Number.isFinite(atrPct)) return { ok: false, reasons: [], score: 0, bonus: 0, indicators, reject: "insufficient bars for ATR14" };
   if (!(atrPct >= 0.15 && atrPct <= 6)) {
     return { ok: false, reasons: [], score: 0, bonus: 0, indicators, reject: `ATR14 volatility ${atrPct.toFixed(2)}% outside 0.15–6% gate` };
   }
 
-  // ── Confidence scoring ───────────────────────────────────────────────────────
   const reasons: string[] = [`ATR14 ${atrPct.toFixed(2)}% inside volatility gate`];
   let score = 0;
   let bonus = 0;
-
-  // EMA alignment — full or partial credit
   if (Number.isFinite(e200)) {
-    const fullAlign = side === "long"
-      ? e20 > e50 && e50 > e200 && price > e20
-      : e20 < e50 && e50 < e200 && price < e20;
-    const partialAlign = side === "long"
-      ? (e20 > e50 || price > e50)
-      : (e20 < e50 || price < e50);
-    if (fullAlign) {
-      bonus += 10;
-      reasons.push(`EMA20/50/200 fully aligned ${side === "long" ? "bullish" : "bearish"}`);
-    } else if (partialAlign) {
-      bonus += 5;
-      reasons.push(`EMA partial alignment (${side === "long" ? "bullish" : "bearish"} lean)`);
-    } else {
-      reasons.push("EMA alignment absent (structural break sufficient)");
-    }
+    const fullAlign = side === "long" ? e20 > e50 && e50 > e200 && price > e20 : e20 < e50 && e50 < e200 && price < e20;
+    const partialAlign = side === "long" ? (e20 > e50 || price > e50) : (e20 < e50 || price < e50);
+    if (fullAlign) { bonus += 10; reasons.push(`EMA20/50/200 fully aligned ${side === "long" ? "bullish" : "bearish"}`); }
+    else if (partialAlign) { bonus += 5; reasons.push(`EMA partial alignment (${side === "long" ? "bullish" : "bearish"} lean)`); }
+    else reasons.push("EMA alignment absent (structural break sufficient)");
   }
-
-  // RSI momentum
   const rsiOk = side === "long" ? rsiVal >= 45 && rsiVal <= 76 : rsiVal >= 24 && rsiVal <= 55;
   if (rsiOk) { score++; bonus += 6; reasons.push(`RSI14 ${rsiVal.toFixed(1)} in momentum band`); }
   else if (Number.isFinite(rsiVal)) reasons.push(`RSI14 ${rsiVal.toFixed(1)} outside ideal band (not blocking)`);
-
-  // MACD histogram
   const macdOk = Number.isFinite(h1) && (side === "long" ? h0 > 0 && h0 > h1 : h0 < 0 && h0 < h1);
   if (macdOk) { score++; bonus += 6; reasons.push("MACD histogram confirms and is strengthening"); }
-
-  // Volume
-  const volOk = volRatio >= 1.1;
-  if (volOk) { score++; bonus += 5; reasons.push(`Volume ${volRatio.toFixed(2)}x the prior 20-bar average`); }
-
+  if (volRatio >= 1.1) { score++; bonus += 5; reasons.push(`Volume ${volRatio.toFixed(2)}x the prior 20-bar average`); }
   return { ok: true, reasons, score, bonus, indicators };
+}
+
+function breakAgeBars(bars: Bar[], state: TbLineState): number | null {
+  if (!state.brokenAt) return null;
+  const idx = bars.findIndex((b) => b.t >= state.brokenAt!);
+  return idx < 0 ? null : Math.max(0, bars.length - 1 - idx);
+}
+
+function armedBreak(
+  bars: Bar[],
+  state: TbLineState,
+  side: "long" | "short",
+): { active: boolean; age: number; retest: boolean } {
+  if (!state.line || state.value == null || !state.broken) return { active: false, age: 0, retest: false };
+  const age = breakAgeBars(bars, state);
+  if (age == null || age > TB_DEFAULTS.breakWindowBars) return { active: false, age: age ?? 0, retest: false };
+  const lastBar = bars.at(-1)!;
+  const lastIdx = bars.length - 1;
+  const lineNow = state.line.valueAt(lastIdx);
+  const tol = tolerance(bars);
+  const holds = side === "long" ? lastBar.c > lineNow - tol : lastBar.c < lineNow + tol;
+  if (!holds) return { active: false, age, retest: false };
+  const retest = age > 0 && (side === "long"
+    ? lastBar.l <= lineNow + tol && lastBar.c > lineNow
+    : lastBar.h >= lineNow - tol && lastBar.c < lineNow);
+  return { active: true, age, retest };
 }
 
 export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbConfig): TbSignal {
@@ -288,28 +268,36 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
   const price = execBars?.at(-1)?.c ?? 0;
   const base: TbSignal = { coin, side: null, confidence: 0, reasons: [], price, indicators: {}, levels };
   if (!exec || !execBars) return { ...base, reasons: ["Waiting for trendline history"] };
+
+  const longWindow = armedBreak(execBars, exec.down, "long");
+  const shortWindow = armedBreak(execBars, exec.up, "short");
   const indicators: Record<string, number> = {
     execUpLine: exec.up.value ?? NaN,
     execDownLine: exec.down.value ?? NaN,
     upTouches: exec.up.line?.touches ?? 0,
     downTouches: exec.down.line?.touches ?? 0,
+    longBreakAge: longWindow.age,
+    shortBreakAge: shortWindow.age,
   };
+
   let side: "long" | "short" | null = null;
   let actionLine: number | undefined;
   let safety: number | undefined;
+  let breakAge = 0;
+  let isRetest = false;
   const reasons: string[] = [];
-  if (exec.down.freshBreak && exec.down.value != null) {
-    side = "long";
-    actionLine = exec.down.value;
-    safety = safetyLineFor(levels, "long", price);
-  } else if (exec.up.freshBreak && exec.up.value != null) {
-    side = "short";
-    actionLine = exec.up.value;
-    safety = safetyLineFor(levels, "short", price);
+  if (longWindow.active && exec.down.value != null) {
+    side = "long"; actionLine = exec.down.value; safety = safetyLineFor(levels, "long", price); breakAge = longWindow.age; isRetest = longWindow.retest;
+  } else if (shortWindow.active && exec.up.value != null) {
+    side = "short"; actionLine = exec.up.value; safety = safetyLineFor(levels, "short", price); breakAge = shortWindow.age; isRetest = shortWindow.retest;
   } else {
-    return { ...base, indicators, reasons: [`No ${exec.timeframe} action-line break`] };
+    return { ...base, indicators, reasons: [`No active ${exec.timeframe} action-line break/retest window`] };
   }
   if (safety == null) return { ...base, indicators, reasons: ["Break detected but no valid opposing safety line is available"] };
+
+  if (breakAge === 0) reasons.push(`Fresh ${exec.timeframe} action-line break`);
+  else if (isRetest) reasons.push(`${exec.timeframe} break retest held (${breakAge} bar(s) after break)`);
+  else reasons.push(`${exec.timeframe} break remains armed (${breakAge} bar(s) after break)`);
 
   const htf = levels.slice(0, -1);
   let agree = 0;
@@ -319,9 +307,7 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
       : (!!lvl.down.line && !lvl.down.broken) || (!!lvl.up.line && lvl.up.broken);
     if (structural) { agree++; reasons.push(`${lvl.timeframe} structure agrees with the ${side} break`); }
   }
-  if (htf.length > 0 && agree === 0) {
-    return { ...base, indicators, reasons: ["Higher-timeframe structure does not agree with the break"] };
-  }
+  if (htf.length > 0 && agree === 0) return { ...base, indicators, reasons: ["Higher-timeframe structure does not agree with the break"] };
 
   const confirm = confirmExecution(execBars, side);
   Object.assign(indicators, confirm.indicators);
@@ -330,17 +316,16 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
 
   const touches = side === "long" ? exec.down.line?.touches ?? 0 : exec.up.line?.touches ?? 0;
   reasons.push(`Action line captured ${touches} touch points`);
-
-  // Base confidence: 52 pts structural break + touches + HTF agreement + indicator bonus
-  const confidence = Math.min(95, 52 + Math.min(touches, 5) * 4 + agree * 8 + confirm.bonus);
+  const agePenalty = breakAge * 3;
+  const retestBonus = isRetest ? 4 : 0;
+  const confidence = Math.min(95, 52 + Math.min(touches, 5) * 4 + agree * 8 + confirm.bonus + retestBonus - agePenalty);
   return {
     coin, side, confidence, reasons, price,
     timeframe: exec.timeframe, actionLine, safetyLine: safety,
-    indicators: { ...indicators, agree, touches, confirmations: confirm.score },
+    indicators: { ...indicators, agree, touches, confirmations: confirm.score, breakAge, retest: isRetest ? 1 : 0 },
     levels,
   };
 }
-
 
 export function safetyLineFor(levels: TbCascadeLevel[], side: "long" | "short", price: number): number | undefined {
   for (let i = levels.length - 1; i >= 0; i--) {
@@ -356,10 +341,6 @@ export function safetyStop(side: "long" | "short", safetyLine: number, bufferPct
   return side === "long" ? safetyLine * (1 - bufferPct / 100) : safetyLine * (1 + bufferPct / 100);
 }
 
-/**
- * Dynamic price trail used as the profit-taking layer after a favorable move.
- * It never loosens: long stops only rise and short stops only fall.
- */
 export function dynamicTrailStop(
   side: "long" | "short",
   entryPrice: number,
@@ -369,9 +350,7 @@ export function dynamicTrailStop(
   distancePct = 0.5,
 ): number {
   if (!(entryPrice > 0) || !(bestPrice > 0) || !(currentStop > 0)) return currentStop;
-  const favorablePct = side === "long"
-    ? ((bestPrice - entryPrice) / entryPrice) * 100
-    : ((entryPrice - bestPrice) / entryPrice) * 100;
+  const favorablePct = side === "long" ? ((bestPrice - entryPrice) / entryPrice) * 100 : ((entryPrice - bestPrice) / entryPrice) * 100;
   if (favorablePct < Math.max(0, activatePct)) return currentStop;
   const candidate = side === "long"
     ? bestPrice * (1 - Math.max(0.05, distancePct) / 100)
