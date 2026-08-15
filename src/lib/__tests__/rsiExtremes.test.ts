@@ -3,6 +3,7 @@ import type { Bar } from "../strategy";
 import {
   RSI_EXTREMES_DEFAULTS,
   evaluateRsiExtremes,
+  evaluateRsiValues,
   shouldExitRsiExtreme,
   rsiExtremeRiskSizedQuantity,
 } from "../strategies/rsiExtremes";
@@ -15,10 +16,30 @@ function barsFromCloses(closes: number[]): Bar[] {
 }
 
 describe("1H RSI Extremes", () => {
+  it("enters long when RSI reverses back above 30 after an oversold extreme", () => {
+    const result = evaluateRsiValues([45, 27, 24, 32]);
+    expect(result.side).toBe("long");
+    expect(result.extreme).toBe(24);
+    expect(result.confidence).toBeGreaterThan(RSI_EXTREMES_DEFAULTS.minConfidence);
+  });
+
+  it("enters short when RSI reverses back below 70 after an overbought extreme", () => {
+    const result = evaluateRsiValues([58, 74, 81, 68]);
+    expect(result.side).toBe("short");
+    expect(result.extreme).toBe(81);
+    expect(result.confidence).toBeGreaterThan(RSI_EXTREMES_DEFAULTS.minConfidence);
+  });
+
   it("does not enter without a prior RSI extreme reversal", () => {
+    expect(evaluateRsiValues([45, 42, 39, 43]).side).toBeNull();
     const closes = Array.from({ length: 60 }, (_, i) => 100 + Math.sin(i / 3));
-    const sig = evaluateRsiExtremes("TEST", barsFromCloses(closes));
-    expect(sig.side).toBeNull();
+    expect(evaluateRsiExtremes("TEST", barsFromCloses(closes)).side).toBeNull();
+  });
+
+  it("gives deeper extremes a larger confidence bonus", () => {
+    const shallow = evaluateRsiValues([40, 29, 28, 31]);
+    const deep = evaluateRsiValues([40, 24, 19, 31]);
+    expect(deep.confidence).toBeGreaterThan(shallow.confidence);
   });
 
   it("uses the intended RSI thresholds and risk defaults", () => {
