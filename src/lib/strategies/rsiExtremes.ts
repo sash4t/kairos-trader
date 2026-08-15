@@ -11,7 +11,7 @@ export const RSI_EXTREMES_DEFAULTS = {
   shortExit: 48,
   armLookbackBars: 3,
   riskPct: 0.5,
-  stopPct: 1.25,
+  stopPct: 2,
   maxLeverage: 3,
   // Effectively unbounded relative to the Hyperliquid universe: scan every eligible liquid market.
   scanLimit: 10_000,
