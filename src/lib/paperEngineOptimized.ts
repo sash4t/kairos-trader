@@ -20,7 +20,7 @@ import {
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes, latestRsi,
-  shouldExitRsiExtreme, rsiExtremeRiskSizedQuantity,
+  shouldExitRsiExtreme,
 } from "./strategies/rsiExtremes";
 
 export interface Settings {
@@ -421,11 +421,11 @@ export class PaperEngine {
       if (shockHitsSide(this.shockDir, sig.side)) continue;
       const equity = this.currentEquity();
       const leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, this.settings.max_leverage, meta.maxLeverage)));
-      const riskQty = rsiExtremeRiskSizedQuantity(equity, sig.price, sig.stopLoss, RSI_EXTREMES_DEFAULTS.riskPct);
+      const targetQty = (equity * (Math.max(0, this.settings.position_size_pct) / 100) * leverage) / sig.price;
       const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;
-      const size = Math.min(riskQty, roomQty);
+      const size = Math.min(targetQty, roomQty);
       if (!(size > 0) || !Number.isFinite(size)) continue;
-      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, Number.NaN, sig.confidence, sig.reasons, sig.indicators, RSI_EXTREMES_DEFAULTS.riskPct, undefined, undefined, "1h", RSI_EXTREMES_KEY);
+      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, Number.NaN, sig.confidence, sig.reasons, sig.indicators, undefined, undefined, undefined, "1h", RSI_EXTREMES_KEY);
       held.add(meta.name);
     }
   }
@@ -588,15 +588,16 @@ export class PaperEngine {
   }
 
   private async openPaper(coin: string, side: "long" | "short", size: number, leverage: number, entry: number, stop: number, tp: number,
-    confidence: number, reasons: string[], indicators: Record<string, number>, riskPct: number, safetyLine?: number, actionLine?: number, timeframe?: string, family?: string) {
+    confidence: number, reasons: string[], indicators: Record<string, number>, riskPct?: number, safetyLine?: number, actionLine?: number, timeframe?: string, family?: string) {
     if (this.isLive()) return;
     const b = bucket(coin); if (this.positions.filter((p) => bucket(p.coin) === b).length >= 3) return;
     const reason = `${side.toUpperCase()} ${coin}${family ? ` [${family}]` : ""} — ${reasons.join(" + ")}`;
     const row: any = {
       user_id: this.userId, coin, side, size, notional: size * entry, leverage,
       entry_price: entry, stop_loss: stop, take_profit: Number.isFinite(tp) ? tp : null,
-      confidence, reason, indicators, initial_stop: stop, risk_pct: riskPct,
+      confidence, reason, indicators, initial_stop: stop,
     };
+    if (riskPct != null) row.risk_pct = riskPct;
     if (safetyLine != null) row.safety_line = safetyLine;
     if (actionLine != null) row.action_line = actionLine;
     if (timeframe) row.timeframe = timeframe;
@@ -606,7 +607,8 @@ export class PaperEngine {
       take_profit: Number.isFinite(tp) ? tp : (side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY),
       trail_high: entry, confidence, safety_line: safetyLine ?? null, initial_stop: stop,
       opened_at: data.opened_at, reason, partial_taken: false, realized_pnl: 0, indicators });
-    this.log("trade", `OPEN ${reason} @ ${entry.toFixed(6)} · SL ${stop.toFixed(6)}${Number.isFinite(tp) ? ` · TP ${tp.toFixed(6)}` : ""} · risk ${riskPct.toFixed(2)}%`);
+    const sizing = riskPct != null ? `risk ${riskPct.toFixed(2)}%` : `position ${this.settings.position_size_pct.toFixed(2)}% equity`;
+    this.log("trade", `OPEN ${reason} @ ${entry.toFixed(6)} · SL ${stop.toFixed(6)}${Number.isFinite(tp) ? ` · TP ${tp.toFixed(6)}` : ""} · ${sizing}`);
   }
 
   private async closePosition(p: OpenPosition, price: number, exitReason: string) {

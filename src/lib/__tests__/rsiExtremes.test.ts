@@ -5,7 +5,6 @@ import {
   evaluateRsiExtremes,
   evaluateRsiValues,
   shouldExitRsiExtreme,
-  rsiExtremeRiskSizedQuantity,
 } from "../strategies/rsiExtremes";
 
 const HOUR = 60 * 60 * 1000;
@@ -52,8 +51,8 @@ describe("1H RSI Extremes", () => {
     expect(RSI_EXTREMES_DEFAULTS.overbought).toBe(70);
     expect(RSI_EXTREMES_DEFAULTS.longExit).toBe(52);
     expect(RSI_EXTREMES_DEFAULTS.shortExit).toBe(48);
-    expect(RSI_EXTREMES_DEFAULTS.riskPct).toBe(0.5);
-    expect(RSI_EXTREMES_DEFAULTS.stopPct).toBe(1.25);
+    expect(RSI_EXTREMES_DEFAULTS.stopPct).toBe(2);
+    expect(RSI_EXTREMES_DEFAULTS.maxLeverage).toBe(3);
   });
 
   it("exits longs above the 50 zone and shorts below it", () => {
@@ -61,10 +60,5 @@ describe("1H RSI Extremes", () => {
     expect(shouldExitRsiExtreme("long", 52)).toBe(true);
     expect(shouldExitRsiExtreme("short", 48.1)).toBe(false);
     expect(shouldExitRsiExtreme("short", 48)).toBe(true);
-  });
-
-  it("risk sizes against the emergency stop", () => {
-    const qty = rsiExtremeRiskSizedQuantity(10_000, 100, 98.75);
-    expect(qty).toBeCloseTo(40, 8);
   });
 });

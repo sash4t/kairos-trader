@@ -10,8 +10,7 @@ export const RSI_EXTREMES_DEFAULTS = {
   longExit: 52,
   shortExit: 48,
   armLookbackBars: 3,
-  riskPct: 0.5,
-  stopPct: 1.25,
+  stopPct: 2,
   maxLeverage: 3,
   // Effectively unbounded relative to the Hyperliquid universe: scan every eligible liquid market.
   scanLimit: 10_000,
@@ -106,10 +105,4 @@ export function latestRsi(hourly: Bar[]): number {
 export function shouldExitRsiExtreme(side: RsiExtremeSide, rsiValue: number): boolean {
   if (!Number.isFinite(rsiValue)) return false;
   return side === "long" ? rsiValue >= RSI_EXTREMES_DEFAULTS.longExit : rsiValue <= RSI_EXTREMES_DEFAULTS.shortExit;
-}
-
-export function rsiExtremeRiskSizedQuantity(equity: number, entry: number, stop: number, riskPct = RSI_EXTREMES_DEFAULTS.riskPct): number {
-  const riskUsd = equity * (riskPct / 100);
-  const distance = Math.abs(entry - stop);
-  return riskUsd > 0 && distance > 0 ? riskUsd / distance : 0;
 }

@@ -468,7 +468,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
         ? liquid.slice(0, scanCount)
         : Array.from({ length: scanCount }, (_, i) => liquid[(cursor + i) % eligibleCount]);
       const nextCursor = isRsi || isSqueeze ? cursor : (eligibleCount ? (cursor + scanCount) % eligibleCount : 0);
-      notes.push(isRsi && !rsiScanDue ? "RSI scan waiting for 5m cadence" : isSqueeze && !squeezeScanDue ? "squeeze scan waiting for 5m cadence" : `scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
+      notes.push(isRsi && !rsiScanDue ? "RSI scan waiting for 1m cadence" : isSqueeze && !squeezeScanDue ? "squeeze scan waiting for 5m cadence" : `scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
 
       if (s.scalp_enabled && canTrade && equityNow > 0 && positions.length < +s.max_positions) {
         for (const target of scanTargets) {
@@ -527,10 +527,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (isRsi) {
             leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, +s.max_leverage, target.meta.maxLeverage)));
             rsiStop = sig.side === "long" ? quotePx * (1 - RSI_EXTREMES_DEFAULTS.stopPct / 100) : quotePx * (1 + RSI_EXTREMES_DEFAULTS.stopPct / 100);
-            const riskBasedSize = riskSize(equity, RSI_EXTREMES_DEFAULTS.riskPct, quotePx, rsiStop);
+            const positionNotionalCap = equity * (Math.max(0, +s.position_size_pct) / 100) * leverage;
             const room = equity * (+s.max_exposure_pct / 100) * leverage - positions.reduce((sum, p) => sum + p.notional, 0);
             if (room <= 0) { notes.push("exposure cap reached"); break; }
-            size = Math.min(riskBasedSize, room / quotePx);
+            size = Math.min(positionNotionalCap, room) / quotePx;
             if (!(size > 0) || !Number.isFinite(size)) continue;
           } else if (isSqueeze) {
             leverage = Math.max(1, Math.floor(Math.min(3, +s.max_leverage, target.meta.maxLeverage)));
@@ -628,7 +628,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const extra = isTb
             ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: sl, risk_pct: tbCfg.riskPct }
             : isRsi
-              ? { timeframe: "1h", initial_stop: sl, risk_pct: RSI_EXTREMES_DEFAULTS.riskPct }
+              ? { timeframe: "1h", initial_stop: sl }
               : isSqueeze
                 ? { timeframe: "15m", initial_stop: sl, risk_pct: SQUEEZE_DEFAULTS.riskPct, partial_taken: false }
                 : isOriginalTpa
@@ -639,7 +639,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (insErr || !inserted) { report.errors.push(`record ${sig.coin}: ${insErr?.message ?? "insert returned no row"}`); continue; }
           positions.push({ id: inserted.id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: (isOriginalTpa ? originalSafety : tbSafety) ?? null, opened_at: inserted.opened_at, reason, partial_taken: false, realized_pnl: 0, indicators: sig.indicators });
           held.add(sig.coin); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isRsi ? RSI_EXTREMES_DEFAULTS.riskPct : isSqueeze ? SQUEEZE_DEFAULTS.riskPct : isTb ? tbCfg.riskPct : isOriginalTpa ? originalRiskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, hardSlPct: isRsi ? RSI_EXTREMES_DEFAULTS.stopPct : isSqueeze ? SQUEEZE_DEFAULTS.stopPct : hardSlPct, leverage, nativeStop: isLive ? sl : null });
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isRsi ? null : isSqueeze ? SQUEEZE_DEFAULTS.riskPct : isTb ? tbCfg.riskPct : isOriginalTpa ? originalRiskPct : null, positionSizePct: isRsi ? +s.position_size_pct : isTb ? tbCfg.positionSizePct : null, hardSlPct: isRsi ? RSI_EXTREMES_DEFAULTS.stopPct : isSqueeze ? SQUEEZE_DEFAULTS.stopPct : hardSlPct, leverage, nativeStop: isLive ? sl : null });
         }
       }
       const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · scanner_cursor=${nextCursor}`;
