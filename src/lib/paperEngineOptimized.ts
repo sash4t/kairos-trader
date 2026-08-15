@@ -14,6 +14,10 @@ import {
 import {
   ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS, evaluateOriginalTrendPriceAction,
 } from "./strategies/originalTrendPriceAction";
+import {
+  VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS, evaluateVolatilitySqueezeBreakout,
+  squeezeRiskSizedQuantity, favorablePct, adverseAbsPct, squeezeTrailStop,
+} from "./strategies/volatilitySqueezeBreakout";
 
 export interface Settings {
   user_id: string;
@@ -69,6 +73,11 @@ export interface OpenPosition {
   confidence: number;
   safety_line?: number | null;
   initial_stop?: number;
+  opened_at?: string;
+  reason?: string;
+  partial_taken?: boolean;
+  realized_pnl?: number;
+  indicators?: Record<string, number>;
 }
 
 type Log = (level: "info" | "warn" | "error" | "trade", msg: string, meta?: any) => void;
@@ -99,6 +108,7 @@ export class PaperEngine {
   private snapshotTs = 0;
   private shockDir: ShockDir = null;
   private seriesCache = new Map<string, { bars: Bar[]; ts: number }>();
+  private lastSqueezeScanTs = 0;
 
   constructor(userId: string, settings: Settings, log: Log) {
     this.userId = userId;
@@ -112,6 +122,8 @@ export class PaperEngine {
   private isTb() { return this.settings.strategy_key === TRENDLINE_BREAK_KEY; }
   private isIntraday() { return this.settings.strategy_key === INTRADAY_PULLBACK_KEY; }
   private isOriginalTpa() { return this.settings.strategy_key === ORIGINAL_TREND_PRICE_ACTION_KEY; }
+  private isSqueeze() { return this.settings.strategy_key === VOLATILITY_SQUEEZE_BREAKOUT_KEY; }
+  private isSqueezePosition(p: OpenPosition) { return p.reason?.includes(`[${VOLATILITY_SQUEEZE_BREAKOUT_KEY}]`) === true; }
   private mid(coin: string): number | null { const v = this.mids[coin]; return v ? +v : null; }
 
   async start() {
@@ -158,6 +170,11 @@ export class PaperEngine {
       trail_high: p.trail_high == null ? null : +p.trail_high, confidence: +p.confidence,
       safety_line: p.safety_line == null ? null : +p.safety_line,
       initial_stop: p.initial_stop == null ? +p.stop_loss : +p.initial_stop,
+      opened_at: p.opened_at,
+      reason: p.reason,
+      partial_taken: Boolean((p as any).partial_taken),
+      realized_pnl: p.pnl == null ? 0 : +p.pnl,
+      indicators: (p.indicators ?? {}) as Record<string, number>,
     }));
     this.log("info", `Synced ${this.positions.length} open paper position(s)`);
   }
@@ -215,6 +232,79 @@ export class PaperEngine {
     }
   }
 
+  private async partialCloseSqueeze(p: OpenPosition, price: number) {
+    if (p.partial_taken || !(p.size > 0)) return;
+    p.partial_taken = true;
+    const closeSize = p.size * SQUEEZE_DEFAULTS.partialFraction;
+    const pnl = p.side === "long" ? (price - p.entry_price) * closeSize : (p.entry_price - price) * closeSize;
+    this.startEquity += pnl;
+    p.realized_pnl = (p.realized_pnl ?? 0) + pnl;
+    p.size = Math.max(0, p.size - closeSize);
+    p.notional = p.size * p.entry_price;
+    p.trail_high = price;
+    p.stop_loss = squeezeTrailStop(p.side, price, p.entry_price);
+    await (supabase as any).from("paper_positions").update({
+      size: p.size,
+      notional: p.notional,
+      pnl: p.realized_pnl,
+      partial_taken: true,
+      stop_loss: p.stop_loss,
+      trail_high: p.trail_high,
+      indicators: p.indicators ?? {},
+    }).eq("id", p.id).eq("status", "open");
+    this.log("trade", `PARTIAL ${p.side.toUpperCase()} ${p.coin} @ ${price.toFixed(6)} · closed 50% · realized ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · runner trail ${SQUEEZE_DEFAULTS.trailPct.toFixed(2)}%`);
+  }
+
+  private async manageSqueezePosition(p: OpenPosition, mark: number) {
+    const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
+    if (hitStop) {
+      const protectedProfit = p.stop_loss === p.entry_price || (p.side === "long" ? p.stop_loss > p.entry_price : p.stop_loss < p.entry_price);
+      await this.closePosition(p, mark, protectedProfit ? "squeeze_breakeven_or_trail" : "squeeze_stop_loss");
+      return;
+    }
+
+    const opened = Date.parse(p.opened_at ?? "");
+    const ageMs = Number.isFinite(opened) ? Date.now() - opened : 0;
+    const absMove = adverseAbsPct(p.entry_price, mark);
+    const indicators = p.indicators ?? (p.indicators = {});
+    const maxAbsMovePct = Math.max(Number(indicators.maxAbsMovePct ?? 0), absMove);
+    indicators.maxAbsMovePct = maxAbsMovePct;
+
+    if (ageMs >= SQUEEZE_DEFAULTS.maxMinutes * 60_000) {
+      await this.closePosition(p, mark, "squeeze_hard_time_exit");
+      return;
+    }
+    if (ageMs >= SQUEEZE_DEFAULTS.staleMinutes * 60_000 && maxAbsMovePct < SQUEEZE_DEFAULTS.staleMovePct) {
+      await this.closePosition(p, mark, "squeeze_stale_exit");
+      return;
+    }
+
+    const favorable = favorablePct(p.side, p.entry_price, mark);
+    let changed = false;
+    const previousBest = p.trail_high ?? p.entry_price;
+    const best = p.side === "long" ? Math.max(previousBest, mark) : Math.min(previousBest, mark);
+    if (best !== previousBest) { p.trail_high = best; changed = true; }
+
+    if (favorable >= SQUEEZE_DEFAULTS.breakevenAtPct) {
+      const be = p.entry_price;
+      const next = p.side === "long" ? Math.max(p.stop_loss, be) : Math.min(p.stop_loss, be);
+      if (next !== p.stop_loss) { p.stop_loss = next; changed = true; }
+    }
+
+    if (favorable >= SQUEEZE_DEFAULTS.partialAtPct && !p.partial_taken) {
+      await this.partialCloseSqueeze(p, mark);
+      return;
+    }
+
+    if (p.partial_taken) {
+      const next = squeezeTrailStop(p.side, p.trail_high ?? mark, p.stop_loss);
+      if (next !== p.stop_loss) { p.stop_loss = next; changed = true; }
+    }
+
+    if (changed || maxAbsMovePct !== Number((p.indicators ?? {}).maxAbsMovePct ?? 0)) this.persistPositionUpdate(p);
+    else this.persistPositionUpdate(p);
+  }
+
   private tick() {
     if (this.isLive()) return;
     const dayStart = new Date().setUTCHours(0, 0, 0, 0);
@@ -230,6 +320,7 @@ export class PaperEngine {
     for (const p of [...this.positions]) {
       const mark = this.mid(p.coin); if (mark == null) continue;
       if (shockHitsSide(this.shockDir, p.side)) { this.closePosition(p, mark, "btc_shock").catch(() => {}); continue; }
+      if (this.isSqueezePosition(p)) { this.manageSqueezePosition(p, mark).catch((e) => this.log("error", `Squeeze exit ${p.coin}: ${e.message}`)); continue; }
       this.rTrail(p, mark);
       const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
       const hitTp = Number.isFinite(p.take_profit) && (p.side === "long" ? mark >= p.take_profit : mark <= p.take_profit);
@@ -250,7 +341,12 @@ export class PaperEngine {
     if (!this.settings.bot_enabled || this.settings.kill_switch_engaged || this.settings.mode !== "paper" || this.settings.server_agent_enabled || this.evaluating) return;
     this.evaluating = true;
     try {
-      if (this.isIntraday()) await this.runIntradayCycle();
+      if (this.isSqueeze()) {
+        if (Date.now() - this.lastSqueezeScanTs >= SQUEEZE_DEFAULTS.scanEveryMs) {
+          this.lastSqueezeScanTs = Date.now();
+          await this.runSqueezeCycle();
+        }
+      } else if (this.isIntraday()) await this.runIntradayCycle();
       else if (this.isTb()) await this.runTrendlineBreakCycle();
       else if (this.isOriginalTpa()) await this.runOriginalTrendPriceActionCycle();
       else await this.runTrendlinePriceActionCycle();
@@ -274,6 +370,31 @@ export class PaperEngine {
       this.seriesCache.set(key, { bars: out, ts: Date.now() });
       return out;
     } catch { return null; }
+  }
+
+  private async runSqueezeCycle() {
+    const held = new Set(this.positions.map((p) => p.coin));
+    for (const { meta } of this.candidates(SQUEEZE_DEFAULTS.scanLimit)) {
+      if (this.positions.length >= this.settings.max_positions) break;
+      if (held.has(meta.name)) continue;
+      const [h1, m15] = await Promise.all([
+        this.bars(meta.name, "1h", 100, HOUR),
+        this.bars(meta.name, "15m", 120, FIFTEEN),
+      ]);
+      if (!h1 || !m15 || h1.length < 60 || m15.length < 40) continue;
+      const sig = evaluateVolatilitySqueezeBreakout(meta.name, h1, m15);
+      if (!sig.side || sig.stopLoss == null || sig.takeProfit == null) continue;
+      if (sig.confidence < Math.max(SQUEEZE_DEFAULTS.minConfidence, this.settings.min_confidence)) continue;
+      if (shockHitsSide(this.shockDir, sig.side)) continue;
+      const equity = this.currentEquity();
+      const leverage = Math.max(1, Math.floor(Math.min(3, this.settings.max_leverage, meta.maxLeverage)));
+      const riskQty = squeezeRiskSizedQuantity(equity, sig.price, sig.stopLoss, SQUEEZE_DEFAULTS.riskPct);
+      const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;
+      const size = Math.min(riskQty, roomQty);
+      if (!(size > 0) || !Number.isFinite(size)) continue;
+      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, sig.takeProfit, sig.confidence, sig.reasons, sig.indicators, SQUEEZE_DEFAULTS.riskPct, undefined, undefined, "15m", VOLATILITY_SQUEEZE_BREAKOUT_KEY);
+      held.add(meta.name);
+    }
   }
 
   private async runIntradayCycle() {
@@ -409,10 +530,10 @@ export class PaperEngine {
   }
 
   private async openPaper(coin: string, side: "long" | "short", size: number, leverage: number, entry: number, stop: number, tp: number,
-    confidence: number, reasons: string[], indicators: Record<string, number>, riskPct: number, safetyLine?: number, actionLine?: number, timeframe?: string) {
+    confidence: number, reasons: string[], indicators: Record<string, number>, riskPct: number, safetyLine?: number, actionLine?: number, timeframe?: string, family?: string) {
     if (this.isLive()) return;
     const b = bucket(coin); if (this.positions.filter((p) => bucket(p.coin) === b).length >= 3) return;
-    const reason = `${side.toUpperCase()} ${coin} — ${reasons.join(" + ")}`;
+    const reason = `${side.toUpperCase()} ${coin}${family ? ` [${family}]` : ""} — ${reasons.join(" + ")}`;
     const row: any = {
       user_id: this.userId, coin, side, size, notional: size * entry, leverage,
       entry_price: entry, stop_loss: stop, take_profit: Number.isFinite(tp) ? tp : null,
@@ -425,17 +546,19 @@ export class PaperEngine {
     if (error || !data) { this.log("error", `Failed to open ${coin}: ${error?.message ?? "insert failed"}`); return; }
     this.positions.push({ id: data.id, coin, side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: stop,
       take_profit: Number.isFinite(tp) ? tp : (side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY),
-      trail_high: entry, confidence, safety_line: safetyLine ?? null, initial_stop: stop });
+      trail_high: entry, confidence, safety_line: safetyLine ?? null, initial_stop: stop,
+      opened_at: data.opened_at, reason, partial_taken: false, realized_pnl: 0, indicators });
     this.log("trade", `OPEN ${reason} @ ${entry.toFixed(6)} · SL ${stop.toFixed(6)}${Number.isFinite(tp) ? ` · TP ${tp.toFixed(6)}` : ""} · risk ${riskPct.toFixed(2)}%`);
   }
 
   private async closePosition(p: OpenPosition, price: number, exitReason: string) {
     if (this.isLive()) return;
-    const pnl = this.unrealizedPnl(p, price);
+    const remainingPnl = this.unrealizedPnl(p, price);
+    const totalPnl = (p.realized_pnl ?? 0) + remainingPnl;
     this.positions = this.positions.filter((x) => x.id !== p.id);
-    this.startEquity += pnl;
-    await supabase.from("paper_positions").update({ status: "closed", exit_price: price, exit_reason: exitReason, pnl, closed_at: new Date().toISOString() }).eq("id", p.id);
-    this.log("trade", `CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${price.toFixed(6)} · PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · ${exitReason}`);
+    this.startEquity += remainingPnl;
+    await supabase.from("paper_positions").update({ status: "closed", exit_price: price, exit_reason: exitReason, pnl: totalPnl, closed_at: new Date().toISOString() }).eq("id", p.id);
+    this.log("trade", `CLOSE ${p.side.toUpperCase()} ${p.coin} @ ${price.toFixed(6)} · PnL ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)} USDC · ${exitReason}`);
   }
 
   async flattenAll(reason: string) {
@@ -444,6 +567,12 @@ export class PaperEngine {
   }
 
   private persistPositionUpdate(p: OpenPosition) {
-    supabase.from("paper_positions").update({ stop_loss: p.stop_loss, trail_high: p.trail_high, safety_line: p.safety_line ?? null }).eq("id", p.id).then(() => {});
+    (supabase as any).from("paper_positions").update({
+      stop_loss: p.stop_loss,
+      trail_high: p.trail_high,
+      safety_line: p.safety_line ?? null,
+      partial_taken: p.partial_taken ?? false,
+      indicators: p.indicators ?? {},
+    }).eq("id", p.id).then(() => {});
   }
 }
