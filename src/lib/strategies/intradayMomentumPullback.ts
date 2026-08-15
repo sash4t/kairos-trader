@@ -237,7 +237,7 @@ export function targetFromR(
   side: "long" | "short",
   entry: number,
   stop: number,
-  r = INTRADAY_DEFAULTS.takeProfitR,
+  r: number = INTRADAY_DEFAULTS.takeProfitR,
 ): number {
   const risk = Math.abs(entry - stop);
   return side === "long" ? entry + risk * r : entry - risk * r;
