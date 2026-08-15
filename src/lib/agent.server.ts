@@ -25,8 +25,7 @@ const BARS = 230;
 const HTF_BARS = 240;
 const SCAN_PER_CYCLE = 35;
 const SCAN_PER_CYCLE_ORIGINAL_TPA = 50;
-const MIN_24H_VOLUME = 1_500_000;
-const RSI_MIN_24H_VOLUME = 1_000_000;
+const MIN_24H_VOLUME = 500_000;
 
 type Level = "info" | "warn" | "error" | "trade";
 async function hl<T>(body: unknown): Promise<T> {
@@ -70,7 +69,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
   const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
   const allMarkets = meta.universe.map((m, i) => ({ meta: m, ctx: ctxs[i] })).filter((x) => x.ctx);
   const liquid = allMarkets.filter((x) => +x.ctx.dayNtlVlm > MIN_24H_VOLUME && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
-  const rsiLiquid = allMarkets.filter((x) => +x.ctx.dayNtlVlm > RSI_MIN_24H_VOLUME).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
+  const rsiLiquid = allMarkets.filter((x) => +x.ctx.dayNtlVlm > MIN_24H_VOLUME).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
 
   const { readHlCreds, loadAssetIndex, marketOrder, setLeverage, fetchLiveAccount, ensureNativeStopLoss } = await import("./hyperliquidExchange.server");
   const creds = readHlCreds();
