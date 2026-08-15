@@ -17,7 +17,7 @@ export const STRATEGY_OPTIONS = [
   { key: TRENDLINE_BREAK_KEY, name: "Trendline Break", description: "Chained multi-timeframe trendlines. Close through an upward line goes short; close through a downward line goes long; the opposing line is the structural safety stop." },
   { key: INTRADAY_PULLBACK_KEY, name: "Intraday Momentum Pullback", description: "Paper-mode 4H → 1H → 15m momentum pullbacks with EMA20 rejection entries, structure + ATR stops, risk-based sizing and R-based profit protection." },
   { key: ORIGINAL_TREND_PRICE_ACTION_KEY, name: "Original Trend Price Action", description: "1H trend-line execution with EMA20/50, RSI, MACD, volume and ATR confidence scoring, gated by aligned Daily and 4H direction." },
-  { key: VOLATILITY_SQUEEZE_BREAKOUT_KEY, name: "Volatility Squeeze Breakout", description: "15m Bollinger/Keltner compression release with a 6-candle breakout, ≥1.5x volume and a light 1H EMA/RSI direction filter." },
+  { key: VOLATILITY_SQUEEZE_BREAKOUT_KEY, name: "Volatility Squeeze Breakout", description: "Recent 15m Bollinger/Keltner squeeze within 5 bars, 4-candle breakout, ≥1.2x volume and a light 1H EMA/RSI direction filter." },
 ] as const;
 
 export function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
@@ -76,6 +76,6 @@ export function exitReasonFor(side: ScalpSide, mark: number, stopLoss: number, t
 export function strategySelectionPatch(key: StrategyKey): Record<string, unknown> {
   if (key === INTRADAY_PULLBACK_KEY) return { strategy_key: key, min_confidence: 65, trailing_enabled: true };
   if (key === ORIGINAL_TREND_PRICE_ACTION_KEY) return { strategy_key: key, min_confidence: 60, trailing_enabled: true };
-  if (key === VOLATILITY_SQUEEZE_BREAKOUT_KEY) return { strategy_key: key, min_confidence: 70, trailing_enabled: true };
+  if (key === VOLATILITY_SQUEEZE_BREAKOUT_KEY) return { strategy_key: key, min_confidence: 70, trailing_enabled: true, max_positions: 5 };
   return { strategy_key: key };
 }

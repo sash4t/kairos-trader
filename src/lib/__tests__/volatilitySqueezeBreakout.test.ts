@@ -29,22 +29,29 @@ function squeezedBreakout(volume = 200): Bar[] {
 }
 
 describe("Volatility Squeeze Breakout signal", () => {
-  it("fires long after squeeze release + 6-bar breakout + 1.3x volume + 1H filter", () => {
+  it("fires long with a recent squeeze + 4-bar breakout + 1.2x volume + 1H filter", () => {
     const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyLongFilter(), squeezedBreakout());
     expect(sig.side).toBe("long");
     expect(sig.confidence).toBeGreaterThanOrEqual(SQUEEZE_DEFAULTS.minConfidence);
     expect(sig.indicators.priorSqueezed).toBe(1);
-    expect(sig.indicators.squeezeReleased).toBe(1);
-    expect(sig.indicators.bbExpanding).toBe(1);
-    expect(sig.indicators.volumeRatio).toBeGreaterThanOrEqual(1.3);
+    expect(sig.indicators.squeezeAge).toBeGreaterThanOrEqual(1);
+    expect(sig.indicators.squeezeAge).toBeLessThanOrEqual(5);
+    expect(sig.indicators.volumeRatio).toBeGreaterThanOrEqual(1.2);
     expect(sig.stopLoss).toBeCloseTo(102 * (1 - 0.0045), 8);
     expect(sig.takeProfit).toBeCloseTo(102 * 1.01, 8);
   });
 
-  it("rejects an otherwise valid breakout below the 1.3x volume floor", () => {
-    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyLongFilter(), squeezedBreakout(120));
+  it("rejects an otherwise valid breakout below the 1.2x volume floor", () => {
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyLongFilter(), squeezedBreakout(110));
     expect(sig.side).toBeNull();
     expect(sig.reasons.join(" ")).toMatch(/volume/i);
+  });
+
+  it("uses the looser scanner defaults", () => {
+    expect(SQUEEZE_DEFAULTS.kcMult).toBe(1.8);
+    expect(SQUEEZE_DEFAULTS.breakoutLookback).toBe(4);
+    expect(SQUEEZE_DEFAULTS.squeezeLookbackBars).toBe(5);
+    expect(SQUEEZE_DEFAULTS.minVolumeRatio).toBe(1.2);
   });
 });
 
