@@ -304,7 +304,7 @@ export class PaperEngine {
   private async runOriginalTrendPriceActionCycle() {
     const held = new Set(this.positions.map((p) => p.coin));
     const riskPct = Math.min(5, Math.max(0.05, Number(this.settings.trendline_risk_pct ?? ORIGINAL_TPA_DEFAULTS.riskPct)));
-    for (const { meta } of this.candidates()) {
+    for (const { meta } of this.candidates(50)) {
       if (this.positions.length >= this.settings.max_positions) break;
       if (held.has(meta.name)) continue;
       const [daily, four, hourly] = await Promise.all([

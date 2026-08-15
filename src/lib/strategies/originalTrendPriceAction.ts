@@ -5,9 +5,10 @@ export const ORIGINAL_TREND_PRICE_ACTION_KEY = "original-trend-price-action" as 
 
 export const ORIGINAL_TPA_DEFAULTS = {
   atrPeriod: 14,
-  atrMinPct: 0.15,
+  atrMinPct: 0.10,
   atrMaxPct: 6,
-  minConfidence: 65,
+  minConfidence: 60,
+  maxBreakoutAgeBars: 2,
   riskPct: 0.4,
   positionSizePct: 6,
   takeProfitR: 2.2,
@@ -43,21 +44,41 @@ export function evaluateOriginalTrendPriceAction(coin: string, daily: Bar[], fou
 
   const dailyBias = directionalBias(daily);
   const fourHourBias = directionalBias(fourHour);
-  if (!dailyBias || dailyBias !== fourHourBias) {
-    return {
-      ...empty,
-      reasons: [`Daily/4H directional alignment missing (Daily=${dailyBias ?? "neutral"}, 4H=${fourHourBias ?? "neutral"})`],
-    };
+  if (!fourHourBias) {
+    return { ...empty, reasons: ["4H EMA20/50 directional bias missing"] };
   }
+  if (dailyBias && dailyBias !== fourHourBias) {
+    return { ...empty, reasons: [`Daily bias (${dailyBias}) opposes 4H bias (${fourHourBias})`] };
+  }
+  const bias = fourHourBias;
 
   const completed = hourly.slice(0, -1);
-  const previous = hourly.at(-2)!.c;
   const price = hourly.at(-1)!.c;
   const state = getTrendlineState(completed);
   const supportNow = state.support?.valueAt(completed.length);
   const resistanceNow = state.resistance?.valueAt(completed.length);
-  const supportPrev = state.support?.valueAt(completed.length - 1);
-  const resistancePrev = state.resistance?.valueAt(completed.length - 1);
+
+  // Detect a genuine crossing of the line within the last 3 completed hourly bars.
+  // age 0 = crossed on the most recent completed bar.
+  let breakSide: Side | null = null;
+  let breakoutAge = 0;
+  for (let age = 0; age <= ORIGINAL_TPA_DEFAULTS.maxBreakoutAgeBars; age++) {
+    const idx = completed.length - 1 - age; // index of the crossing bar within `completed`
+    if (idx < 1) break;
+    const closeAt = completed[idx]!.c;
+    const closeBefore = completed[idx - 1]!.c;
+    const resAt = state.resistance?.valueAt(idx);
+    const resBefore = state.resistance?.valueAt(idx - 1);
+    const supAt = state.support?.valueAt(idx);
+    const supBefore = state.support?.valueAt(idx - 1);
+    const crossedUp = resAt != null && resBefore != null && closeBefore <= resBefore && closeAt > resAt;
+    const crossedDown = supAt != null && supBefore != null && closeBefore >= supBefore && closeAt < supAt;
+    if (crossedUp || crossedDown) {
+      breakSide = crossedUp ? "long" : "short";
+      breakoutAge = age;
+      break;
+    }
+  }
 
   const closes = hourly.map((b) => b.c);
   const volumes = hourly.map((b) => b.v);
@@ -70,13 +91,18 @@ export function evaluateOriginalTrendPriceAction(coin: string, daily: Bar[], fou
   const avgVolume = volumes.slice(-21, -1).reduce((sum, value) => sum + value, 0) / 20;
   const volumeX = (last(volumes) ?? 0) / (avgVolume || 1);
 
-  const brokeLong = resistancePrev != null && resistanceNow != null && previous <= resistancePrev && price > resistanceNow;
-  const brokeShort = supportPrev != null && supportNow != null && previous >= supportPrev && price < supportNow;
-  const side: Side | null = dailyBias === "long" && brokeLong ? "long" : dailyBias === "short" && brokeShort ? "short" : null;
+  // The break must still hold in the current direction of price.
+  const holds = breakSide === "long"
+    ? resistanceNow == null || price > resistanceNow
+    : breakSide === "short"
+      ? supportNow == null || price < supportNow
+      : false;
+  const side: Side | null = breakSide && breakSide === bias && holds ? breakSide : null;
 
   const indicators = {
-    dailyBias: dailyBias === "long" ? 1 : -1,
+    dailyBias: dailyBias === "long" ? 1 : dailyBias === "short" ? -1 : 0,
     fourHourBias: fourHourBias === "long" ? 1 : -1,
+    breakoutAge,
     ema20: e20,
     ema50: e50,
     rsi: rsiValue,
@@ -91,14 +117,19 @@ export function evaluateOriginalTrendPriceAction(coin: string, daily: Bar[], fou
     return { ...empty, price, atrValue, indicators, reasons: [`ATR% ${atrPct.toFixed(2)} outside volatility band`] };
   }
   if (!side) {
-    return { ...empty, price, atrValue, indicators, reasons: [`No fresh 1H trend-line break in ${dailyBias} direction`] };
+    return { ...empty, price, atrValue, indicators, reasons: [`No fresh 1H trend-line crossing in ${bias} direction`] };
   }
 
   const reasons = [
-    `Daily and 4H aligned ${side}`,
-    `Fresh 1H trend-line break ${side}`,
+    `4H EMA20/50 bias ${side}`,
+    breakoutAge === 0 ? `Fresh 1H trend-line crossing ${side}` : `1H trend-line crossing ${side} (${breakoutAge} bar(s) ago)`,
   ];
   let confidence = 68;
+
+  if (dailyBias === side) { confidence += 6; reasons.push("Daily bias agrees"); }
+  else reasons.push("Daily neutral");
+  if (breakoutAge === 0) confidence += 3;
+  else confidence -= breakoutAge * 2;
 
   const emaAligned = side === "long" ? price > e20 && e20 > e50 : price < e20 && e20 < e50;
   if (emaAligned) { confidence += 8; reasons.push("EMA20/50 trend confirms"); }
