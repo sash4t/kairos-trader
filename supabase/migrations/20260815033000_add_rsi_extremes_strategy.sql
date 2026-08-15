@@ -12,3 +12,6 @@ ALTER TABLE public.bot_settings
     'volatility-squeeze-breakout',
     'rsi-extremes-1h'
   ));
+
+ALTER TABLE public.bot_settings
+  ADD COLUMN IF NOT EXISTS rsi_last_scan_at timestamptz;
