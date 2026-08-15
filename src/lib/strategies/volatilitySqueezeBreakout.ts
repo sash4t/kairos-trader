@@ -9,10 +9,10 @@ export const SQUEEZE_DEFAULTS = {
   bbPeriod: 20,
   bbMult: 2,
   kcPeriod: 20,
-  kcMult: 1.5,
-  breakoutLookback: 6,
-  squeezeLookbackBars: 2,
-  minVolumeRatio: 1.3,
+  kcMult: 1.8,
+  breakoutLookback: 4,
+  squeezeLookbackBars: 5,
+  minVolumeRatio: 1.2,
   riskPct: 1.5,
   stopPct: 0.45,
   targetPct: 1.0,
@@ -65,11 +65,12 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     && Number.isFinite(bb.upper[idx]) && Number.isFinite(kc.upper[idx])
     && bb.upper[idx] <= kc.upper[idx]
     && bb.lower[idx] >= kc.lower[idx];
+
   let squeezeAge = 0;
   for (let age = 1; age <= SQUEEZE_DEFAULTS.squeezeLookbackBars; age++) {
     if (isSqueezedAt(i - age)) { squeezeAge = age; break; }
   }
-  const priorSqueezed = squeezeAge > 0;
+  const recentSqueeze = squeezeAge > 0;
   const released = Number.isFinite(bb.upper[i]) && Number.isFinite(kc.upper[i])
     && (bb.upper[i] > kc.upper[i] || bb.lower[i] < kc.lower[i]);
   const bbExpanding = Number.isFinite(bb.width[i]) && Number.isFinite(bb.width[i - 1]) && bb.width[i] > bb.width[i - 1];
@@ -87,11 +88,11 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const hourPrice = hourly.at(-1)!.c;
   const hourEma20 = last(ema(closes1h, 20)) ?? hourPrice;
   const hourRsi = last(rsi(closes1h, 14)) ?? 50;
-  const longDirectionOk = hourPrice >= hourEma20 && hourRsi >= 40 && hourRsi <= 70;
-  const shortDirectionOk = hourPrice <= hourEma20 && hourRsi >= 30 && hourRsi <= 60;
+  const longDirectionOk = hourPrice >= hourEma20 && hourRsi >= 35 && hourRsi <= 75;
+  const shortDirectionOk = hourPrice <= hourEma20 && hourRsi >= 25 && hourRsi <= 65;
 
   const indicators = {
-    priorSqueezed: priorSqueezed ? 1 : 0,
+    priorSqueezed: recentSqueeze ? 1 : 0,
     squeezeAge,
     squeezeReleased: released ? 1 : 0,
     bbExpanding: bbExpanding ? 1 : 0,
@@ -106,8 +107,7 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     hourlyRsi: hourRsi,
   };
 
-  if (!priorSqueezed) return { ...empty, indicators, reasons: [`No Bollinger-inside-Keltner squeeze in prior ${SQUEEZE_DEFAULTS.squeezeLookbackBars} completed 15m candles`] };
-  if (!released || !bbExpanding) return { ...empty, indicators, reasons: ["Squeeze has not released with expanding Bollinger width"] };
+  if (!recentSqueeze) return { ...empty, indicators, reasons: [`No Bollinger-inside-Keltner squeeze in prior ${SQUEEZE_DEFAULTS.squeezeLookbackBars} completed 15m candles`] };
   if (volumeRatio < SQUEEZE_DEFAULTS.minVolumeRatio) return { ...empty, indicators, reasons: [`Breakout volume ${volumeRatio.toFixed(2)}x < ${SQUEEZE_DEFAULTS.minVolumeRatio.toFixed(1)}x minimum`] };
 
   const side: Side | null = breakoutLong && longDirectionOk ? "long" : breakoutShort && shortDirectionOk ? "short" : null;
@@ -119,20 +119,25 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const stopLoss = side === "long" ? price * (1 - SQUEEZE_DEFAULTS.stopPct / 100) : price * (1 + SQUEEZE_DEFAULTS.stopPct / 100);
   const takeProfit = side === "long" ? price * (1 + SQUEEZE_DEFAULTS.targetPct / 100) : price * (1 - SQUEEZE_DEFAULTS.targetPct / 100);
 
-  let confidence = 74;
+  let confidence = 72;
   const reasons = [
-    `15m Bollinger squeeze released (${squeezeAge} bar${squeezeAge === 1 ? "" : "s"} ago)`,
+    `Recent 15m Bollinger/Keltner squeeze (${squeezeAge} bar${squeezeAge === 1 ? "" : "s"} ago)`,
     `15m close broke prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle ${side === "long" ? "high" : "low"}`,
     `Volume ${volumeRatio.toFixed(2)}x 20-candle average`,
     `1H EMA20 + RSI ${hourRsi.toFixed(1)} support ${side}`,
   ];
-  if (squeezeAge === 1) confidence += 2;
+
+  if (squeezeAge <= 2) confidence += 3;
+  else if (squeezeAge <= 4) confidence += 1;
+  if (released) { confidence += 2; reasons.push("Current candle is outside Keltner squeeze"); }
+  if (bbExpanding) { confidence += 2; reasons.push("Bollinger width is expanding"); }
   if (volumeRatio >= 2) confidence += 6;
-  else if (volumeRatio >= 1.75) confidence += 4;
-  else if (volumeRatio >= 1.5) confidence += 2;
+  else if (volumeRatio >= 1.5) confidence += 4;
+  else if (volumeRatio >= 1.3) confidence += 2;
+
   const widthExpansion = bb.width[i - 1] > 0 ? bb.width[i] / bb.width[i - 1] : 1;
-  if (widthExpansion >= 1.25) confidence += 5;
-  else if (widthExpansion >= 1.1) confidence += 2;
+  if (widthExpansion >= 1.25) confidence += 3;
+  else if (widthExpansion >= 1.1) confidence += 1;
 
   return {
     coin,
