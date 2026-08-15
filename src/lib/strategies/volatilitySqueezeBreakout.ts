@@ -3,6 +3,8 @@ import type { Bar } from "../strategy";
 
 export const VOLATILITY_SQUEEZE_BREAKOUT_KEY = "volatility-squeeze-breakout" as const;
 
+const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
+
 export const SQUEEZE_DEFAULTS = {
   scanLimit: 70,
   scanEveryMs: 5 * 60 * 1000,
@@ -24,6 +26,10 @@ export const SQUEEZE_DEFAULTS = {
   staleMinutes: 20,
   maxMinutes: 120,
   minConfidence: 70,
+  // A completed 15m breakout can only be acted on during the first scanner window after close.
+  signalFreshMs: 5 * 60 * 1000,
+  // Do not fire the same direction again for the next two completed 15m bars after a breakout.
+  sameDirectionBlockBars: 2,
 } as const;
 
 type Side = "long" | "short";
@@ -50,7 +56,19 @@ function kcSeries(bars: Bar[], period: number, mult: number) {
   return { mid, upper: mid.map((m, i) => m + a[i] * mult), lower: mid.map((m, i) => m - a[i] * mult) };
 }
 
-export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], fifteen: Bar[]): SqueezeSignal {
+function breakoutSideAt(bars: Bar[], idx: number, lookback: number): Side | null {
+  if (idx < lookback || idx >= bars.length) return null;
+  const prior = bars.slice(idx - lookback, idx);
+  if (prior.length < lookback) return null;
+  const high = Math.max(...prior.map((b) => b.h));
+  const low = Math.min(...prior.map((b) => b.l));
+  const close = bars[idx].c;
+  if (close > high) return "long";
+  if (close < low) return "short";
+  return null;
+}
+
+export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], fifteen: Bar[], nowMs = Date.now()): SqueezeSignal {
   const price = fifteen.at(-1)?.c ?? 0;
   const empty: SqueezeSignal = { coin, side: null, confidence: 0, reasons: [], price, indicators: {} };
   if (hourly.length < 60 || fifteen.length < 40) return { ...empty, reasons: ["Waiting for 1H/15m history"] };
@@ -77,8 +95,17 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const lookback = fifteen.slice(-(SQUEEZE_DEFAULTS.breakoutLookback + 1), -1);
   const recentHigh = Math.max(...lookback.map((b) => b.h));
   const recentLow = Math.min(...lookback.map((b) => b.l));
-  const breakoutLong = price > recentHigh;
-  const breakoutShort = price < recentLow;
+  const side = breakoutSideAt(fifteen, i, SQUEEZE_DEFAULTS.breakoutLookback);
+
+  const signalCandleTs = fifteen[i].t;
+  const signalCloseTs = signalCandleTs + FIFTEEN_MINUTES_MS;
+  const signalAgeMs = nowMs - signalCloseTs;
+  const signalFresh = signalAgeMs >= 0 && signalAgeMs < SQUEEZE_DEFAULTS.signalFreshMs;
+
+  const recentBreakSides = Array.from({ length: SQUEEZE_DEFAULTS.sameDirectionBlockBars }, (_, offset) =>
+    breakoutSideAt(fifteen, i - offset - 1, SQUEEZE_DEFAULTS.breakoutLookback));
+  const sameDirectionRecently = side != null && recentBreakSides.includes(side);
+  const oppositeDirectionRecently = side != null && recentBreakSides.some((s) => s != null && s !== side);
 
   const avgVol20 = mean(vols15.slice(-21, -1));
   const volumeRatio = avgVol20 > 0 ? (vols15[i] ?? 0) / avgVol20 : 0;
@@ -103,6 +130,12 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     recentLow,
     hourlyEma20: hourEma20,
     hourlyRsi: hourRsi,
+    signalCandleTs,
+    signalCloseTs,
+    signalAgeMs,
+    signalFresh: signalFresh ? 1 : 0,
+    sameDirectionRecently: sameDirectionRecently ? 1 : 0,
+    oppositeDirectionRecently: oppositeDirectionRecently ? 1 : 0,
   };
 
   if (volumeRatio < SQUEEZE_DEFAULTS.minVolumeRatio) {
@@ -111,20 +144,28 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   if (!rsiOk) {
     return { ...empty, indicators, reasons: [`1H RSI ${hourRsi.toFixed(1)} outside 30-75 momentum band`] };
   }
-
-  const side: Side | null = breakoutLong ? "long" : breakoutShort ? "short" : null;
   if (!side) return { ...empty, indicators, reasons: [`No close beyond prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle extreme`] };
+  if (!signalFresh) {
+    return { ...empty, indicators, reasons: [signalAgeMs < 0 ? "Waiting for breakout candle to complete" : "Breakout signal is stale; same 15m candle will not be re-traded"] };
+  }
+  if (sameDirectionRecently) {
+    return { ...empty, indicators, reasons: [`Same-direction breakout blocked for ${SQUEEZE_DEFAULTS.sameDirectionBlockBars} completed 15m bars`] };
+  }
 
   const stopLoss = side === "long" ? price * (1 - SQUEEZE_DEFAULTS.stopPct / 100) : price * (1 + SQUEEZE_DEFAULTS.stopPct / 100);
   const takeProfit = side === "long" ? price * (1 + SQUEEZE_DEFAULTS.targetPct / 100) : price * (1 - SQUEEZE_DEFAULTS.targetPct / 100);
 
   let confidence = 70;
   const reasons = [
-    `15m close broke prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle ${side === "long" ? "high" : "low"}`,
+    `Fresh 15m close broke prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle ${side === "long" ? "high" : "low"}`,
     `Volume ${volumeRatio.toFixed(2)}x 20-candle average`,
     `1H RSI ${hourRsi.toFixed(1)} inside 30-75 momentum band`,
   ];
 
+  if (oppositeDirectionRecently) {
+    confidence += 4;
+    reasons.push("Fresh opposite breakout after recent failed-direction move");
+  }
   if (recentSqueeze) {
     confidence += 4;
     reasons.push(`Recent Bollinger/Keltner squeeze (${squeezeAge} bar${squeezeAge === 1 ? "" : "s"} ago)`);

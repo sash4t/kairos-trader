@@ -29,35 +29,73 @@ function breakout(volume = 200, compressed = true): Bar[] {
   return bars;
 }
 
+function signalNow(bars: Bar[], offsetMs = 60_000): number {
+  return bars.at(-1)!.t + FIFTEEN + offsetMs;
+}
+
 describe("Volatility Squeeze Breakout momentum mode", () => {
-  it("fires on 4-bar breakout + 1.2x volume + non-extreme RSI even without a squeeze", () => {
-    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), breakout(200, false));
+  it("fires on a fresh 4-bar breakout + 1.2x volume + non-extreme RSI even without a squeeze", () => {
+    const bars = breakout(200, false);
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), bars, signalNow(bars));
     expect(sig.side).toBe("long");
     expect(sig.confidence).toBeGreaterThanOrEqual(SQUEEZE_DEFAULTS.minConfidence);
     expect(sig.indicators.volumeRatio).toBeGreaterThanOrEqual(1.2);
+    expect(sig.indicators.signalFresh).toBe(1);
     expect(sig.stopLoss).toBeCloseTo(102 * (1 - 0.0045), 8);
     expect(sig.takeProfit).toBeCloseTo(102 * 1.01, 8);
   });
 
   it("treats a recent squeeze as a confidence booster rather than a gate", () => {
-    const withSqueeze = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), breakout(200, true));
-    const withoutSqueeze = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), breakout(200, false));
+    const squeezeBars = breakout(200, true);
+    const momentumBars = breakout(200, false);
+    const withSqueeze = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), squeezeBars, signalNow(squeezeBars));
+    const withoutSqueeze = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), momentumBars, signalNow(momentumBars));
     expect(withSqueeze.side).toBe("long");
     expect(withoutSqueeze.side).toBe("long");
     expect(withSqueeze.confidence).toBeGreaterThanOrEqual(withoutSqueeze.confidence);
   });
 
   it("rejects an otherwise valid breakout below the 1.2x volume floor", () => {
-    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), breakout(110, false));
+    const bars = breakout(110, false);
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), bars, signalNow(bars));
     expect(sig.side).toBeNull();
     expect(sig.reasons.join(" ")).toMatch(/volume/i);
   });
 
-  it("uses the momentum-mode scanner defaults", () => {
+  it("expires a completed 15m breakout after the first 5-minute scanner window", () => {
+    const bars = breakout(200, false);
+    const staleNow = bars.at(-1)!.t + FIFTEEN + SQUEEZE_DEFAULTS.signalFreshMs;
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), bars, staleNow);
+    expect(sig.side).toBeNull();
+    expect(sig.indicators.signalFresh).toBe(0);
+    expect(sig.reasons.join(" ")).toMatch(/stale/i);
+  });
+
+  it("blocks repeated same-direction breakout bars for 30 minutes", () => {
+    const bars = breakout(200, false);
+    bars[38] = { ...bars[38], o: 100.6, l: 100.5, c: 101.4, h: 101.5 };
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), bars, signalNow(bars));
+    expect(sig.side).toBeNull();
+    expect(sig.indicators.sameDirectionRecently).toBe(1);
+    expect(sig.reasons.join(" ")).toMatch(/same-direction breakout blocked/i);
+  });
+
+  it("allows a fresh opposite breakout and boosts reversal confidence", () => {
+    const bars = breakout(200, false);
+    bars[38] = { ...bars[38], o: 99.3, h: 99.4, l: 98.4, c: 98.5 };
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), bars, signalNow(bars));
+    expect(sig.side).toBe("long");
+    expect(sig.indicators.oppositeDirectionRecently).toBe(1);
+    expect(sig.reasons.join(" ")).toMatch(/opposite breakout/i);
+  });
+
+  it("uses the momentum-mode scanner and re-entry defaults", () => {
     expect(SQUEEZE_DEFAULTS.kcMult).toBe(1.8);
     expect(SQUEEZE_DEFAULTS.breakoutLookback).toBe(4);
     expect(SQUEEZE_DEFAULTS.squeezeLookbackBars).toBe(5);
     expect(SQUEEZE_DEFAULTS.minVolumeRatio).toBe(1.2);
+    expect(SQUEEZE_DEFAULTS.signalFreshMs).toBe(5 * 60_000);
+    expect(SQUEEZE_DEFAULTS.sameDirectionBlockBars).toBe(2);
   });
 });
 
