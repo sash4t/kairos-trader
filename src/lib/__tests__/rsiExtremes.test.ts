@@ -30,6 +30,11 @@ describe("1H RSI Extremes", () => {
     expect(result.confidence).toBeGreaterThan(RSI_EXTREMES_DEFAULTS.minConfidence);
   });
 
+  it("scans the full eligible universe every minute", () => {
+    expect(RSI_EXTREMES_DEFAULTS.scanEveryMs).toBe(60_000);
+    expect(RSI_EXTREMES_DEFAULTS.scanLimit).toBeGreaterThanOrEqual(1_000);
+  });
+
   it("does not enter without a prior RSI extreme reversal", () => {
     expect(evaluateRsiValues([45, 42, 39, 43]).side).toBeNull();
     const closes = Array.from({ length: 60 }, (_, i) => 100 + Math.sin(i / 3));
@@ -42,7 +47,7 @@ describe("1H RSI Extremes", () => {
     expect(deep.confidence).toBeGreaterThan(shallow.confidence);
   });
 
-  it("uses the intended RSI thresholds and risk defaults", () => {
+  it("uses the intended RSI thresholds and safety defaults", () => {
     expect(RSI_EXTREMES_DEFAULTS.oversold).toBe(30);
     expect(RSI_EXTREMES_DEFAULTS.overbought).toBe(70);
     expect(RSI_EXTREMES_DEFAULTS.longExit).toBe(52);
