@@ -89,7 +89,8 @@ const HOUR = 60 * 60 * 1000;
 const FOUR_HOUR = 4 * HOUR;
 const DAY = 24 * HOUR;
 const FIFTEEN = 15 * 60 * 1000;
-const LIQUIDITY_FLOOR = 5_000_000;
+const LIQUIDITY_FLOOR = 1_500_000;
+const RSI_LIQUIDITY_FLOOR = 1_000_000;
 const EXCLUDED = new Set(["BTC", "ETH"]);
 
 export class PaperEngine {
@@ -389,9 +390,11 @@ export class PaperEngine {
     } finally { this.evaluating = false; }
   }
 
-  private candidates(limit = 35) {
+  private candidates(limit = 35, options: { minVolume?: number; includeMajors?: boolean } = {}) {
+    const minVolume = options.minVolume ?? LIQUIDITY_FLOOR;
+    const includeMajors = options.includeMajors ?? false;
     return this.meta.map((m, i) => ({ meta: m, ctx: this.ctxs[i] }))
-      .filter((x) => x.ctx && +x.ctx.dayNtlVlm > LIQUIDITY_FLOOR && !EXCLUDED.has(x.meta.name))
+      .filter((x) => x.ctx && +x.ctx.dayNtlVlm > minVolume && (includeMajors || !EXCLUDED.has(x.meta.name)))
       .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm).slice(0, limit);
   }
 
@@ -410,7 +413,7 @@ export class PaperEngine {
 
   private async runRsiCycle() {
     const held = new Set(this.positions.map((p) => p.coin));
-    for (const { meta } of this.candidates(RSI_EXTREMES_DEFAULTS.scanLimit)) {
+    for (const { meta } of this.candidates(RSI_EXTREMES_DEFAULTS.scanLimit, { minVolume: RSI_LIQUIDITY_FLOOR, includeMajors: true })) {
       if (this.positions.length >= this.settings.max_positions) break;
       if (held.has(meta.name)) continue;
       const hourly = await this.bars(meta.name, "1h", 100, HOUR);
