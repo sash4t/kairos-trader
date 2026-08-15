@@ -18,6 +18,10 @@ import {
   VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS, evaluateVolatilitySqueezeBreakout,
   squeezeRiskSizedQuantity, favorablePct, adverseAbsPct, squeezeTrailStop,
 } from "./strategies/volatilitySqueezeBreakout";
+import {
+  RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes, latestRsi,
+  shouldExitRsiExtreme, rsiExtremeRiskSizedQuantity,
+} from "./strategies/rsiExtremes";
 
 export interface Settings {
   user_id: string;
@@ -109,6 +113,8 @@ export class PaperEngine {
   private shockDir: ShockDir = null;
   private seriesCache = new Map<string, { bars: Bar[]; ts: number }>();
   private lastSqueezeScanTs = 0;
+  private lastRsiScanTs = 0;
+  private lastRsiExitCheckTs = 0;
 
   constructor(userId: string, settings: Settings, log: Log) {
     this.userId = userId;
@@ -123,7 +129,9 @@ export class PaperEngine {
   private isIntraday() { return this.settings.strategy_key === INTRADAY_PULLBACK_KEY; }
   private isOriginalTpa() { return this.settings.strategy_key === ORIGINAL_TREND_PRICE_ACTION_KEY; }
   private isSqueeze() { return this.settings.strategy_key === VOLATILITY_SQUEEZE_BREAKOUT_KEY; }
+  private isRsi() { return this.settings.strategy_key === RSI_EXTREMES_KEY; }
   private isSqueezePosition(p: OpenPosition) { return p.reason?.includes(`[${VOLATILITY_SQUEEZE_BREAKOUT_KEY}]`) === true; }
+  private isRsiPosition(p: OpenPosition) { return p.reason?.includes(`[${RSI_EXTREMES_KEY}]`) === true; }
   private mid(coin: string): number | null { const v = this.mids[coin]; return v ? +v : null; }
 
   async start() {
@@ -301,8 +309,22 @@ export class PaperEngine {
       if (next !== p.stop_loss) { p.stop_loss = next; changed = true; }
     }
 
-    if (changed || maxAbsMovePct !== Number((p.indicators ?? {}).maxAbsMovePct ?? 0)) this.persistPositionUpdate(p);
-    else this.persistPositionUpdate(p);
+    this.persistPositionUpdate(p);
+  }
+
+  private async manageRsiExits() {
+    for (const p of [...this.positions]) {
+      if (!this.isRsiPosition(p)) continue;
+      const hourly = await this.bars(p.coin, "1h", 100, HOUR);
+      if (!hourly || hourly.length < 40) continue;
+      const value = latestRsi(hourly);
+      if (!Number.isFinite(value)) continue;
+      p.indicators = { ...(p.indicators ?? {}), rsi: value };
+      this.persistPositionUpdate(p);
+      if (shouldExitRsiExtreme(p.side, value)) {
+        await this.closePosition(p, this.mid(p.coin) ?? p.entry_price, p.side === "long" ? "rsi_mean_reversion_52" : "rsi_mean_reversion_48");
+      }
+    }
   }
 
   private tick() {
@@ -321,6 +343,15 @@ export class PaperEngine {
       const mark = this.mid(p.coin); if (mark == null) continue;
       if (shockHitsSide(this.shockDir, p.side)) { this.closePosition(p, mark, "btc_shock").catch(() => {}); continue; }
       if (this.isSqueezePosition(p)) { this.manageSqueezePosition(p, mark).catch((e) => this.log("error", `Squeeze exit ${p.coin}: ${e.message}`)); continue; }
+      if (this.isRsiPosition(p)) {
+        const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
+        if (hitStop) this.closePosition(p, mark, "rsi_emergency_stop").catch(() => {});
+        if (Date.now() - this.lastRsiExitCheckTs >= 60_000) {
+          this.lastRsiExitCheckTs = Date.now();
+          this.manageRsiExits().catch((e) => this.log("error", `RSI exit check: ${e.message}`));
+        }
+        continue;
+      }
       this.rTrail(p, mark);
       const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
       const hitTp = Number.isFinite(p.take_profit) && (p.side === "long" ? mark >= p.take_profit : mark <= p.take_profit);
@@ -341,7 +372,12 @@ export class PaperEngine {
     if (!this.settings.bot_enabled || this.settings.kill_switch_engaged || this.settings.mode !== "paper" || this.settings.server_agent_enabled || this.evaluating) return;
     this.evaluating = true;
     try {
-      if (this.isSqueeze()) {
+      if (this.isRsi()) {
+        if (Date.now() - this.lastRsiScanTs >= RSI_EXTREMES_DEFAULTS.scanEveryMs) {
+          this.lastRsiScanTs = Date.now();
+          await this.runRsiCycle();
+        }
+      } else if (this.isSqueeze()) {
         if (Date.now() - this.lastSqueezeScanTs >= SQUEEZE_DEFAULTS.scanEveryMs) {
           this.lastSqueezeScanTs = Date.now();
           await this.runSqueezeCycle();
@@ -370,6 +406,28 @@ export class PaperEngine {
       this.seriesCache.set(key, { bars: out, ts: Date.now() });
       return out;
     } catch { return null; }
+  }
+
+  private async runRsiCycle() {
+    const held = new Set(this.positions.map((p) => p.coin));
+    for (const { meta } of this.candidates(RSI_EXTREMES_DEFAULTS.scanLimit)) {
+      if (this.positions.length >= this.settings.max_positions) break;
+      if (held.has(meta.name)) continue;
+      const hourly = await this.bars(meta.name, "1h", 100, HOUR);
+      if (!hourly || hourly.length < 40) continue;
+      const sig = evaluateRsiExtremes(meta.name, hourly);
+      if (!sig.side || sig.stopLoss == null) continue;
+      if (sig.confidence < Math.max(RSI_EXTREMES_DEFAULTS.minConfidence, this.settings.min_confidence)) continue;
+      if (shockHitsSide(this.shockDir, sig.side)) continue;
+      const equity = this.currentEquity();
+      const leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, this.settings.max_leverage, meta.maxLeverage)));
+      const riskQty = rsiExtremeRiskSizedQuantity(equity, sig.price, sig.stopLoss, RSI_EXTREMES_DEFAULTS.riskPct);
+      const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;
+      const size = Math.min(riskQty, roomQty);
+      if (!(size > 0) || !Number.isFinite(size)) continue;
+      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, Number.NaN, sig.confidence, sig.reasons, sig.indicators, RSI_EXTREMES_DEFAULTS.riskPct, undefined, undefined, "1h", RSI_EXTREMES_KEY);
+      held.add(meta.name);
+    }
   }
 
   private async runSqueezeCycle() {

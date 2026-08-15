@@ -15,6 +15,10 @@ import {
   VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS, evaluateVolatilitySqueezeBreakout,
   favorablePct as squeezeFavorablePct, adverseAbsPct, squeezeTrailStop,
 } from "./strategies/volatilitySqueezeBreakout";
+import {
+  RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes, latestRsi,
+  shouldExitRsiExtreme,
+} from "./strategies/rsiExtremes";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
 const BARS = 230;
@@ -40,7 +44,7 @@ interface Settings {
   paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: string; tp_rr?: number; trendline_risk_pct?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
   tb_timeframes?: string; tb_pivot_strength?: number; tb_risk_pct?: number; tb_position_size_pct?: number; tb_refresh_min?: number;
-  last_cycle_at?: string | null; last_cycle_note?: string | null; squeeze_last_scan_at?: string | null;
+  last_cycle_at?: string | null; last_cycle_note?: string | null; squeeze_last_scan_at?: string | null; rsi_last_scan_at?: string | null;
 }
 interface PositionRow {
   id: string; coin: string; side: "long" | "short"; size: number; notional: number; leverage: number;
@@ -120,6 +124,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
         indicators: (p.indicators ?? {}) as Record<string, number>,
       })) as PositionRow[];
       const isSqueezePosition = (p: PositionRow) => p.reason?.includes(`[${VOLATILITY_SQUEEZE_BREAKOUT_KEY}]`) === true;
+      const isRsiPosition = (p: PositionRow) => p.reason?.includes(`[${RSI_EXTREMES_KEY}]`) === true;
       let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
       if (isLive && creds) {
         try {
@@ -147,8 +152,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const isTb = (s.strategy_key ?? "") === TRENDLINE_BREAK_KEY;
       const isOriginalTpa = (s.strategy_key ?? "") === ORIGINAL_TREND_PRICE_ACTION_KEY;
       const isSqueeze = (s.strategy_key ?? "") === VOLATILITY_SQUEEZE_BREAKOUT_KEY;
+      const isRsi = (s.strategy_key ?? "") === RSI_EXTREMES_KEY;
       const squeezeLastScanMs = s.squeeze_last_scan_at ? Date.parse(s.squeeze_last_scan_at) : 0;
       const squeezeScanDue = isSqueeze && (!Number.isFinite(squeezeLastScanMs) || Date.now() - squeezeLastScanMs >= SQUEEZE_DEFAULTS.scanEveryMs);
+      const rsiLastScanMs = s.rsi_last_scan_at ? Date.parse(s.rsi_last_scan_at) : 0;
+      const rsiScanDue = isRsi && (!Number.isFinite(rsiLastScanMs) || Date.now() - rsiLastScanMs >= RSI_EXTREMES_DEFAULTS.scanEveryMs);
       const originalRiskPct = Math.min(5, Math.max(0.05, +(s.trendline_risk_pct ?? ORIGINAL_TPA_DEFAULTS.riskPct)));
       const tbCfg = {
         timeframes: parseTimeframes(s.tb_timeframes),
@@ -158,7 +166,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       };
 
       for (const p of positions) {
-        if (isTb || isSqueezePosition(p)) continue;
+        if (isTb || isSqueezePosition(p) || isRsiPosition(p)) continue;
         const hardStop = p.side === "long"
           ? p.entry_price * (1 - hardSlPct / 100)
           : p.entry_price * (1 + hardSlPct / 100);
@@ -301,13 +309,15 @@ export async function runTradingCycle(): Promise<CycleReport> {
       if (canTrade) {
         for (const p of [...positions]) {
           const squeezePosition = isSqueezePosition(p);
-          const protectiveStop = squeezePosition ? p.stop_loss : (p.side === "long" ? p.entry_price * (1 - hardSlPct / 100) : p.entry_price * (1 + hardSlPct / 100));
+          const rsiPosition = isRsiPosition(p);
+          const protectiveStop = squeezePosition || rsiPosition ? p.stop_loss : (p.side === "long" ? p.entry_price * (1 - hardSlPct / 100) : p.entry_price * (1 + hardSlPct / 100));
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           const breached = p.side === "long" ? mark <= protectiveStop : mark >= protectiveStop;
           if (breached) {
             if (squeezePosition) await log(s.user_id, "warn", `${p.coin} breached squeeze stop @ ${protectiveStop.toFixed(6)}.`);
+            else if (rsiPosition) await log(s.user_id, "warn", `${p.coin} breached RSI emergency stop @ ${protectiveStop.toFixed(6)}.`);
             else await log(s.user_id, "warn", `${p.coin} breached hard ${hardSlPct.toFixed(2)}% stop (${protectiveStop.toFixed(6)}); forcing close now.`, { mark, hardStop: protectiveStop, side: p.side });
-            await closeTbPosition(p, mark, squeezePosition ? "squeeze_stop_loss" : "hard_stop_loss");
+            await closeTbPosition(p, mark, squeezePosition ? "squeeze_stop_loss" : rsiPosition ? "rsi_emergency_stop" : "hard_stop_loss");
             continue;
           }
           if (isLive && creds) {
@@ -330,6 +340,22 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (!shockHitsSide(shockDir, p.side)) continue;
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           await closeTbPosition(p, mark, "btc_shock");
+        }
+      }
+
+      if (canTrade) {
+        for (const p of [...positions]) {
+          if (!isRsiPosition(p)) continue;
+          const hourly = await loadBars(p.coin, "1h", 100);
+          if (!hourly || hourly.length < 40) continue;
+          const value = latestRsi(hourly);
+          if (!Number.isFinite(value)) continue;
+          p.indicators = { ...(p.indicators ?? {}), rsi: value };
+          await (supabaseAdmin as any).from("paper_positions").update({ indicators: p.indicators }).eq("id", p.id).eq("status", "open");
+          if (shouldExitRsiExtreme(p.side, value)) {
+            const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+            await closeTbPosition(p, mark, p.side === "long" ? "rsi_mean_reversion_52" : "rsi_mean_reversion_48");
+          }
         }
       }
 
@@ -408,7 +434,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
 
       if (!isTb && canTrade) {
         for (const p of [...positions]) {
-          if (isSqueezePosition(p)) continue;
+          if (isSqueezePosition(p) || isRsiPosition(p)) continue;
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           const previousPeak = p.trail_high ?? p.entry_price;
           const best = p.side === "long" ? Math.max(previousPeak, mark) : Math.min(previousPeak, mark);
@@ -433,14 +459,16 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const eligibleCount = liquid.length;
       const match = s.last_cycle_note?.match(/scanner_cursor=(\d+)/);
       const cursor = eligibleCount ? Math.max(0, Math.min(Number(match?.[1] ?? 0), eligibleCount - 1)) : 0;
-      const scanCount = isSqueeze
-        ? (squeezeScanDue ? Math.min(SQUEEZE_DEFAULTS.scanLimit, eligibleCount) : 0)
-        : Math.min(isOriginalTpa ? SCAN_PER_CYCLE_ORIGINAL_TPA : SCAN_PER_CYCLE, eligibleCount);
-      const scanTargets = isSqueeze
+      const scanCount = isRsi
+        ? (rsiScanDue ? Math.min(RSI_EXTREMES_DEFAULTS.scanLimit, eligibleCount) : 0)
+        : isSqueeze
+          ? (squeezeScanDue ? Math.min(SQUEEZE_DEFAULTS.scanLimit, eligibleCount) : 0)
+          : Math.min(isOriginalTpa ? SCAN_PER_CYCLE_ORIGINAL_TPA : SCAN_PER_CYCLE, eligibleCount);
+      const scanTargets = isRsi || isSqueeze
         ? liquid.slice(0, scanCount)
         : Array.from({ length: scanCount }, (_, i) => liquid[(cursor + i) % eligibleCount]);
-      const nextCursor = isSqueeze ? cursor : (eligibleCount ? (cursor + scanCount) % eligibleCount : 0);
-      notes.push(isSqueeze && !squeezeScanDue ? "squeeze scan waiting for 5m cadence" : `scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
+      const nextCursor = isRsi || isSqueeze ? cursor : (eligibleCount ? (cursor + scanCount) % eligibleCount : 0);
+      notes.push(isRsi && !rsiScanDue ? "RSI scan waiting for 5m cadence" : isSqueeze && !squeezeScanDue ? "squeeze scan waiting for 5m cadence" : `scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
 
       if (s.scalp_enabled && canTrade && equityNow > 0 && positions.length < +s.max_positions) {
         for (const target of scanTargets) {
@@ -452,7 +480,14 @@ export async function runTradingCycle(): Promise<CycleReport> {
           let originalSafety: number | undefined;
           let squeezeStop = 0;
           let squeezeTp = 0;
-          if (isSqueeze) {
+          let rsiStop = 0;
+          if (isRsi) {
+            const hourly = await loadBars(target.meta.name, "1h", 100); report.scanned++;
+            if (!hourly || hourly.length < 40) continue;
+            const q = evaluateRsiExtremes(target.meta.name, hourly);
+            rsiStop = q.stopLoss ?? 0;
+            sig = { coin: q.coin, side: q.side, family: RSI_EXTREMES_KEY, confidence: q.confidence, reasons: q.reasons, price: q.price, atrPct: 0, indicators: q.indicators };
+          } else if (isSqueeze) {
             const [hourly, fifteen] = await Promise.all([loadBars(target.meta.name, "1h", 100), loadBars(target.meta.name, "15m", 120)]);
             report.scanned++;
             if (!hourly || !fifteen || hourly.length < 60 || fifteen.length < 40) continue;
@@ -478,16 +513,26 @@ export async function runTradingCycle(): Promise<CycleReport> {
               sig = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly });
             }
           }
-          const minConfidence = isSqueeze
-            ? Math.max(SQUEEZE_DEFAULTS.minConfidence, +s.min_confidence)
-            : isOriginalTpa ? Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, +s.min_confidence) : +s.min_confidence;
+          const minConfidence = isRsi
+            ? Math.max(RSI_EXTREMES_DEFAULTS.minConfidence, +s.min_confidence)
+            : isSqueeze
+              ? Math.max(SQUEEZE_DEFAULTS.minConfidence, +s.min_confidence)
+              : isOriginalTpa ? Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, +s.min_confidence) : +s.min_confidence;
           if (!sig.side || sig.confidence < minConfidence) continue;
           if (shockHitsSide(shockDir, sig.side)) continue;
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
           const quotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
           let leverage: number; let size: number; let tbStop = 0; let originalStop = 0;
-          if (isSqueeze) {
+          if (isRsi) {
+            leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, +s.max_leverage, target.meta.maxLeverage)));
+            rsiStop = sig.side === "long" ? quotePx * (1 - RSI_EXTREMES_DEFAULTS.stopPct / 100) : quotePx * (1 + RSI_EXTREMES_DEFAULTS.stopPct / 100);
+            const riskBasedSize = riskSize(equity, RSI_EXTREMES_DEFAULTS.riskPct, quotePx, rsiStop);
+            const room = equity * (+s.max_exposure_pct / 100) * leverage - positions.reduce((sum, p) => sum + p.notional, 0);
+            if (room <= 0) { notes.push("exposure cap reached"); break; }
+            size = Math.min(riskBasedSize, room / quotePx);
+            if (!(size > 0) || !Number.isFinite(size)) continue;
+          } else if (isSqueeze) {
             leverage = Math.max(1, Math.floor(Math.min(3, +s.max_leverage, target.meta.maxLeverage)));
             squeezeStop = sig.side === "long" ? quotePx * (1 - SQUEEZE_DEFAULTS.stopPct / 100) : quotePx * (1 + SQUEEZE_DEFAULTS.stopPct / 100);
             squeezeTp = sig.side === "long" ? quotePx * (1 + SQUEEZE_DEFAULTS.targetPct / 100) : quotePx * (1 - SQUEEZE_DEFAULTS.targetPct / 100);
@@ -552,12 +597,14 @@ export async function runTradingCycle(): Promise<CycleReport> {
           }
           const sl = isTb && tbStop > 0
             ? tbStop
-            : isSqueeze
-              ? (sig.side === "long" ? entry * (1 - SQUEEZE_DEFAULTS.stopPct / 100) : entry * (1 + SQUEEZE_DEFAULTS.stopPct / 100))
-              : isOriginalTpa && originalStop > 0
-                ? originalStop
-                : sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
-          const tp = isTb
+            : isRsi
+              ? (sig.side === "long" ? entry * (1 - RSI_EXTREMES_DEFAULTS.stopPct / 100) : entry * (1 + RSI_EXTREMES_DEFAULTS.stopPct / 100))
+              : isSqueeze
+                ? (sig.side === "long" ? entry * (1 - SQUEEZE_DEFAULTS.stopPct / 100) : entry * (1 + SQUEEZE_DEFAULTS.stopPct / 100))
+                : isOriginalTpa && originalStop > 0
+                  ? originalStop
+                  : sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
+          const tp = isTb || isRsi
             ? null
             : isSqueeze
               ? (sig.side === "long" ? entry * (1 + SQUEEZE_DEFAULTS.targetPct / 100) : entry * (1 - SQUEEZE_DEFAULTS.targetPct / 100))
@@ -580,22 +627,25 @@ export async function runTradingCycle(): Promise<CycleReport> {
 
           const extra = isTb
             ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: sl, risk_pct: tbCfg.riskPct }
-            : isSqueeze
-              ? { timeframe: "15m", initial_stop: sl, risk_pct: SQUEEZE_DEFAULTS.riskPct, partial_taken: false }
-              : isOriginalTpa
-                ? { safety_line: originalSafety ?? null, action_line: sig.actionLine ?? null, initial_stop: sl, risk_pct: originalRiskPct }
-                : { initial_stop: sl };
+            : isRsi
+              ? { timeframe: "1h", initial_stop: sl, risk_pct: RSI_EXTREMES_DEFAULTS.riskPct }
+              : isSqueeze
+                ? { timeframe: "15m", initial_stop: sl, risk_pct: SQUEEZE_DEFAULTS.riskPct, partial_taken: false }
+                : isOriginalTpa
+                  ? { safety_line: originalSafety ?? null, action_line: sig.actionLine ?? null, initial_stop: sl, risk_pct: originalRiskPct }
+                  : { initial_stop: sl };
           const insertRow: any = { user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra };
           const { data: inserted, error: insErr } = await (supabaseAdmin as any).from("paper_positions").insert(insertRow).select("id,opened_at").single();
           if (insErr || !inserted) { report.errors.push(`record ${sig.coin}: ${insErr?.message ?? "insert returned no row"}`); continue; }
           positions.push({ id: inserted.id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: (isOriginalTpa ? originalSafety : tbSafety) ?? null, opened_at: inserted.opened_at, reason, partial_taken: false, realized_pnl: 0, indicators: sig.indicators });
           held.add(sig.coin); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isSqueeze ? SQUEEZE_DEFAULTS.riskPct : isTb ? tbCfg.riskPct : isOriginalTpa ? originalRiskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, hardSlPct: isSqueeze ? SQUEEZE_DEFAULTS.stopPct : hardSlPct, leverage, nativeStop: isLive ? sl : null });
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isRsi ? RSI_EXTREMES_DEFAULTS.riskPct : isSqueeze ? SQUEEZE_DEFAULTS.riskPct : isTb ? tbCfg.riskPct : isOriginalTpa ? originalRiskPct : null, positionSizePct: isTb ? tbCfg.positionSizePct : null, hardSlPct: isRsi ? RSI_EXTREMES_DEFAULTS.stopPct : isSqueeze ? SQUEEZE_DEFAULTS.stopPct : hardSlPct, leverage, nativeStop: isLive ? sl : null });
         }
       }
       const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · scanner_cursor=${nextCursor}`;
       const settingsUpdate: Record<string, unknown> = { last_cycle_at: new Date().toISOString(), last_cycle_note: note };
       if (squeezeScanDue) settingsUpdate.squeeze_last_scan_at = new Date().toISOString();
+      if (rsiScanDue) settingsUpdate.rsi_last_scan_at = new Date().toISOString();
       await (supabaseAdmin as any).from("bot_settings").update(settingsUpdate).eq("user_id", s.user_id);
     } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`${s.user_id}: ${msg}`); await log(s.user_id, "error", `Trading cycle failed: ${msg}`); }
   }

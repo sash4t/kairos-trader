@@ -6,6 +6,7 @@ import { TRENDLINE_BREAK_KEY, TB_DEFAULTS, TB_TIMEFRAMES, parseTimeframes } from
 import { INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS } from "@/lib/strategies/intradayMomentumPullback";
 import { ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS } from "@/lib/strategies/originalTrendPriceAction";
 import { VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS } from "@/lib/strategies/volatilitySqueezeBreakout";
+import { RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS } from "@/lib/strategies/rsiExtremes";
 import { strategySelectionPatch } from "@/lib/scalp";
 
 export const Route = createFileRoute("/_authenticated/strategy")({ component: Strategy });
@@ -58,6 +59,7 @@ function Strategy() {
   const isIntraday = key === INTRADAY_PULLBACK_KEY;
   const isOriginal = key === ORIGINAL_TREND_PRICE_ACTION_KEY;
   const isSqueeze = key === VOLATILITY_SQUEEZE_BREAKOUT_KEY;
+  const isRsi = key === RSI_EXTREMES_KEY;
   const tf = parseTimeframes(s.tb_timeframes);
   const set = (patch: any) => saveSettings(patch);
 
@@ -66,8 +68,8 @@ function Strategy() {
       <div>
         <h1 className="text-xl font-semibold sm:text-2xl">Strategy & risk</h1>
         <p className="text-sm text-muted-foreground">
-          Five strategy models are available. The Volatility Squeeze Breakout model is the statistical/high-rotation option:
-          it waits for 15m compression to release with a real range breakout and volume, then uses only a light 1H EMA/RSI direction check.
+          Six strategy models are available. Choose the market behavior you want Kairos to trade, while global leverage,
+          exposure, position-count and daily-loss controls remain in force.
         </p>
       </div>
 
@@ -78,7 +80,7 @@ function Strategy() {
             Every strategy is still capped by the global leverage, exposure, position-count and daily-loss limits.
           </p>
         </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           <StrategyCard
             active={key === TRENDLINE_STRATEGY_KEY}
             title="Trendline Price Action"
@@ -102,25 +104,54 @@ function Strategy() {
             active={isOriginal}
             badge="Classic"
             title="Original Trend Price Action"
-            description="1H trend-line break + EMA20/50, RSI, MACD, volume and ATR confidence. 4H is required; Daily may be neutral but cannot oppose."
+            description="1H trend-line break + EMA20/50, RSI, MACD, volume and ATR confidence. 4H drives direction; Daily cannot oppose."
             onClick={() => set(strategySelectionPatch(ORIGINAL_TREND_PRICE_ACTION_KEY))}
           />
           <StrategyCard
             active={isSqueeze}
             badge="Rotation"
             title="Volatility Squeeze Breakout"
-            description="15m BB/KC squeeze release + 6-candle breakout + ≥1.5x volume, with a light 1H EMA20/RSI filter."
+            description="15m momentum breakout: 4-candle range break + ≥1.2x volume + non-extreme 1H RSI. A recent squeeze boosts confidence but is not required."
             onClick={() => set(strategySelectionPatch(VOLATILITY_SQUEEZE_BREAKOUT_KEY))}
+          />
+          <StrategyCard
+            active={isRsi}
+            badge="Mean reversion"
+            title="1H RSI Extremes"
+            description="Pure RSI(14): buy reversals from oversold ≤30, short reversals from overbought ≥70, then ride toward the RSI 50 zone."
+            onClick={() => set(strategySelectionPatch(RSI_EXTREMES_KEY))}
           />
         </div>
       </section>
+
+      {isRsi && (
+        <section className="panel space-y-4 p-4 sm:p-5">
+          <div className="text-sm font-semibold">1H RSI Extremes — model</div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Entry long</span><div className="mt-1 mono text-base">≤{RSI_EXTREMES_DEFAULTS.oversold} → cross up</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Entry short</span><div className="mt-1 mono text-base">≥{RSI_EXTREMES_DEFAULTS.overbought} → cross down</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Mean-reversion exit</span><div className="mt-1 mono text-base">L {RSI_EXTREMES_DEFAULTS.longExit}+ / S {RSI_EXTREMES_DEFAULTS.shortExit}-</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Risk / emergency stop</span><div className="mt-1 mono text-base">{RSI_EXTREMES_DEFAULTS.riskPct}% / {RSI_EXTREMES_DEFAULTS.stopPct}%</div></div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Scanner</span><div className="mt-1 mono text-base">Top {RSI_EXTREMES_DEFAULTS.scanLimit} / every 5m</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">RSI period</span><div className="mt-1 mono text-base">1H RSI({RSI_EXTREMES_DEFAULTS.period})</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Leverage cap</span><div className="mt-1 mono text-base">{RSI_EXTREMES_DEFAULTS.maxLeverage}x</div></div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            This strategy deliberately uses RSI only for the trading thesis. It arms at an extreme, waits for the completed 1H RSI to reverse back out of that extreme,
+            and then rides the mean-reversion move toward the 50 zone. Deeper extremes and faster RSI reversals increase confidence. EMA, MACD, volume, ATR,
+            trendlines and higher-timeframe direction do not gate entries or exits. The fixed {RSI_EXTREMES_DEFAULTS.stopPct}% emergency stop exists only for risk control.
+          </p>
+        </section>
+      )}
 
       {isSqueeze && (
         <section className="panel space-y-4 p-4 sm:p-5">
           <div className="text-sm font-semibold">Volatility Squeeze Breakout — model</div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Scanner</span><div className="mt-1 mono text-base">Top {SQUEEZE_DEFAULTS.scanLimit} / every 5m</div></div>
-            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Squeeze</span><div className="mt-1 mono text-base">BB 20/2 inside KC 20/{SQUEEZE_DEFAULTS.kcMult}</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Breakout</span><div className="mt-1 mono text-base">Prior {SQUEEZE_DEFAULTS.breakoutLookback} bars</div></div>
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Risk / stop</span><div className="mt-1 mono text-base">{SQUEEZE_DEFAULTS.riskPct}% / {SQUEEZE_DEFAULTS.stopPct}%</div></div>
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Breakout volume</span><div className="mt-1 mono text-base">≥ {SQUEEZE_DEFAULTS.minVolumeRatio}x avg</div></div>
           </div>
@@ -131,9 +162,8 @@ function Strategy() {
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Time exits</span><div className="mt-1 mono text-base">{SQUEEZE_DEFAULTS.staleMinutes}m stale / {SQUEEZE_DEFAULTS.maxMinutes}m max</div></div>
           </div>
           <p className="text-xs text-muted-foreground">
-            A completed 15m candle must have been squeezed with Bollinger Bands inside the Keltner Channel. The next completed candle must release the squeeze,
-            widen the Bollinger Bands, close beyond the prior {SQUEEZE_DEFAULTS.breakoutLookback}-candle extreme and print at least {SQUEEZE_DEFAULTS.minVolumeRatio}x the prior 20-candle average volume.
-            Longs require 1H price above EMA20 with RSI 40–70; shorts require price below EMA20 with RSI 30–60. Leverage is capped at 3x even if the global maximum is higher.
+            A completed 15m close beyond the prior {SQUEEZE_DEFAULTS.breakoutLookback}-candle high/low with at least {SQUEEZE_DEFAULTS.minVolumeRatio}x the prior 20-candle average volume is the core gate.
+            The 1H RSI must be non-extreme. A recent BB/KC squeeze, EMA20 directional agreement, BB expansion and stronger volume add confidence but do not block an otherwise valid breakout.
           </p>
           <p className="text-xs text-muted-foreground">
             At +{SQUEEZE_DEFAULTS.breakevenAtPct}% the stop moves to entry. At +{SQUEEZE_DEFAULTS.partialAtPct}% the engine closes 50% and trails the remaining half by {SQUEEZE_DEFAULTS.trailPct}% from the best price.
@@ -161,7 +191,7 @@ function Strategy() {
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            4H direction is mandatory. Daily may agree or be neutral, but a clearly opposing Daily trend blocks the trade. A genuine 1H trend-line crossing remains actionable for up to three completed hourly bars.
+            4H direction drives the setup. Daily may agree or be neutral, but a clearly opposing Daily trend blocks the trade. Recent 1H trend-line crossings remain actionable with confidence decay.
             EMA20/50, RSI, MACD histogram, relative volume and trend-line touch quality then raise or lower confidence. ATR is the hard volatility filter. Risk per trade is user-configurable from 0.05% to 5% of equity.
           </p>
         </section>

@@ -3,9 +3,10 @@ import { TRENDLINE_BREAK_KEY } from "./strategies/trendlineBreak";
 import { INTRADAY_PULLBACK_KEY } from "./strategies/intradayMomentumPullback";
 import { ORIGINAL_TREND_PRICE_ACTION_KEY } from "./strategies/originalTrendPriceAction";
 import { VOLATILITY_SQUEEZE_BREAKOUT_KEY } from "./strategies/volatilitySqueezeBreakout";
+import { RSI_EXTREMES_KEY } from "./strategies/rsiExtremes";
 
 export type ScalpSide = "long" | "short";
-export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDLINE_BREAK_KEY | typeof INTRADAY_PULLBACK_KEY | typeof ORIGINAL_TREND_PRICE_ACTION_KEY | typeof VOLATILITY_SQUEEZE_BREAKOUT_KEY;
+export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDLINE_BREAK_KEY | typeof INTRADAY_PULLBACK_KEY | typeof ORIGINAL_TREND_PRICE_ACTION_KEY | typeof VOLATILITY_SQUEEZE_BREAKOUT_KEY | typeof RSI_EXTREMES_KEY;
 
 export interface ScalpSignal {
   coin: string; side: ScalpSide | null; family: string; confidence: number; reasons: string[]; price: number; atrPct: number; indicators: Record<string, number>;
@@ -17,7 +18,8 @@ export const STRATEGY_OPTIONS = [
   { key: TRENDLINE_BREAK_KEY, name: "Trendline Break", description: "Chained multi-timeframe trendlines. Close through an upward line goes short; close through a downward line goes long; the opposing line is the structural safety stop." },
   { key: INTRADAY_PULLBACK_KEY, name: "Intraday Momentum Pullback", description: "Paper-mode 4H → 1H → 15m momentum pullbacks with EMA20 rejection entries, structure + ATR stops, risk-based sizing and R-based profit protection." },
   { key: ORIGINAL_TREND_PRICE_ACTION_KEY, name: "Original Trend Price Action", description: "1H trend-line execution with EMA20/50, RSI, MACD, volume and ATR confidence scoring, gated by aligned Daily and 4H direction." },
-  { key: VOLATILITY_SQUEEZE_BREAKOUT_KEY, name: "Volatility Squeeze Breakout", description: "Recent 15m Bollinger/Keltner squeeze within 5 bars, 4-candle breakout, ≥1.2x volume and a light 1H EMA/RSI direction filter." },
+  { key: VOLATILITY_SQUEEZE_BREAKOUT_KEY, name: "Volatility Squeeze Breakout", description: "15m momentum breakout: 4-candle breakout + ≥1.2x volume + non-extreme 1H RSI; recent squeeze only boosts confidence." },
+  { key: RSI_EXTREMES_KEY, name: "1H RSI Extremes", description: "1H RSI(14) mean-reversion: buy reversals from oversold ≤30, short reversals from overbought ≥70, ride toward the 50 zone." },
 ] as const;
 
 export function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {
@@ -77,5 +79,6 @@ export function strategySelectionPatch(key: StrategyKey): Record<string, unknown
   if (key === INTRADAY_PULLBACK_KEY) return { strategy_key: key, min_confidence: 65, trailing_enabled: true };
   if (key === ORIGINAL_TREND_PRICE_ACTION_KEY) return { strategy_key: key, min_confidence: 60, trailing_enabled: true };
   if (key === VOLATILITY_SQUEEZE_BREAKOUT_KEY) return { strategy_key: key, min_confidence: 70, trailing_enabled: true, max_positions: 5 };
+  if (key === RSI_EXTREMES_KEY) return { strategy_key: key, min_confidence: 70, trailing_enabled: false };
   return { strategy_key: key };
 }
