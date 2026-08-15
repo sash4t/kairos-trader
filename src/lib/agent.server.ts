@@ -25,7 +25,8 @@ const BARS = 230;
 const HTF_BARS = 240;
 const SCAN_PER_CYCLE = 35;
 const SCAN_PER_CYCLE_ORIGINAL_TPA = 50;
-const MIN_24H_VOLUME = 5_000_000;
+const MIN_24H_VOLUME = 1_500_000;
+const RSI_MIN_24H_VOLUME = 1_000_000;
 
 type Level = "info" | "warn" | "error" | "trade";
 async function hl<T>(body: unknown): Promise<T> {
@@ -67,7 +68,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
   const mids = await hl<Record<string, string>>({ type: "allMids" });
   const [meta, ctxs] = await hl<[{ universe: AssetMeta[] }, AssetCtx[]]>({ type: "metaAndAssetCtxs" });
   const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
-  const liquid = meta.universe.map((m, i) => ({ meta: m, ctx: ctxs[i] })).filter((x) => x.ctx && +x.ctx.dayNtlVlm > MIN_24H_VOLUME && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
+  const allMarkets = meta.universe.map((m, i) => ({ meta: m, ctx: ctxs[i] })).filter((x) => x.ctx);
+  const liquid = allMarkets.filter((x) => +x.ctx.dayNtlVlm > MIN_24H_VOLUME && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
+  const rsiLiquid = allMarkets.filter((x) => +x.ctx.dayNtlVlm > RSI_MIN_24H_VOLUME).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
 
   const { readHlCreds, loadAssetIndex, marketOrder, setLeverage, fetchLiveAccount, ensureNativeStopLoss } = await import("./hyperliquidExchange.server");
   const creds = readHlCreds();
@@ -456,7 +459,8 @@ export async function runTradingCycle(): Promise<CycleReport> {
         }
       }
 
-      const eligibleCount = liquid.length;
+      const scanUniverse = isRsi ? rsiLiquid : liquid;
+      const eligibleCount = scanUniverse.length;
       const match = s.last_cycle_note?.match(/scanner_cursor=(\d+)/);
       const cursor = eligibleCount ? Math.max(0, Math.min(Number(match?.[1] ?? 0), eligibleCount - 1)) : 0;
       const scanCount = isRsi
@@ -465,8 +469,8 @@ export async function runTradingCycle(): Promise<CycleReport> {
           ? (squeezeScanDue ? Math.min(SQUEEZE_DEFAULTS.scanLimit, eligibleCount) : 0)
           : Math.min(isOriginalTpa ? SCAN_PER_CYCLE_ORIGINAL_TPA : SCAN_PER_CYCLE, eligibleCount);
       const scanTargets = isRsi || isSqueeze
-        ? liquid.slice(0, scanCount)
-        : Array.from({ length: scanCount }, (_, i) => liquid[(cursor + i) % eligibleCount]);
+        ? scanUniverse.slice(0, scanCount)
+        : Array.from({ length: scanCount }, (_, i) => scanUniverse[(cursor + i) % eligibleCount]);
       const nextCursor = isRsi || isSqueeze ? cursor : (eligibleCount ? (cursor + scanCount) % eligibleCount : 0);
       notes.push(isRsi && !rsiScanDue ? "RSI scan waiting for 1m cadence" : isSqueeze && !squeezeScanDue ? "squeeze scan waiting for 5m cadence" : `scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
 
