@@ -5,6 +5,7 @@ import { MODE_MIN_CONFIDENCE, TRENDLINE_STRATEGY_KEY } from "@/lib/strategy";
 import { TRENDLINE_BREAK_KEY, TB_DEFAULTS, TB_TIMEFRAMES, parseTimeframes } from "@/lib/strategies/trendlineBreak";
 import { INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS } from "@/lib/strategies/intradayMomentumPullback";
 import { ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS } from "@/lib/strategies/originalTrendPriceAction";
+import { VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS } from "@/lib/strategies/volatilitySqueezeBreakout";
 import { strategySelectionPatch } from "@/lib/scalp";
 
 export const Route = createFileRoute("/_authenticated/strategy")({ component: Strategy });
@@ -56,6 +57,7 @@ function Strategy() {
   const isTb = key === TRENDLINE_BREAK_KEY;
   const isIntraday = key === INTRADAY_PULLBACK_KEY;
   const isOriginal = key === ORIGINAL_TREND_PRICE_ACTION_KEY;
+  const isSqueeze = key === VOLATILITY_SQUEEZE_BREAKOUT_KEY;
   const tf = parseTimeframes(s.tb_timeframes);
   const set = (patch: any) => saveSettings(patch);
 
@@ -64,9 +66,8 @@ function Strategy() {
       <div>
         <h1 className="text-xl font-semibold sm:text-2xl">Strategy & risk</h1>
         <p className="text-sm text-muted-foreground">
-          Four strategy models are available. The Original Trend Price Action model restores the classic
-          1H trend-line setup with EMA20/50, RSI, MACD, volume, ATR filtering, confidence scoring and
-          Daily/4H directional alignment.
+          Five strategy models are available. The Volatility Squeeze Breakout model is the statistical/high-rotation option:
+          it waits for 15m compression to release with a real range breakout and volume, then uses only a light 1H EMA/RSI direction check.
         </p>
       </div>
 
@@ -77,7 +78,7 @@ function Strategy() {
             Every strategy is still capped by the global leverage, exposure, position-count and daily-loss limits.
           </p>
         </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <StrategyCard
             active={key === TRENDLINE_STRATEGY_KEY}
             title="Trendline Price Action"
@@ -101,11 +102,45 @@ function Strategy() {
             active={isOriginal}
             badge="Classic"
             title="Original Trend Price Action"
-            description="1H trend-line break + EMA20/50, RSI, MACD, volume and ATR confidence, only when Daily and 4H direction agree."
+            description="1H trend-line break + EMA20/50, RSI, MACD, volume and ATR confidence. 4H is required; Daily may be neutral but cannot oppose."
             onClick={() => set(strategySelectionPatch(ORIGINAL_TREND_PRICE_ACTION_KEY))}
+          />
+          <StrategyCard
+            active={isSqueeze}
+            badge="Rotation"
+            title="Volatility Squeeze Breakout"
+            description="15m BB/KC squeeze release + 6-candle breakout + ≥1.5x volume, with a light 1H EMA20/RSI filter."
+            onClick={() => set(strategySelectionPatch(VOLATILITY_SQUEEZE_BREAKOUT_KEY))}
           />
         </div>
       </section>
+
+      {isSqueeze && (
+        <section className="panel space-y-4 p-4 sm:p-5">
+          <div className="text-sm font-semibold">Volatility Squeeze Breakout — model</div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Scanner</span><div className="mt-1 mono text-base">Top {SQUEEZE_DEFAULTS.scanLimit} / every 5m</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Squeeze</span><div className="mt-1 mono text-base">BB 20/2 inside KC 20/{SQUEEZE_DEFAULTS.kcMult}</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Risk / stop</span><div className="mt-1 mono text-base">{SQUEEZE_DEFAULTS.riskPct}% / {SQUEEZE_DEFAULTS.stopPct}%</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Breakout volume</span><div className="mt-1 mono text-base">≥ {SQUEEZE_DEFAULTS.minVolumeRatio}x avg</div></div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Breakeven</span><div className="mt-1 mono text-base">+{SQUEEZE_DEFAULTS.breakevenAtPct}%</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Scale out</span><div className="mt-1 mono text-base">50% @ +{SQUEEZE_DEFAULTS.partialAtPct}%</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Runner trail</span><div className="mt-1 mono text-base">Peak - {SQUEEZE_DEFAULTS.trailPct}%</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Time exits</span><div className="mt-1 mono text-base">{SQUEEZE_DEFAULTS.staleMinutes}m stale / {SQUEEZE_DEFAULTS.maxMinutes}m max</div></div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            A completed 15m candle must have been squeezed with Bollinger Bands inside the Keltner Channel. The next completed candle must release the squeeze,
+            widen the Bollinger Bands, close beyond the prior {SQUEEZE_DEFAULTS.breakoutLookback}-candle extreme and print at least {SQUEEZE_DEFAULTS.minVolumeRatio}x the prior 20-candle average volume.
+            Longs require 1H price above EMA20 with RSI 40–70; shorts require price below EMA20 with RSI 30–60. Leverage is capped at 3x even if the global maximum is higher.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            At +{SQUEEZE_DEFAULTS.breakevenAtPct}% the stop moves to entry. At +{SQUEEZE_DEFAULTS.partialAtPct}% the engine closes 50% and trails the remaining half by {SQUEEZE_DEFAULTS.trailPct}% from the best price.
+            A trade that never travels {SQUEEZE_DEFAULTS.staleMovePct}% in either direction by {SQUEEZE_DEFAULTS.staleMinutes} minutes is closed; every trade is force-closed after {SQUEEZE_DEFAULTS.maxMinutes} minutes.
+          </p>
+        </section>
+      )}
 
       {isOriginal && (
         <section className="panel space-y-4 p-4 sm:p-5">
@@ -126,9 +161,8 @@ function Strategy() {
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            Daily and 4H must agree first. A fresh 1H trend-line break establishes direction. EMA20/50,
-            RSI, MACD histogram, relative volume and trend-line touch quality then raise or lower the confidence score.
-            ATR is the hard volatility filter. Risk per trade is user-configurable from 0.05% to 5% of equity.
+            4H direction is mandatory. Daily may agree or be neutral, but a clearly opposing Daily trend blocks the trade. A genuine 1H trend-line crossing remains actionable for up to three completed hourly bars.
+            EMA20/50, RSI, MACD histogram, relative volume and trend-line touch quality then raise or lower confidence. ATR is the hard volatility filter. Risk per trade is user-configurable from 0.05% to 5% of equity.
           </p>
         </section>
       )}
