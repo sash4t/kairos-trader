@@ -11,7 +11,6 @@ export const TB_DEFAULTS = {
   riskPct: 0.5,
   positionSizePct: 5,
   refreshMin: 15,
-  // Break candle plus the next two execution candles remain actionable.
   breakWindowBars: 2,
 };
 
@@ -210,12 +209,8 @@ export function confirmExecution(bars: Bar[], side: "long" | "short"): TbConfirm
   const vol = bars.at(-1)?.v ?? 0;
   const volRatio = volAvg > 0 ? vol / volAvg : 0;
   const indicators = { ema20: e20, ema50: e50, ema200: e200, atrPct, rsi: rsiVal, macdHist: h0, volRatio };
-
   if (!Number.isFinite(atrPct)) return { ok: false, reasons: [], score: 0, bonus: 0, indicators, reject: "insufficient bars for ATR14" };
-  if (!(atrPct >= 0.15 && atrPct <= 6)) {
-    return { ok: false, reasons: [], score: 0, bonus: 0, indicators, reject: `ATR14 volatility ${atrPct.toFixed(2)}% outside 0.15–6% gate` };
-  }
-
+  if (!(atrPct >= 0.15 && atrPct <= 6)) return { ok: false, reasons: [], score: 0, bonus: 0, indicators, reject: `ATR14 volatility ${atrPct.toFixed(2)}% outside 0.15–6% gate` };
   const reasons: string[] = [`ATR14 ${atrPct.toFixed(2)}% inside volatility gate`];
   let score = 0;
   let bonus = 0;
@@ -241,20 +236,18 @@ function breakAgeBars(bars: Bar[], state: TbLineState): number | null {
   return idx < 0 ? null : Math.max(0, bars.length - 1 - idx);
 }
 
-function armedBreak(
-  bars: Bar[],
-  state: TbLineState,
-  side: "long" | "short",
-): { active: boolean; age: number; retest: boolean } {
+function armedBreak(bars: Bar[], state: TbLineState, side: "long" | "short"): { active: boolean; age: number; retest: boolean } {
   if (!state.line || state.value == null || !state.broken) return { active: false, age: 0, retest: false };
-  const age = breakAgeBars(bars, state);
-  if (age == null || age > TB_DEFAULTS.breakWindowBars) return { active: false, age: age ?? 0, retest: false };
   const lastBar = bars.at(-1)!;
   const lastIdx = bars.length - 1;
   const lineNow = state.line.valueAt(lastIdx);
   const tol = tolerance(bars);
   const holds = side === "long" ? lastBar.c > lineNow - tol : lastBar.c < lineNow + tol;
-  if (!holds) return { active: false, age, retest: false };
+  if (!holds) return { active: false, age: 0, retest: false };
+  // A genuine re-break today is fresh even if the same fitted line first broke much earlier.
+  if (state.freshBreak) return { active: true, age: 0, retest: false };
+  const age = breakAgeBars(bars, state);
+  if (age == null || age > TB_DEFAULTS.breakWindowBars) return { active: false, age: age ?? 0, retest: false };
   const retest = age > 0 && (side === "long"
     ? lastBar.l <= lineNow + tol && lastBar.c > lineNow
     : lastBar.h >= lineNow - tol && lastBar.c < lineNow);
@@ -268,18 +261,13 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
   const price = execBars?.at(-1)?.c ?? 0;
   const base: TbSignal = { coin, side: null, confidence: 0, reasons: [], price, indicators: {}, levels };
   if (!exec || !execBars) return { ...base, reasons: ["Waiting for trendline history"] };
-
   const longWindow = armedBreak(execBars, exec.down, "long");
   const shortWindow = armedBreak(execBars, exec.up, "short");
   const indicators: Record<string, number> = {
-    execUpLine: exec.up.value ?? NaN,
-    execDownLine: exec.down.value ?? NaN,
-    upTouches: exec.up.line?.touches ?? 0,
-    downTouches: exec.down.line?.touches ?? 0,
-    longBreakAge: longWindow.age,
-    shortBreakAge: shortWindow.age,
+    execUpLine: exec.up.value ?? NaN, execDownLine: exec.down.value ?? NaN,
+    upTouches: exec.up.line?.touches ?? 0, downTouches: exec.down.line?.touches ?? 0,
+    longBreakAge: longWindow.age, shortBreakAge: shortWindow.age,
   };
-
   let side: "long" | "short" | null = null;
   let actionLine: number | undefined;
   let safety: number | undefined;
@@ -290,15 +278,11 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
     side = "long"; actionLine = exec.down.value; safety = safetyLineFor(levels, "long", price); breakAge = longWindow.age; isRetest = longWindow.retest;
   } else if (shortWindow.active && exec.up.value != null) {
     side = "short"; actionLine = exec.up.value; safety = safetyLineFor(levels, "short", price); breakAge = shortWindow.age; isRetest = shortWindow.retest;
-  } else {
-    return { ...base, indicators, reasons: [`No active ${exec.timeframe} action-line break/retest window`] };
-  }
+  } else return { ...base, indicators, reasons: [`No active ${exec.timeframe} action-line break/retest window`] };
   if (safety == null) return { ...base, indicators, reasons: ["Break detected but no valid opposing safety line is available"] };
-
   if (breakAge === 0) reasons.push(`Fresh ${exec.timeframe} action-line break`);
   else if (isRetest) reasons.push(`${exec.timeframe} break retest held (${breakAge} bar(s) after break)`);
   else reasons.push(`${exec.timeframe} break remains armed (${breakAge} bar(s) after break)`);
-
   const htf = levels.slice(0, -1);
   let agree = 0;
   for (const lvl of htf) {
@@ -308,22 +292,17 @@ export function evaluateTrendlineBreak(coin: string, series: TbSeries, cfg: TbCo
     if (structural) { agree++; reasons.push(`${lvl.timeframe} structure agrees with the ${side} break`); }
   }
   if (htf.length > 0 && agree === 0) return { ...base, indicators, reasons: ["Higher-timeframe structure does not agree with the break"] };
-
   const confirm = confirmExecution(execBars, side);
   Object.assign(indicators, confirm.indicators);
   if (!confirm.ok) return { ...base, indicators, reasons: [`${exec.timeframe} break rejected: ${confirm.reject}`] };
   reasons.push(...confirm.reasons);
-
   const touches = side === "long" ? exec.down.line?.touches ?? 0 : exec.up.line?.touches ?? 0;
   reasons.push(`Action line captured ${touches} touch points`);
-  const agePenalty = breakAge * 3;
-  const retestBonus = isRetest ? 4 : 0;
-  const confidence = Math.min(95, 52 + Math.min(touches, 5) * 4 + agree * 8 + confirm.bonus + retestBonus - agePenalty);
+  const confidence = Math.min(95, 52 + Math.min(touches, 5) * 4 + agree * 8 + confirm.bonus + (isRetest ? 4 : 0) - breakAge * 3);
   return {
     coin, side, confidence, reasons, price,
     timeframe: exec.timeframe, actionLine, safetyLine: safety,
-    indicators: { ...indicators, agree, touches, confirmations: confirm.score, breakAge, retest: isRetest ? 1 : 0 },
-    levels,
+    indicators: { ...indicators, agree, touches, confirmations: confirm.score, breakAge, retest: isRetest ? 1 : 0 }, levels,
   };
 }
 
@@ -341,20 +320,11 @@ export function safetyStop(side: "long" | "short", safetyLine: number, bufferPct
   return side === "long" ? safetyLine * (1 - bufferPct / 100) : safetyLine * (1 + bufferPct / 100);
 }
 
-export function dynamicTrailStop(
-  side: "long" | "short",
-  entryPrice: number,
-  bestPrice: number,
-  currentStop: number,
-  activatePct = 1,
-  distancePct = 0.5,
-): number {
+export function dynamicTrailStop(side: "long" | "short", entryPrice: number, bestPrice: number, currentStop: number, activatePct = 1, distancePct = 0.5): number {
   if (!(entryPrice > 0) || !(bestPrice > 0) || !(currentStop > 0)) return currentStop;
   const favorablePct = side === "long" ? ((bestPrice - entryPrice) / entryPrice) * 100 : ((entryPrice - bestPrice) / entryPrice) * 100;
   if (favorablePct < Math.max(0, activatePct)) return currentStop;
-  const candidate = side === "long"
-    ? bestPrice * (1 - Math.max(0.05, distancePct) / 100)
-    : bestPrice * (1 + Math.max(0.05, distancePct) / 100);
+  const candidate = side === "long" ? bestPrice * (1 - Math.max(0.05, distancePct) / 100) : bestPrice * (1 + Math.max(0.05, distancePct) / 100);
   return side === "long" ? Math.max(currentStop, candidate) : Math.min(currentStop, candidate);
 }
 
