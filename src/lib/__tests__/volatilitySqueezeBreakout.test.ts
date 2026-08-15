@@ -24,32 +24,25 @@ function squeezedBreakout(volume = 200): Bar[] {
     const c = 100 + (i % 2 === 0 ? 0.02 : -0.02);
     return { t: T0 + i * FIFTEEN, o: 100, h: c + 0.08, l: c - 0.08, c, v: 100 };
   });
-  bars.push({
-    t: T0 + 39 * FIFTEEN,
-    o: 100.1,
-    h: 102.2,
-    l: 100,
-    c: 102,
-    v: volume,
-  });
+  bars.push({ t: T0 + 39 * FIFTEEN, o: 100.1, h: 102.2, l: 100, c: 102, v: volume });
   return bars;
 }
 
 describe("Volatility Squeeze Breakout signal", () => {
-  it("fires long only after squeeze release + 6-bar breakout + volume + 1H filter", () => {
+  it("fires long after squeeze release + 6-bar breakout + 1.3x volume + 1H filter", () => {
     const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyLongFilter(), squeezedBreakout());
     expect(sig.side).toBe("long");
     expect(sig.confidence).toBeGreaterThanOrEqual(SQUEEZE_DEFAULTS.minConfidence);
     expect(sig.indicators.priorSqueezed).toBe(1);
     expect(sig.indicators.squeezeReleased).toBe(1);
     expect(sig.indicators.bbExpanding).toBe(1);
-    expect(sig.indicators.volumeRatio).toBeGreaterThanOrEqual(1.5);
+    expect(sig.indicators.volumeRatio).toBeGreaterThanOrEqual(1.3);
     expect(sig.stopLoss).toBeCloseTo(102 * (1 - 0.0045), 8);
     expect(sig.takeProfit).toBeCloseTo(102 * 1.01, 8);
   });
 
-  it("rejects an otherwise valid breakout without 1.5x volume", () => {
-    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyLongFilter(), squeezedBreakout(140));
+  it("rejects an otherwise valid breakout below the 1.3x volume floor", () => {
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyLongFilter(), squeezedBreakout(120));
     expect(sig.side).toBeNull();
     expect(sig.reasons.join(" ")).toMatch(/volume/i);
   });
