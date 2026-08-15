@@ -7,11 +7,16 @@ import {
   safetyLineFor, riskSize, trailToSafety, dynamicTrailStop, safetyStop, TB_SAFETY_BUFFER_PCT, TB_MIN_STOP_PCT, TB_DEFAULTS,
   type TbTimeframe, type TbSeries,
 } from "./strategies/trendlineBreak";
+import {
+  ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS, evaluateOriginalTrendPriceAction,
+} from "./strategies/originalTrendPriceAction";
+import { targetFromR } from "./strategies/intradayMomentumPullback";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
 const BARS = 230;
 const HTF_BARS = 240;
 const SCAN_PER_CYCLE = 35;
+const SCAN_PER_CYCLE_ORIGINAL_TPA = 50;
 const MIN_24H_VOLUME = 5_000_000;
 
 type Level = "info" | "warn" | "error" | "trade";
@@ -28,7 +33,7 @@ interface Settings {
   scalp_enabled: boolean; scalp_tp_pct: number; scalp_sl_pct: number;
   trail_activate_pct: number; trail_dist_pct: number; max_positions: number; max_leverage: number;
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
-  paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: string; tp_rr?: number;
+  paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: string; tp_rr?: number; trendline_risk_pct?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
   tb_timeframes?: string; tb_pivot_strength?: number; tb_risk_pct?: number; tb_position_size_pct?: number; tb_refresh_min?: number;
   last_cycle_note?: string | null;
@@ -128,6 +133,8 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const held = new Set(positions.map(p => p.coin));
 
       const isTb = (s.strategy_key ?? "") === TRENDLINE_BREAK_KEY;
+      const isOriginalTpa = (s.strategy_key ?? "") === ORIGINAL_TREND_PRICE_ACTION_KEY;
+      const originalRiskPct = Math.min(5, Math.max(0.05, +(s.trendline_risk_pct ?? ORIGINAL_TPA_DEFAULTS.riskPct)));
       const tbCfg = {
         timeframes: parseTimeframes(s.tb_timeframes),
         pivotStrength: Math.round(+(s.tb_pivot_strength ?? 3)),
@@ -333,7 +340,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const eligibleCount = liquid.length;
       const match = s.last_cycle_note?.match(/scanner_cursor=(\d+)/);
       const cursor = eligibleCount ? Math.max(0, Math.min(Number(match?.[1] ?? 0), eligibleCount - 1)) : 0;
-      const scanCount = Math.min(SCAN_PER_CYCLE, eligibleCount);
+      const scanCount = Math.min(isOriginalTpa ? SCAN_PER_CYCLE_ORIGINAL_TPA : SCAN_PER_CYCLE, eligibleCount);
       const scanTargets = Array.from({ length: scanCount }, (_, i) => liquid[(cursor + i) % eligibleCount]);
       const nextCursor = eligibleCount ? (cursor + scanCount) % eligibleCount : 0;
       notes.push(`scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
@@ -345,6 +352,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           let sig: ScalpSignal;
           let tbSafety: number | undefined;
           let tbTimeframe: string | undefined;
+          let originalSafety: number | undefined;
           if (isTb) {
             const series = await loadTbSeries(target.meta.name); report.scanned++;
             if (Object.keys(series).length < tbCfg.timeframes.length) continue;
@@ -356,15 +364,38 @@ export async function runTradingCycle(): Promise<CycleReport> {
             const daily = await loadBars(target.meta.name, "1d", HTF_BARS);
             const fourHour = await loadBars(target.meta.name, "4h", HTF_BARS);
             if (!daily || !fourHour || daily.length < 80 || fourHour.length < 80) continue;
-            sig = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly });
+            if (isOriginalTpa) {
+              const o = evaluateOriginalTrendPriceAction(target.meta.name, daily, fourHour, hourly);
+              originalSafety = o.safetyLine;
+              sig = { coin: o.coin, side: o.side, family: ORIGINAL_TREND_PRICE_ACTION_KEY, confidence: o.confidence, reasons: o.reasons, price: o.price, atrPct: o.indicators["atrPct"] ?? 0, indicators: o.indicators, actionLine: o.actionLine, safetyLine: o.safetyLine };
+            } else {
+              sig = evaluateScalpMulti(target.meta.name, { daily, fourHour, hourly });
+            }
           }
-          if (!sig.side || sig.confidence < +s.min_confidence) continue;
+          const minConfidence = isOriginalTpa ? Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, +s.min_confidence) : +s.min_confidence;
+          if (!sig.side || sig.confidence < minConfidence) continue;
           if (shockHitsSide(shockDir, sig.side)) continue;
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
           const quotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
-          let leverage: number; let size: number; let tbStop = 0;
-          if (isTb) {
+          let leverage: number; let size: number; let tbStop = 0; let originalStop = 0;
+          if (isOriginalTpa) {
+            const atrValue = (sig.atrPct / 100) * quotePx;
+            const fallback = Math.max(atrValue * 1.25, quotePx * 0.0035);
+            let stop = originalSafety;
+            if (stop == null || !Number.isFinite(stop) || (sig.side === "long" ? stop >= quotePx : stop <= quotePx)) {
+              stop = sig.side === "long" ? quotePx - fallback : quotePx + fallback;
+            }
+            originalStop = stop;
+            leverage = Math.max(1, Math.floor(Math.min(+s.max_leverage, target.meta.maxLeverage)));
+            const riskBasedSize = riskSize(equity, originalRiskPct, quotePx, originalStop);
+            const positionNotionalCap = equity * (ORIGINAL_TPA_DEFAULTS.positionSizePct / 100) * leverage;
+            const used = positions.reduce((sum, p) => sum + p.notional, 0);
+            const room = equity * (+s.max_exposure_pct / 100) * leverage - used;
+            if (room <= 0) { notes.push("exposure cap reached"); break; }
+            size = Math.min(riskBasedSize, positionNotionalCap / quotePx, room / quotePx);
+            if (!(size > 0) || !Number.isFinite(size)) continue;
+          } else if (isTb) {
             if (tbSafety == null) continue;
             leverage = Math.max(1, Math.floor(Math.min(+s.max_leverage, target.meta.maxLeverage)));
             tbStop = safetyStop(sig.side, tbSafety, TB_SAFETY_BUFFER_PCT);
@@ -404,8 +435,14 @@ export async function runTradingCycle(): Promise<CycleReport> {
           }
           const sl = isTb && tbStop > 0
             ? tbStop
-            : sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
-          const tp = isTb ? null : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
+            : isOriginalTpa && originalStop > 0
+              ? originalStop
+              : sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
+          const tp = isTb
+            ? null
+            : isOriginalTpa
+              ? targetFromR(sig.side, entry, sl, ORIGINAL_TPA_DEFAULTS.takeProfitR)
+              : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
 
           if (isLive && creds && liveAsset) {
             try {
@@ -420,7 +457,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
             }
           }
 
-          const extra = isTb ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: sl, risk_pct: tbCfg.riskPct } : { initial_stop: sl };
+          const extra = isTb
+            ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: sl, risk_pct: tbCfg.riskPct }
+            : isOriginalTpa
+              ? { safety_line: originalSafety ?? null, action_line: sig.actionLine ?? null, initial_stop: sl, risk_pct: originalRiskPct }
+              : { initial_stop: sl };
           const { data: inserted, error: insErr } = await supabaseAdmin.from("paper_positions").insert({ user_id: s.user_id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators, ...extra }).select("id").single();
           if (insErr || !inserted) { report.errors.push(`record ${sig.coin}: ${insErr?.message ?? "insert returned no row"}`); continue; }
           positions.push({ id: inserted.id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: tbSafety ?? null });
