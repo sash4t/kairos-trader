@@ -22,8 +22,14 @@ describe("1H RSI Extremes", () => {
     expect(result.confidence).toBeGreaterThan(RSI_EXTREMES_DEFAULTS.minConfidence);
   });
 
-  it("enters short when RSI reverses back below 70 after an overbought extreme", () => {
-    const result = evaluateRsiValues([58, 74, 81, 68]);
+  it("keeps an oversold setup armed for the configured recovery window", () => {
+    const result = evaluateRsiValues([45, 24, 31, 33, 36]);
+    expect(result.side).toBe("long");
+    expect(result.extreme).toBe(24);
+  });
+
+  it("enters short when RSI recovers from a recent overbought extreme", () => {
+    const result = evaluateRsiValues([58, 81, 69, 66, 63]);
     expect(result.side).toBe("short");
     expect(result.extreme).toBe(81);
     expect(result.confidence).toBeGreaterThan(RSI_EXTREMES_DEFAULTS.minConfidence);
@@ -38,6 +44,10 @@ describe("1H RSI Extremes", () => {
     expect(evaluateRsiValues([45, 42, 39, 43]).side).toBeNull();
     const closes = Array.from({ length: 60 }, (_, i) => 100 + Math.sin(i / 3));
     expect(evaluateRsiExtremes("TEST", barsFromCloses(closes)).side).toBeNull();
+  });
+
+  it("does not keep an extreme armed beyond the configured lookback", () => {
+    expect(evaluateRsiValues([24, 31, 33, 35, 37]).side).toBeNull();
   });
 
   it("gives deeper extremes a larger confidence bonus", () => {
