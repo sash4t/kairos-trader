@@ -117,8 +117,8 @@ function Strategy() {
           <StrategyCard
             active={isRsi}
             badge="Mean reversion"
-            title="1H RSI Extremes"
-            description="Pure RSI(14): buy reversals from oversold ≤30, short reversals from overbought ≥70, then ride toward the RSI 50 zone."
+            title="1H RSI Trail"
+            description={`Trail completed 1H RSI above 70 or below 30, enter on the first reversal, then close after a ${RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point RSI reversal.`}
             onClick={() => set(strategySelectionPatch(RSI_EXTREMES_KEY))}
           />
         </div>
@@ -128,10 +128,10 @@ function Strategy() {
         <section className="panel space-y-4 p-4 sm:p-5">
           <div className="text-sm font-semibold">1H RSI Extremes — model</div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
-            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Entry long</span><div className="mt-1 mono text-base">≤{RSI_EXTREMES_DEFAULTS.oversold} → cross up</div></div>
-            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Entry short</span><div className="mt-1 mono text-base">≥{RSI_EXTREMES_DEFAULTS.overbought} → cross down</div></div>
-            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Mean-reversion exit</span><div className="mt-1 mono text-base">L {RSI_EXTREMES_DEFAULTS.longExit}+ / S {RSI_EXTREMES_DEFAULTS.shortExit}-</div></div>
-            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Emergency stop</span><div className="mt-1 mono text-base">{RSI_EXTREMES_DEFAULTS.stopPct}%</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Entry long</span><div className="mt-1 mono text-base">Trail ≤{RSI_EXTREMES_DEFAULTS.oversold} → reverse up</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Entry short</span><div className="mt-1 mono text-base">Trail ≥{RSI_EXTREMES_DEFAULTS.overbought} → reverse down</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">RSI trailing exit</span><div className="mt-1 mono text-base">{RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point reversal</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Price stop</span><div className="mt-1 mono text-base">None</div></div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Scanner</span><div className="mt-1 mono text-base">All eligible / every 1m</div></div>
@@ -148,9 +148,9 @@ function Strategy() {
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            This strategy deliberately uses RSI only for the trading thesis. It arms at an extreme, waits for the completed 1H RSI to reverse back out of that extreme,
-            and then rides the mean-reversion move toward the 50 zone. Deeper extremes and faster RSI reversals increase confidence. EMA, MACD, volume, ATR,
-            trendlines and higher-timeframe direction do not gate entries or exits. Position quantity is based on the configured equity allocation and leverage, capped by global exposure; the fixed {RSI_EXTREMES_DEFAULTS.stopPct}% emergency stop is protection only and does not determine size.
+            This strategy deliberately uses RSI only for the trading thesis. It trails the RSI peak above 70 or trough below 30 and enters on the first reversal confirmed by a completed 1H candle,
+            then trails favorable RSI movement and exits after a {RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point reversal on a completed candle. Deeper extremes and faster RSI reversals increase confidence. EMA, MACD, volume, ATR,
+            trendlines and higher-timeframe direction do not gate entries or exits. It has no price stop; global exposure and daily-loss controls still apply.
           </p>
         </section>
       )}

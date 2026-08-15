@@ -20,7 +20,7 @@ import {
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes, latestRsi,
-  shouldExitRsiExtreme,
+  updateRsiExitTrail,
 } from "./strategies/rsiExtremes";
 
 export interface Settings {
@@ -319,10 +319,11 @@ export class PaperEngine {
       if (!hourly || hourly.length < 40) continue;
       const value = latestRsi(hourly);
       if (!Number.isFinite(value)) continue;
-      p.indicators = { ...(p.indicators ?? {}), rsi: value };
+      const trail = updateRsiExitTrail(p.side, value, p.indicators?.rsiExitTrail);
+      p.indicators = { ...(p.indicators ?? {}), rsi: value, rsiExitTrail: trail.extreme, rsiExitReversal: trail.reversalPoints };
       this.persistPositionUpdate(p);
-      if (shouldExitRsiExtreme(p.side, value)) {
-        await this.closePosition(p, this.mid(p.coin) ?? p.entry_price, p.side === "long" ? "rsi_mean_reversion_52" : "rsi_mean_reversion_48");
+      if (trail.shouldExit) {
+        await this.closePosition(p, this.mid(p.coin) ?? p.entry_price, `rsi_trail_reversal_${RSI_EXTREMES_DEFAULTS.exitReversalPoints}`);
       }
     }
   }
@@ -344,8 +345,6 @@ export class PaperEngine {
       if (shockHitsSide(this.shockDir, p.side)) { this.closePosition(p, mark, "btc_shock").catch(() => {}); continue; }
       if (this.isSqueezePosition(p)) { this.manageSqueezePosition(p, mark).catch((e) => this.log("error", `Squeeze exit ${p.coin}: ${e.message}`)); continue; }
       if (this.isRsiPosition(p)) {
-        const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
-        if (hitStop) this.closePosition(p, mark, "rsi_emergency_stop").catch(() => {});
         if (Date.now() - this.lastRsiExitCheckTs >= 60_000) {
           this.lastRsiExitCheckTs = Date.now();
           this.manageRsiExits().catch((e) => this.log("error", `RSI exit check: ${e.message}`));
@@ -418,16 +417,22 @@ export class PaperEngine {
       const hourly = await this.bars(meta.name, "1h", 100, HOUR);
       if (!hourly || hourly.length < 40) continue;
       const sig = evaluateRsiExtremes(meta.name, hourly);
-      if (!sig.side || sig.stopLoss == null) continue;
+      if (!sig.side) continue;
       if (sig.confidence < Math.max(RSI_EXTREMES_DEFAULTS.minConfidence, this.settings.min_confidence)) continue;
       if (shockHitsSide(this.shockDir, sig.side)) continue;
+      const signalCandleTs = sig.indicators.signalCandleTs;
+      const { data: consumed } = await (supabase as any).from("paper_positions")
+        .select("id").eq("user_id", this.userId).eq("coin", sig.coin).eq("side", sig.side)
+        .contains("indicators", { signalCandleTs }).limit(1);
+      if (consumed?.length) continue;
       const equity = this.currentEquity();
       const leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, this.settings.max_leverage, meta.maxLeverage)));
       const targetQty = (equity * (Math.max(0, this.settings.position_size_pct) / 100) * leverage) / sig.price;
       const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;
       const size = Math.min(targetQty, roomQty);
       if (!(size > 0) || !Number.isFinite(size)) continue;
-      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, Number.NaN, sig.confidence, sig.reasons, sig.indicators, undefined, undefined, undefined, "1h", RSI_EXTREMES_KEY);
+      // RSI exits are indicator-driven; zero is a persisted sentinel meaning no price stop.
+      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, 0, Number.NaN, sig.confidence, sig.reasons, sig.indicators, undefined, undefined, undefined, "1h", RSI_EXTREMES_KEY);
       held.add(meta.name);
     }
   }

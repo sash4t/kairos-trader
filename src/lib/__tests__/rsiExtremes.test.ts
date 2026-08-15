@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { Bar } from "../strategy";
 import {
   RSI_EXTREMES_DEFAULTS,
+  completedHourlyBars,
   evaluateRsiExtremes,
   evaluateRsiValues,
-  shouldExitRsiExtreme,
+  updateRsiExitTrail,
 } from "../strategies/rsiExtremes";
 
 const HOUR = 60 * 60 * 1000;
@@ -22,17 +23,17 @@ describe("1H RSI Extremes", () => {
     expect(result.confidence).toBeGreaterThan(RSI_EXTREMES_DEFAULTS.minConfidence);
   });
 
-  it("keeps an oversold setup armed for the configured recovery window", () => {
-    const result = evaluateRsiValues([45, 24, 31, 33, 36]);
-    expect(result.side).toBe("long");
-    expect(result.extreme).toBe(24);
+  it("fires only on the first reversal from the trailed oversold low", () => {
+    expect(evaluateRsiValues([45, 28, 24, 26]).side).toBe("long");
+    expect(evaluateRsiValues([45, 28, 24, 26, 29]).side).toBeNull();
   });
 
-  it("enters short when RSI recovers from a recent overbought extreme", () => {
-    const result = evaluateRsiValues([58, 81, 69, 66, 63]);
+  it("enters short on the first reversal from the highest trailed RSI", () => {
+    const result = evaluateRsiValues([58, 72, 81, 79]);
     expect(result.side).toBe("short");
     expect(result.extreme).toBe(81);
     expect(result.confidence).toBeGreaterThan(RSI_EXTREMES_DEFAULTS.minConfidence);
+    expect(evaluateRsiValues([58, 72, 81, 79, 76]).side).toBeNull();
   });
 
   it("scans the full eligible universe every minute", () => {
@@ -46,7 +47,7 @@ describe("1H RSI Extremes", () => {
     expect(evaluateRsiExtremes("TEST", barsFromCloses(closes)).side).toBeNull();
   });
 
-  it("does not keep an extreme armed beyond the configured lookback", () => {
+  it("does not reuse an old extreme after the first reversal", () => {
     expect(evaluateRsiValues([24, 31, 33, 35, 37]).side).toBeNull();
   });
 
@@ -59,16 +60,25 @@ describe("1H RSI Extremes", () => {
   it("uses the intended RSI thresholds and safety defaults", () => {
     expect(RSI_EXTREMES_DEFAULTS.oversold).toBe(30);
     expect(RSI_EXTREMES_DEFAULTS.overbought).toBe(70);
-    expect(RSI_EXTREMES_DEFAULTS.longExit).toBe(52);
-    expect(RSI_EXTREMES_DEFAULTS.shortExit).toBe(48);
-    expect(RSI_EXTREMES_DEFAULTS.stopPct).toBe(2);
+    expect(RSI_EXTREMES_DEFAULTS.exitReversalPoints).toBe(4);
     expect(RSI_EXTREMES_DEFAULTS.maxLeverage).toBe(3);
   });
 
-  it("exits longs above the 50 zone and shorts below it", () => {
-    expect(shouldExitRsiExtreme("long", 51.9)).toBe(false);
-    expect(shouldExitRsiExtreme("long", 52)).toBe(true);
-    expect(shouldExitRsiExtreme("short", 48.1)).toBe(false);
-    expect(shouldExitRsiExtreme("short", 48)).toBe(true);
+  it("excludes an in-progress 1H candle", () => {
+    const bars = barsFromCloses([100, 101, 102]);
+    const now = bars[2].t + HOUR - 1;
+    expect(completedHourlyBars(bars, now)).toHaveLength(2);
+  });
+
+  it("trails favorable RSI and exits after a four-point reversal", () => {
+    expect(updateRsiExitTrail("long", 67, 70)).toMatchObject({ extreme: 70, reversalPoints: 3, shouldExit: false });
+    expect(updateRsiExitTrail("long", 66, 70)).toMatchObject({ extreme: 70, reversalPoints: 4, shouldExit: true });
+    expect(updateRsiExitTrail("short", 33, 30)).toMatchObject({ extreme: 30, reversalPoints: 3, shouldExit: false });
+    expect(updateRsiExitTrail("short", 34, 30)).toMatchObject({ extreme: 30, reversalPoints: 4, shouldExit: true });
+  });
+
+  it("moves the exit trail only in the favorable RSI direction", () => {
+    expect(updateRsiExitTrail("long", 74, 70).extreme).toBe(74);
+    expect(updateRsiExitTrail("short", 26, 30).extreme).toBe(26);
   });
 });
