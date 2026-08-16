@@ -17,7 +17,7 @@ import {
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes, latestRsi,
-  updateRsiExitTrail,
+  rsiTakeProfitHit, rsiTakeProfitPrice, updateRsiExitTrail,
 } from "./strategies/rsiExtremes";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
@@ -71,7 +71,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
   const liquid = allMarkets.filter((x) => +x.ctx.dayNtlVlm > MIN_24H_VOLUME && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
   const rsiLiquid = allMarkets.filter((x) => +x.ctx.dayNtlVlm > MIN_24H_VOLUME).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
 
-  const { readHlCreds, loadAssetIndex, marketOrder, setLeverage, fetchLiveAccount, ensureNativeStopLoss } = await import("./hyperliquidExchange.server");
+  const { readHlCreds, loadAssetIndex, marketOrder, setLeverage, fetchLiveAccount, ensureNativeStopLoss, ensureNativeTakeProfit } = await import("./hyperliquidExchange.server");
   const creds = readHlCreds();
   let assetIndex: Awaited<ReturnType<typeof loadAssetIndex>> | null = null;
   const assets = async () => (assetIndex ??= await loadAssetIndex());
@@ -350,6 +350,21 @@ export async function runTradingCycle(): Promise<CycleReport> {
       if (canTrade) {
         for (const p of [...positions]) {
           if (!isRsiPosition(p)) continue;
+          const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+          if (rsiTakeProfitHit(p.side, mark, p.take_profit)) {
+            await closeTbPosition(p, mark, "rsi_take_profit");
+            continue;
+          }
+          if (isLive && creds && Number.isFinite(p.take_profit)) {
+            const asset = (await assets()).get(p.coin);
+            if (asset) {
+              try {
+                await ensureNativeTakeProfit(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.take_profit });
+              } catch (err) {
+                await log(s.user_id, "error", `Could not install native RSI take profit for ${p.coin}: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }
+          }
           const hourly = await loadBars(p.coin, "1h", 100);
           if (!hourly || hourly.length < 40) continue;
           const value = latestRsi(hourly);
@@ -358,7 +373,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
           p.indicators = { ...(p.indicators ?? {}), rsi: value, rsiExitTrail: trail.extreme, rsiExitReversal: trail.reversalPoints };
           await (supabaseAdmin as any).from("paper_positions").update({ indicators: p.indicators }).eq("id", p.id).eq("status", "open");
           if (trail.shouldExit) {
-            const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
             await closeTbPosition(p, mark, `rsi_trail_reversal_${RSI_EXTREMES_DEFAULTS.exitReversalPoints}`);
           }
         }
@@ -614,8 +628,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
                 : isOriginalTpa && originalStop > 0
                   ? originalStop
                   : sig.side === "long" ? entry * (1 - hardSlPct / 100) : entry * (1 + hardSlPct / 100);
-          const tp = isTb || isRsi
+          const tp = isTb
             ? null
+            : isRsi
+              ? rsiTakeProfitPrice(sig.side, entry, exits.tpPct)
             : isSqueeze
               ? (sig.side === "long" ? entry * (1 + SQUEEZE_DEFAULTS.targetPct / 100) : entry * (1 - SQUEEZE_DEFAULTS.targetPct / 100))
               : isOriginalTpa
@@ -632,6 +648,13 @@ export async function runTradingCycle(): Promise<CycleReport> {
               catch (flattenErr) { report.errors.push(`UNPROTECTED ${sig.coin}: ${flattenErr instanceof Error ? flattenErr.message : String(flattenErr)}`); }
               report.errors.push(`native SL ${sig.coin}: ${msg}`);
               continue;
+            }
+          }
+          if (isLive && creds && liveAsset && isRsi && Number.isFinite(tp)) {
+            try {
+              await ensureNativeTakeProfit(creds, liveAsset, { positionSide: sig.side, size, triggerPrice: tp! });
+            } catch (err) {
+              await log(s.user_id, "error", `Native RSI take-profit placement failed for ${sig.coin}; server polling remains active: ${err instanceof Error ? err.message : String(err)}`);
             }
           }
 

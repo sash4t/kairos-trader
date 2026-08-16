@@ -5,6 +5,8 @@ import {
   completedHourlyBars,
   evaluateRsiExtremes,
   evaluateRsiValues,
+  rsiTakeProfitHit,
+  rsiTakeProfitPrice,
   updateRsiExitTrail,
 } from "../strategies/rsiExtremes";
 
@@ -80,5 +82,13 @@ describe("1H RSI Extremes", () => {
   it("moves the exit trail only in the favorable RSI direction", () => {
     expect(updateRsiExitTrail("long", 74, 70).extreme).toBe(74);
     expect(updateRsiExitTrail("short", 26, 30).extreme).toBe(26);
+  });
+
+  it("applies the configured percentage take profit in both directions", () => {
+    expect(rsiTakeProfitPrice("long", 100, 3)).toBe(103);
+    expect(rsiTakeProfitPrice("short", 100, 3)).toBe(97);
+    expect(rsiTakeProfitHit("long", 103, 103)).toBe(true);
+    expect(rsiTakeProfitHit("short", 97, 97)).toBe(true);
+    expect(rsiTakeProfitHit("long", 102.99, 103)).toBe(false);
   });
 });

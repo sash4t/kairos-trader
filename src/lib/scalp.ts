@@ -23,7 +23,7 @@ export const STRATEGY_OPTIONS = [
   { key: INTRADAY_PULLBACK_KEY, name: "Intraday Momentum Pullback", description: "Paper-mode 4H → 1H → 15m momentum pullbacks with EMA20 rejection entries, structure + ATR stops, risk-based sizing and R-based profit protection." },
   { key: ORIGINAL_TREND_PRICE_ACTION_KEY, name: "Original Trend Price Action", description: "1H trend-line execution with EMA20/50, RSI, MACD, volume and ATR confidence scoring, gated by aligned Daily and 4H direction." },
   { key: VOLATILITY_SQUEEZE_BREAKOUT_KEY, name: "Volatility Squeeze Breakout", description: "15m momentum breakout: 4-candle breakout + ≥1.2x volume + non-extreme 1H RSI; recent squeeze only boosts confidence." },
-  { key: RSI_EXTREMES_KEY, name: "1H RSI Trail", description: "Trail completed 1H RSI above 70 or below 30, enter on the first reversal, then trail RSI until a 4-point reversal closes the position." },
+  { key: RSI_EXTREMES_KEY, name: "1H RSI Trail", description: "Trail completed 1H RSI above 70 or below 30, enter on the first reversal, then exit at the configured percentage take profit or a 4-point RSI reversal." },
 ] as const;
 
 export function aggregateBars(bars: Bar[], intervalMs: number): Bar[] {

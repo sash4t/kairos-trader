@@ -20,7 +20,7 @@ import {
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes, latestRsi,
-  updateRsiExitTrail,
+  rsiTakeProfitHit, rsiTakeProfitPrice, updateRsiExitTrail,
 } from "./strategies/rsiExtremes";
 import { clampMaxPositions } from "./scalp";
 
@@ -346,6 +346,10 @@ export class PaperEngine {
       if (shockHitsSide(this.shockDir, p.side)) { this.closePosition(p, mark, "btc_shock").catch(() => {}); continue; }
       if (this.isSqueezePosition(p)) { this.manageSqueezePosition(p, mark).catch((e) => this.log("error", `Squeeze exit ${p.coin}: ${e.message}`)); continue; }
       if (this.isRsiPosition(p)) {
+        if (rsiTakeProfitHit(p.side, mark, p.take_profit)) {
+          this.closePosition(p, mark, "rsi_take_profit").catch(() => {});
+          continue;
+        }
         if (Date.now() - this.lastRsiExitCheckTs >= 60_000) {
           this.lastRsiExitCheckTs = Date.now();
           this.manageRsiExits().catch((e) => this.log("error", `RSI exit check: ${e.message}`));
@@ -432,8 +436,8 @@ export class PaperEngine {
       const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;
       const size = Math.min(targetQty, roomQty);
       if (!(size > 0) || !Number.isFinite(size)) continue;
-      // RSI exits are indicator-driven; zero is a persisted sentinel meaning no price stop.
-      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, 0, Number.NaN, sig.confidence, sig.reasons, sig.indicators, undefined, undefined, undefined, "1h", RSI_EXTREMES_KEY);
+      const takeProfit = rsiTakeProfitPrice(sig.side, sig.price, this.settings.scalp_tp_pct);
+      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, 0, takeProfit, sig.confidence, sig.reasons, sig.indicators, undefined, undefined, undefined, "1h", RSI_EXTREMES_KEY);
       held.add(meta.name);
     }
   }

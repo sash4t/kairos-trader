@@ -118,7 +118,7 @@ function Strategy() {
             active={isRsi}
             badge="Mean reversion"
             title="1H RSI Trail"
-            description={`Trail completed 1H RSI above 70 or below 30, enter on the first reversal, then close after a ${RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point RSI reversal.`}
+            description={`Trail completed 1H RSI above 70 or below 30, enter on the first reversal, then close at the configured take profit or after a ${RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point RSI reversal.`}
             onClick={() => set(strategySelectionPatch(RSI_EXTREMES_KEY))}
           />
         </div>
@@ -149,7 +149,7 @@ function Strategy() {
           </div>
           <p className="text-xs text-muted-foreground">
             This strategy deliberately uses RSI only for the trading thesis. It trails the RSI peak above 70 or trough below 30 and enters on the first reversal confirmed by a completed 1H candle,
-            then trails favorable RSI movement and exits after a {RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point reversal on a completed candle. Deeper extremes and faster RSI reversals increase confidence. EMA, MACD, volume, ATR,
+            then exits at the configured percentage take profit or after a {RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point RSI reversal on a completed candle, whichever comes first. Deeper extremes and faster RSI reversals increase confidence. EMA, MACD, volume, ATR,
             trendlines and higher-timeframe direction do not gate entries or exits. It has no price stop; global exposure and daily-loss controls still apply.
           </p>
         </section>

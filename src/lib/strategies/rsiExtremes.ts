@@ -127,6 +127,18 @@ export interface RsiExitTrail {
   shouldExit: boolean;
 }
 
+export function rsiTakeProfitPrice(side: RsiExtremeSide, entryPrice: number, takeProfitPct: number): number {
+  if (!(entryPrice > 0) || !(takeProfitPct > 0) || !Number.isFinite(takeProfitPct)) return Number.NaN;
+  return side === "long"
+    ? entryPrice * (1 + takeProfitPct / 100)
+    : entryPrice * (1 - takeProfitPct / 100);
+}
+
+export function rsiTakeProfitHit(side: RsiExtremeSide, mark: number, takeProfit: number): boolean {
+  if (!Number.isFinite(mark) || !Number.isFinite(takeProfit)) return false;
+  return side === "long" ? mark >= takeProfit : mark <= takeProfit;
+}
+
 /** Trail favorable RSI movement and exit after a completed-candle reversal. */
 export function updateRsiExitTrail(side: RsiExtremeSide, rsiValue: number, priorExtreme?: number): RsiExitTrail {
   if (!Number.isFinite(rsiValue)) {

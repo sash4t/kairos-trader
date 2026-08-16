@@ -234,6 +234,48 @@ export interface NativeStopResult {
   alreadyPresent: boolean;
 }
 
+async function ensureNativeTrigger(
+  creds: HlCreds,
+  asset: AssetInfo,
+  opts: { positionSide: "long" | "short"; size: number; triggerPrice: number },
+  kind: "sl" | "tp",
+): Promise<NativeStopResult> {
+  if (!(opts.triggerPrice > 0) || !(opts.size > 0)) throw new Error(`${asset.name}: invalid native ${kind} parameters`);
+  const triggerPx = formatPrice(opts.triggerPrice, asset.szDecimals);
+  const closeIsBuy = opts.positionSide === "short";
+  const expectedSide = closeIsBuy ? "B" : "A";
+  const open = await hlInfo<Array<{
+    coin: string; oid: number; isTrigger: boolean; reduceOnly: boolean; side: string;
+    triggerPx: string; orderType: string; sz: string;
+  }>>({ type: "frontendOpenOrders", user: creds.accountAddress });
+  const tolerance = Math.max(opts.triggerPrice * 0.00005, 10 ** -(Math.max(0, 6 - asset.szDecimals)));
+  const typePattern = kind === "sl" ? /stop/i : /take.?profit/i;
+  const matching = (open ?? []).filter((o) =>
+    o.coin === asset.name && o.isTrigger && o.reduceOnly && o.side === expectedSide && typePattern.test(o.orderType ?? "")
+  );
+  const existing = matching.find((o) => Math.abs(+o.triggerPx - opts.triggerPrice) <= tolerance);
+  for (const stale of matching) {
+    if (existing && stale.oid === existing.oid) continue;
+    await cancelOrder(creds, asset, stale.oid);
+  }
+  if (existing) return { oid: existing.oid, alreadyPresent: true };
+
+  const marketLimit = closeIsBuy ? opts.triggerPrice * 1.10 : opts.triggerPrice * 0.90;
+  const sz = formatSize(opts.size, asset.szDecimals);
+  if (Number(sz) <= 0) throw new Error(`Size rounds to zero for ${asset.name}`);
+  const json = await post(creds, {
+    type: "order",
+    orders: [{
+      a: asset.index, b: closeIsBuy, p: formatPrice(marketLimit, asset.szDecimals), s: sz, r: true,
+      t: { trigger: { isMarket: true, triggerPx, tpsl: kind } },
+    }],
+    grouping: "positionTpsl",
+  });
+  const statuses = (json.response as { data?: { statuses?: unknown[] } } | undefined)?.data?.statuses ?? [];
+  const first = statuses[0] as { resting?: { oid: number } } | undefined;
+  return { oid: first?.resting?.oid ?? null, alreadyPresent: false };
+}
+
 /** Cancel one resting order by oid. */
 async function cancelOrder(creds: HlCreds, asset: AssetInfo, oid: number) {
   await post(creds, { type: "cancel", cancels: [{ a: asset.index, o: oid }] });
@@ -250,47 +292,13 @@ export async function ensureNativeStopLoss(
   asset: AssetInfo,
   opts: { positionSide: "long" | "short"; size: number; triggerPrice: number },
 ): Promise<NativeStopResult> {
-  if (!(opts.triggerPrice > 0) || !(opts.size > 0)) throw new Error(`${asset.name}: invalid native stop parameters`);
-  const triggerPx = formatPrice(opts.triggerPrice, asset.szDecimals);
-  const closeIsBuy = opts.positionSide === "short";
-  const expectedSide = closeIsBuy ? "B" : "A";
-  const open = await hlInfo<Array<{
-    coin: string; oid: number; isTrigger: boolean; reduceOnly: boolean; side: string;
-    triggerPx: string; orderType: string; sz: string;
-  }>>({ type: "frontendOpenOrders", user: creds.accountAddress });
+  return ensureNativeTrigger(creds, asset, opts, "sl");
+}
 
-  const tolerance = Math.max(opts.triggerPrice * 0.00005, 10 ** -(Math.max(0, 6 - asset.szDecimals)));
-  const matchingStops = (open ?? []).filter((o) =>
-    o.coin === asset.name && o.isTrigger && o.reduceOnly && o.side === expectedSide && /stop/i.test(o.orderType ?? "")
-  );
-  const existing = matchingStops.find((o) => Math.abs(+o.triggerPx - opts.triggerPrice) <= tolerance);
-
-  // Remove stale/duplicate protective stops so an old safety-line order cannot
-  // close the trade early after Kairos switches to the configured hard SL.
-  for (const stale of matchingStops) {
-    if (existing && stale.oid === existing.oid) continue;
-    await cancelOrder(creds, asset, stale.oid);
-  }
-  if (existing) return { oid: existing.oid, alreadyPresent: true };
-
-  // For a market trigger Hyperliquid still requires `p`. Match the UI's market
-  // TP/SL behavior with a 10% execution band while keeping the trigger exact.
-  const marketLimit = closeIsBuy ? opts.triggerPrice * 1.10 : opts.triggerPrice * 0.90;
-  const sz = formatSize(opts.size, asset.szDecimals);
-  if (Number(sz) <= 0) throw new Error(`Size rounds to zero for ${asset.name}`);
-  const json = await post(creds, {
-    type: "order",
-    orders: [{
-      a: asset.index,
-      b: closeIsBuy,
-      p: formatPrice(marketLimit, asset.szDecimals),
-      s: sz,
-      r: true,
-      t: { trigger: { isMarket: true, triggerPx, tpsl: "sl" } },
-    }],
-    grouping: "positionTpsl",
-  });
-  const statuses = (json.response as { data?: { statuses?: unknown[] } } | undefined)?.data?.statuses ?? [];
-  const first = statuses[0] as { resting?: { oid: number } } | undefined;
-  return { oid: first?.resting?.oid ?? null, alreadyPresent: false };
+export async function ensureNativeTakeProfit(
+  creds: HlCreds,
+  asset: AssetInfo,
+  opts: { positionSide: "long" | "short"; size: number; triggerPrice: number },
+): Promise<NativeStopResult> {
+  return ensureNativeTrigger(creds, asset, opts, "tp");
 }
