@@ -133,6 +133,10 @@ export class PaperEngine {
   private isRsi() { return this.settings.strategy_key === RSI_EXTREMES_KEY; }
   private isSqueezePosition(p: OpenPosition) { return p.reason?.includes(`[${VOLATILITY_SQUEEZE_BREAKOUT_KEY}]`) === true; }
   private isRsiPosition(p: OpenPosition) { return p.reason?.includes(`[${RSI_EXTREMES_KEY}]`) === true; }
+  private hardStopPct() {
+    const value = Number(this.settings.scalp_sl_pct ?? 0);
+    return Number.isFinite(value) && value > 0 ? value : 1;
+  }
   private mid(coin: string): number | null { const v = this.mids[coin]; return v ? +v : null; }
 
   async start() {
@@ -585,7 +589,7 @@ export class PaperEngine {
       if (!sig.side || sig.safetyLine == null || sig.confidence < this.settings.min_confidence || shockHitsSide(this.shockDir, sig.side)) continue;
       const stop = safetyStop(sig.side, sig.safetyLine, TB_SAFETY_BUFFER_PCT);
       const stopPct = Math.abs(sig.price - stop) / sig.price * 100;
-      if (stopPct < TB_MIN_STOP_PCT || stopPct > 2.25 || (sig.side === "long" ? stop >= sig.price : stop <= sig.price)) continue;
+      if (stopPct < TB_MIN_STOP_PCT || stopPct > this.hardStopPct() || (sig.side === "long" ? stop >= sig.price : stop <= sig.price)) continue;
       const equity = this.currentEquity();
       const leverage = Math.max(1, Math.floor(Math.min(this.settings.max_leverage, meta.maxLeverage)));
       const size = Math.min(

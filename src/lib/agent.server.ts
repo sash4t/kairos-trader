@@ -169,7 +169,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       };
 
       for (const p of positions) {
-        if (isTb || isSqueezePosition(p) || isRsiPosition(p)) continue;
+        if (isSqueezePosition(p) || isRsiPosition(p)) continue;
         const hardStop = p.side === "long"
           ? p.entry_price * (1 - hardSlPct / 100)
           : p.entry_price * (1 + hardSlPct / 100);
