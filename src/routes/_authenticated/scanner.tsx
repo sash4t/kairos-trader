@@ -1,9 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
+import { useServerFn } from "@tanstack/react-start";
+import { toast } from "sonner";
 import { fetchCandles, fetchMetaAndCtxs, type AssetCtx, type AssetMeta } from "@/lib/hyperliquid";
 import { candlesToBars, getTrendlineState } from "@/lib/strategy";
 import { atr, ema, macd, rsi } from "@/lib/indicators";
 import { useBot } from "@/lib/botContext";
+import { placeScannerTrades } from "@/lib/manualTrade.functions";
 import { Loader2, RefreshCw, TrendingDown, TrendingUp, Zap } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/scanner")({ component: Scanner });
@@ -11,7 +14,6 @@ export const Route = createFileRoute("/_authenticated/scanner")({ component: Sca
 type SignalKind = "rsi_oversold" | "rsi_overbought" | "long_watch" | "short_watch" | "breakout_long" | "breakout_short" | "volume_surge";
 type Direction = "bullish" | "bearish" | "neutral";
 type SetupStage = "WATCH" | "CONFIRMED" | "RSI";
-
 type SignalDetail = { kind: SignalKind; direction: Direction; score: number; label: string; reason: string; breakoutPct?: number };
 type Opportunity = {
   meta: AssetMeta; ctx: AssetCtx; signals: SignalDetail[]; score: number; direction: Direction; stage: SetupStage;
@@ -25,15 +27,18 @@ const WATCH_DISTANCE_ATR = 0.6;
 const MAX_RESULTS = 30;
 
 function Scanner() {
-  const { mids } = useBot();
+  const { mids, settings, syncPositions } = useBot();
+  const placeTrades = useServerFn(placeScannerTrades);
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [scannedCount, setScannedCount] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [lastScannedAt, setLastScannedAt] = useState<number | null>(null);
 
   const runScan = async () => {
-    setLoading(true); setOpportunities([]); setScannedCount(0);
+    setLoading(true); setOpportunities([]); setSelected(new Set()); setScannedCount(0);
     try {
       const [m, ctxs] = await fetchMetaAndCtxs();
       const markets = m.universe.map((meta, i) => ({ meta, ctx: ctxs[i] })).filter((r): r is { meta: AssetMeta; ctx: AssetCtx } => Boolean(r.ctx));
@@ -42,8 +47,8 @@ function Scanner() {
 
       for (let i = 0; i < markets.length; i++) {
         const { meta, ctx } = markets[i];
-        const now = Date.now();
         try {
+          const now = Date.now();
           const cs = await fetchCandles(meta.name, "1h", now - 220 * 60 * 60_000, now);
           const bars = candlesToBars(cs);
           if (bars.length < 80) { setScannedCount(i + 1); continue; }
@@ -112,6 +117,37 @@ function Scanner() {
     } finally { setLoading(false); }
   };
 
+  const toggle = (coin: string) => setSelected((prev) => { const next = new Set(prev); next.has(coin) ? next.delete(coin) : next.add(coin); return next; });
+  const selectAll = () => setSelected(new Set(opportunities.map((o) => o.meta.name)));
+  const selectConfirmed = () => setSelected(new Set(opportunities.filter((o) => o.stage === "CONFIRMED").map((o) => o.meta.name)));
+
+  const submitSelected = async () => {
+    const targets = opportunities.filter((o) => selected.has(o.meta.name) && o.direction !== "neutral");
+    if (!targets.length || submitting) return;
+    const mode = settings?.mode === "live" ? "LIVE" : "PAPER";
+    if (!window.confirm(`Place ${targets.length} ${mode} scanner trade${targets.length === 1 ? "" : "s"}? Existing position-count and exposure limits will still apply.`)) return;
+    setSubmitting(true);
+    try {
+      const result = await placeTrades({ data: { trades: targets.map((o) => ({
+        coin: o.meta.name,
+        side: o.direction === "bullish" ? "long" as const : "short" as const,
+        score: o.score,
+        stage: o.stage,
+        reasons: o.signals.filter((s) => s.direction === o.direction || s.direction === "neutral").map((s) => s.reason),
+        rsi: o.rsi,
+        atrPct: o.atrPct,
+      })) } });
+      if (result.opened) toast.success(`Opened ${result.opened} scanner position${result.opened === 1 ? "" : "s"}.`);
+      if (result.skipped) toast.warning(`${result.skipped} selected trade${result.skipped === 1 ? " was" : "s were"} skipped by position/exposure/duplicate limits.`);
+      if (result.errors) toast.error(`${result.errors} scanner trade${result.errors === 1 ? "" : "s"} failed.`);
+      const openedCoins = new Set(result.results.filter((r) => r.status === "opened").map((r) => r.coin));
+      setSelected((prev) => new Set([...prev].filter((coin) => !openedCoins.has(coin))));
+      await syncPositions();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally { setSubmitting(false); }
+  };
+
   const stats = useMemo(() => ({
     long: opportunities.filter((o) => o.direction === "bullish").length,
     short: opportunities.filter((o) => o.direction === "bearish").length,
@@ -122,11 +158,17 @@ function Scanner() {
   const callFor = (o: Opportunity) => o.stage === "CONFIRMED" ? `${o.direction === "bullish" ? "LONG" : "SHORT"} CONFIRMED` : o.stage === "WATCH" ? `${o.direction === "bullish" ? "LONG" : "SHORT"} WATCH` : "RSI EXTREME";
 
   return <div className="p-4 sm:p-6 lg:p-8 space-y-5">
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><h1 className="text-xl sm:text-2xl font-semibold">Signal scanner</h1><p className="text-sm text-muted-foreground">Early LONG/SHORT watch setups, confirmed 1H breakouts, and RSI extremes below 30 or above 70 across Hyperliquid perps.</p></div><button onClick={runScan} disabled={loading} className="w-full shrink-0 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground disabled:opacity-50 sm:w-auto">{loading ? <><Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin" />Scanning {scannedCount}/{totalCount || "…"}</> : <><RefreshCw className="mr-2 inline h-3.5 w-3.5" />Scan Hyperliquid</>}</button></div>
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><h1 className="text-xl sm:text-2xl font-semibold">Signal scanner</h1><p className="text-sm text-muted-foreground">Early LONG/SHORT watch setups, confirmed 1H breakouts, and RSI extremes below 30 or above 70 across Hyperliquid perps.</p></div><button onClick={runScan} disabled={loading || submitting} className="w-full shrink-0 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground disabled:opacity-50 sm:w-auto">{loading ? <><Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin" />Scanning {scannedCount}/{totalCount || "…"}</> : <><RefreshCw className="mr-2 inline h-3.5 w-3.5" />Scan Hyperliquid</>}</button></div>
+
     <div className="grid gap-3 grid-cols-2 xl:grid-cols-4"><div className="panel p-4"><div className="flex items-center gap-2 text-sm text-muted-foreground"><TrendingUp className="h-4 w-4" />Long setups</div><div className="mt-2 text-2xl font-semibold mono">{stats.long}</div></div><div className="panel p-4"><div className="flex items-center gap-2 text-sm text-muted-foreground"><TrendingDown className="h-4 w-4" />Short setups</div><div className="mt-2 text-2xl font-semibold mono">{stats.short}</div></div><div className="panel p-4"><div className="flex items-center gap-2 text-sm text-muted-foreground"><Zap className="h-4 w-4" />Watch</div><div className="mt-2 text-2xl font-semibold mono">{stats.watch}</div></div><div className="panel p-4"><div className="flex items-center gap-2 text-sm text-muted-foreground"><Zap className="h-4 w-4" />Confirmed</div><div className="mt-2 text-2xl font-semibold mono">{stats.confirmed}</div></div></div>
+
+    {opportunities.length > 0 ? <div className="panel flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between sm:p-4"><div><div className="text-sm font-medium">Manual scanner trades · {settings?.mode === "live" ? "LIVE" : "PAPER"}</div><div className="text-xs text-muted-foreground">{selected.size} selected · uses current position size, leverage, max-position and exposure settings · duplicate coins are skipped</div></div><div className="flex flex-wrap gap-2"><button onClick={selectAll} disabled={submitting} className="rounded-md border border-panel-border px-3 py-2 text-xs font-medium disabled:opacity-50">Select all {opportunities.length}</button><button onClick={selectConfirmed} disabled={submitting} className="rounded-md border border-panel-border px-3 py-2 text-xs font-medium disabled:opacity-50">Select confirmed</button><button onClick={() => setSelected(new Set())} disabled={submitting || !selected.size} className="rounded-md border border-panel-border px-3 py-2 text-xs font-medium disabled:opacity-50">Clear</button><button onClick={submitSelected} disabled={submitting || !selected.size || settings?.kill_switch_engaged} className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">{submitting ? <><Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" />Placing…</> : `Place ${selected.size} selected trade${selected.size === 1 ? "" : "s"}`}</button></div></div> : null}
+
+    {settings?.kill_switch_engaged ? <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">Kill switch is engaged. Scanner trade buttons are disabled.</div> : null}
     {lastScannedAt && !loading ? <div className="text-xs text-muted-foreground">Last scan: {new Date(lastScannedAt).toLocaleTimeString()} · WATCH = setup developing · CONFIRMED = 1H support/resistance break</div> : null}
     {!loading && opportunities.length === 0 ? <div className="panel p-8 text-center"><div className="font-medium">No signal list yet</div><div className="mt-1 text-sm text-muted-foreground">Run a scan to check all Hyperliquid perp pairs.</div></div> : null}
-    {opportunities.length > 0 ? <div className="grid gap-3 xl:grid-cols-2">{opportunities.map((o) => { const livePrice = Number(mids[o.meta.name] ?? o.price); return <div key={o.meta.name} className="panel p-4 sm:p-5"><div className="flex items-start justify-between gap-4"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><div className="mono text-lg font-semibold">{o.meta.name}</div><span className={`rounded-md border border-panel-border px-2.5 py-1 text-xs font-bold ${toneFor(o.direction)}`}>{callFor(o)}</span>{o.signals.filter(s => !["long_watch","short_watch","breakout_long","breakout_short"].includes(s.kind)).map(s => <span key={s.kind} className={`rounded-full border border-panel-border px-2 py-0.5 text-[11px] font-semibold ${toneFor(s.direction)}`}>{s.label}</span>)}</div><div className="mt-2 space-y-1 text-sm text-muted-foreground">{o.signals.map(s => <div key={`${s.kind}-reason`}>• {s.reason}</div>)}</div></div><div className="shrink-0 text-right"><div className="text-[11px] uppercase tracking-widest text-muted-foreground">Score</div><div className={`mono text-xl font-semibold ${toneFor(o.direction)}`}>{o.score.toFixed(0)}</div></div></div>
-    <div className="mt-4 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4"><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">Price</div><div className="mono mt-1">{livePrice.toPrecision(7)}</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">RSI 14</div><div className="mono mt-1">{Number.isFinite(o.rsi) ? o.rsi.toFixed(1) : "—"}</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">1H vol</div><div className="mono mt-1">{o.volumeX.toFixed(2)}x</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">ATR</div><div className="mono mt-1">{o.atrPct.toFixed(2)}%</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">24h volume</div><div className="mono mt-1">${(o.volume24h / 1e6).toFixed(1)}M</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">Open interest</div><div className="mono mt-1">{o.openInterest.toFixed(0)}</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">Funding</div><div className="mono mt-1">{(Number(o.ctx.funding) * 100).toFixed(4)}%</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">Break distance</div><div className="mono mt-1">{o.breakoutPct ? `${o.breakoutPct.toFixed(2)}%` : "—"}</div></div></div></div>})}</div> : null}
+
+    {opportunities.length > 0 ? <div className="grid gap-3 xl:grid-cols-2">{opportunities.map((o) => { const livePrice = Number(mids[o.meta.name] ?? o.price); const checked = selected.has(o.meta.name); return <div key={o.meta.name} className={`panel p-4 sm:p-5 ${checked ? "ring-1 ring-primary/60" : ""}`}><div className="flex items-start gap-3"><input aria-label={`Select ${o.meta.name} for trade`} type="checkbox" checked={checked} onChange={() => toggle(o.meta.name)} disabled={submitting} className="mt-1 h-4 w-4 shrink-0 accent-primary" /><div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-4"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><div className="mono text-lg font-semibold">{o.meta.name}</div><span className={`rounded-md border border-panel-border px-2.5 py-1 text-xs font-bold ${toneFor(o.direction)}`}>{callFor(o)}</span>{o.signals.filter(s => !["long_watch","short_watch","breakout_long","breakout_short"].includes(s.kind)).map(s => <span key={s.kind} className={`rounded-full border border-panel-border px-2 py-0.5 text-[11px] font-semibold ${toneFor(s.direction)}`}>{s.label}</span>)}</div><div className="mt-2 space-y-1 text-sm text-muted-foreground">{o.signals.map(s => <div key={`${s.kind}-reason`}>• {s.reason}</div>)}</div></div><div className="shrink-0 text-right"><div className="text-[11px] uppercase tracking-widest text-muted-foreground">Score</div><div className={`mono text-xl font-semibold ${toneFor(o.direction)}`}>{o.score.toFixed(0)}</div></div></div>
+      <div className="mt-4 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4"><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">Price</div><div className="mono mt-1">{livePrice.toPrecision(7)}</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">RSI 14</div><div className="mono mt-1">{Number.isFinite(o.rsi) ? o.rsi.toFixed(1) : "—"}</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">1H vol</div><div className="mono mt-1">{o.volumeX.toFixed(2)}x</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">ATR</div><div className="mono mt-1">{o.atrPct.toFixed(2)}%</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">24h volume</div><div className="mono mt-1">${(o.volume24h / 1e6).toFixed(1)}M</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">Open interest</div><div className="mono mt-1">{o.openInterest.toFixed(0)}</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">Funding</div><div className="mono mt-1">{(Number(o.ctx.funding) * 100).toFixed(4)}%</div></div><div className="rounded-md border border-panel-border p-2"><div className="text-muted-foreground">Break distance</div><div className="mono mt-1">{o.breakoutPct ? `${o.breakoutPct.toFixed(2)}%` : "—"}</div></div></div></div></div></div>})}</div> : null}
   </div>;
 }
