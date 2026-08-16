@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
-import { Activity, BarChart3, History, LayoutDashboard, Radar, Settings, LogOut, Power, Menu, X } from "lucide-react";
+import { Activity, BarChart3, History, LayoutDashboard, Radar, Settings, LogOut, Power, Menu, X, UserRound } from "lucide-react";
 import { useBot } from "@/lib/botContext";
 import { supabase } from "@/integrations/supabase/client";
 import { KillSwitch } from "./KillSwitch";
@@ -19,8 +19,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const nav = useNavigate();
   const { settings, saveSettings } = useBot();
   const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState<string | null>(null);
 
   useEffect(() => { setOpen(false); }, [loc.pathname]);
+  useEffect(() => {
+    let active = true;
+    supabase.auth.getUser().then(({ data }) => {
+      if (active) setEmail(data.user?.email ?? null);
+    });
+    return () => { active = false; };
+  }, []);
 
   const signOut = async () => { await supabase.auth.signOut(); nav({ to: "/auth" }); };
 
@@ -67,6 +75,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
         <KillSwitch />
+        <div className="flex items-center gap-2 rounded-md bg-background px-3 py-2" title={email ?? "Authenticated account"}>
+          <UserRound className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Signed in as</div>
+            <div className="truncate text-xs font-medium text-foreground">{email ?? "Loading account…"}</div>
+          </div>
+        </div>
         <button onClick={signOut} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">
           <LogOut className="h-4 w-4" /> Sign out
         </button>
