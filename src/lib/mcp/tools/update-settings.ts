@@ -18,7 +18,7 @@ export default defineTool({
     trail_activate_pct: z.number().describe("Profit percent at which trailing arms.").optional(),
     trail_dist_pct: z.number().describe("Trailing stop distance in percent.").optional(),
     trailing_enabled: z.boolean().describe("Enable trailing stops.").optional(),
-    max_positions: z.number().int().describe("Maximum concurrent open positions.").optional(),
+    max_positions: z.number().int().min(1).max(30).describe("Maximum concurrent open positions (1-30).").optional(),
     position_size_pct: z.number().describe("Percent of equity per position.").optional(),
     max_exposure_pct: z.number().describe("Maximum total exposure percent.").optional(),
     max_leverage: z.number().describe("Maximum leverage.").optional(),

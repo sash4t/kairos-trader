@@ -11,6 +11,7 @@ import {
   INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS, evaluateIntradayPullback,
   riskSizedQuantity, targetFromR, intradayRTrail,
 } from "./strategies/intradayMomentumPullback";
+import { clampMaxPositions } from "./scalp";
 
 export interface Settings {
   user_id: string;
@@ -157,7 +158,7 @@ export class PaperEngine {
       .filter(x => x.ctx && +x.ctx.dayNtlVlm > 5_000_000 && !EXCLUDED.has(x.meta.name))
       .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm).slice(0, 35);
     for (const { meta } of scored) {
-      if (this.positions.length >= this.settings.max_positions) break;
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
       const end = Date.now();
       try {
@@ -226,7 +227,7 @@ export class PaperEngine {
       .sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm).slice(0, 30);
 
     for (const { meta } of scored) {
-      if (this.positions.length >= this.settings.max_positions) break;
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
       const series = await this.tbLoadSeries(meta.name, cfg.timeframes, cfg.refreshMs);
       if (!series) continue;
@@ -396,7 +397,7 @@ export class PaperEngine {
     const held = new Set(this.positions.map(p => p.coin)); const EXCLUDED_COINS = new Set(["BTC", "ETH"]);
     const scored = this.meta.map((m, i) => ({ meta: m, ctx: this.ctxs[i] })).filter(x => x.ctx && +x.ctx.dayNtlVlm > 5_000_000 && !EXCLUDED_COINS.has(x.meta.name)).sort((a, b) => +b.ctx.dayNtlVlm - +a.ctx.dayNtlVlm);
     for (const { meta } of scored) {
-      if (this.positions.length >= this.settings.max_positions) break; if (held.has(meta.name)) continue;
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break; if (held.has(meta.name)) continue;
       const now = Date.now(); const cached = this.cache.get(meta.name); if (cached && now < cached.nextEval) continue;
       let bars = cached?.bars, daily = cached?.daily, fourHour = cached?.fourHour;
       if (!bars || !daily || !fourHour || now - (cached?.lastFetch ?? 0) > 5 * 60 * 1000) {

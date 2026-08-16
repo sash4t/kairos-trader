@@ -1,6 +1,6 @@
 import { candlesToBars, bucket, type Bar } from "./strategy";
 import { buildEntryIntent } from "./orderIntent";
-import { evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
+import { clampMaxPositions, evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 import {
   TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, buildCascade, evaluateTrendlineBreak,
@@ -155,6 +155,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const isOriginalTpa = (s.strategy_key ?? "") === ORIGINAL_TREND_PRICE_ACTION_KEY;
       const isSqueeze = (s.strategy_key ?? "") === VOLATILITY_SQUEEZE_BREAKOUT_KEY;
       const isRsi = (s.strategy_key ?? "") === RSI_EXTREMES_KEY;
+      const maxPositions = clampMaxPositions(+s.max_positions);
       const squeezeLastScanMs = s.squeeze_last_scan_at ? Date.parse(s.squeeze_last_scan_at) : 0;
       const squeezeScanDue = isSqueeze && (!Number.isFinite(squeezeLastScanMs) || Date.now() - squeezeLastScanMs >= SQUEEZE_DEFAULTS.scanEveryMs);
       const rsiLastScanMs = s.rsi_last_scan_at ? Date.parse(s.rsi_last_scan_at) : 0;
@@ -475,9 +476,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const nextCursor = isRsi || isSqueeze ? cursor : (eligibleCount ? (cursor + scanCount) % eligibleCount : 0);
       notes.push(isRsi && !rsiScanDue ? "RSI scan waiting for 1m cadence" : isSqueeze && !squeezeScanDue ? "squeeze scan waiting for 5m cadence" : `scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
 
-      if (s.scalp_enabled && canTrade && equityNow > 0 && positions.length < +s.max_positions) {
+      if (s.scalp_enabled && canTrade && equityNow > 0 && positions.length < maxPositions) {
         for (const target of scanTargets) {
-          if (positions.length >= +s.max_positions) break;
+          if (positions.length >= maxPositions) break;
           if (held.has(target.meta.name)) continue;
           let sig: ScalpSignal;
           let tbSafety: number | undefined;

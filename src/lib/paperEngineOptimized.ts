@@ -22,6 +22,7 @@ import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes, latestRsi,
   updateRsiExitTrail,
 } from "./strategies/rsiExtremes";
+import { clampMaxPositions } from "./scalp";
 
 export interface Settings {
   user_id: string;
@@ -412,7 +413,7 @@ export class PaperEngine {
   private async runRsiCycle() {
     const held = new Set(this.positions.map((p) => p.coin));
     for (const { meta } of this.candidates(RSI_EXTREMES_DEFAULTS.scanLimit, { minVolume: LIQUIDITY_FLOOR, includeMajors: true })) {
-      if (this.positions.length >= this.settings.max_positions) break;
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
       const hourly = await this.bars(meta.name, "1h", 100, HOUR);
       if (!hourly || hourly.length < 40) continue;
@@ -440,7 +441,7 @@ export class PaperEngine {
   private async runSqueezeCycle() {
     const held = new Set(this.positions.map((p) => p.coin));
     for (const { meta } of this.candidates(SQUEEZE_DEFAULTS.scanLimit)) {
-      if (this.positions.length >= this.settings.max_positions) break;
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
       const [h1, m15] = await Promise.all([
         this.bars(meta.name, "1h", 100, HOUR),
@@ -465,7 +466,7 @@ export class PaperEngine {
   private async runIntradayCycle() {
     const held = new Set(this.positions.map((p) => p.coin));
     for (const { meta } of this.candidates()) {
-      if (this.positions.length >= this.settings.max_positions) break;
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
       const [h4, h1, m15] = await Promise.all([
         this.bars(meta.name, "4h", 180, FOUR_HOUR), this.bars(meta.name, "1h", 220, HOUR), this.bars(meta.name, "15m", 240, FIFTEEN),
@@ -491,7 +492,7 @@ export class PaperEngine {
     const held = new Set(this.positions.map((p) => p.coin));
     const riskPct = Math.min(5, Math.max(0.05, Number(this.settings.trendline_risk_pct ?? ORIGINAL_TPA_DEFAULTS.riskPct)));
     for (const { meta } of this.candidates(50)) {
-      if (this.positions.length >= this.settings.max_positions) break;
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
       const [daily, four, hourly] = await Promise.all([
         this.bars(meta.name, "1d", 240, DAY), this.bars(meta.name, "4h", 240, FOUR_HOUR), this.bars(meta.name, "1h", 230, HOUR),
@@ -508,7 +509,7 @@ export class PaperEngine {
   private async runTrendlinePriceActionCycle() {
     const held = new Set(this.positions.map((p) => p.coin));
     for (const { meta } of this.candidates()) {
-      if (this.positions.length >= this.settings.max_positions) break;
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
       const [daily, four, hourly] = await Promise.all([
         this.bars(meta.name, "1d", 240, DAY), this.bars(meta.name, "4h", 240, FOUR_HOUR), this.bars(meta.name, "1h", 230, HOUR),
@@ -573,7 +574,7 @@ export class PaperEngine {
 
     const held = new Set(this.positions.map((p) => p.coin));
     for (const { meta } of this.candidates()) {
-      if (this.positions.length >= this.settings.max_positions) break;
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
       const series = await this.loadTbSeries(meta.name, cfg.timeframes); if (!series) continue;
       const sig = evaluateTrendlineBreak(meta.name, series, cfg);

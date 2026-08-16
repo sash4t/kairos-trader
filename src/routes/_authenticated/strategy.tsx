@@ -7,7 +7,7 @@ import { INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS } from "@/lib/strategies/intra
 import { ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS } from "@/lib/strategies/originalTrendPriceAction";
 import { VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS } from "@/lib/strategies/volatilitySqueezeBreakout";
 import { RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS } from "@/lib/strategies/rsiExtremes";
-import { strategySelectionPatch } from "@/lib/scalp";
+import { MAX_OPEN_POSITIONS, strategySelectionPatch } from "@/lib/scalp";
 
 export const Route = createFileRoute("/_authenticated/strategy")({ component: Strategy });
 
@@ -246,7 +246,7 @@ function Strategy() {
           <NumField label="Paper equity" value={settings.paper_equity} onChange={v => set({ paper_equity: v })} step={100} suffix="USDC" />
           <NumField label="Max leverage" value={settings.max_leverage} onChange={v => set({ max_leverage: Math.min(20, Math.max(1, Math.round(v))) })} suffix="x" />
           <NumField label="Max exposure" value={settings.max_exposure_pct} onChange={v => set({ max_exposure_pct: Math.min(100, Math.max(5, v)) })} step={5} suffix="% equity" />
-          <NumField label="Max positions" value={settings.max_positions} onChange={v => set({ max_positions: Math.min(10, Math.max(1, Math.round(v))) })} />
+          <NumField label="Max positions" value={settings.max_positions} onChange={v => set({ max_positions: Math.min(MAX_OPEN_POSITIONS, Math.max(1, Math.round(v))) })} />
           <NumField label="Daily loss limit" value={settings.daily_loss_pct} onChange={v => set({ daily_loss_pct: Math.min(10, Math.max(0.5, v)) })} step={0.5} suffix="%" />
           <NumField label="Min signal confidence" value={settings.min_confidence} onChange={v => set({ min_confidence: Math.min(95, Math.max(55, v)) })} step={5} suffix="%" />
         </div>
