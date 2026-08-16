@@ -118,7 +118,7 @@ function Strategy() {
             active={isRsi}
             badge="Mean reversion"
             title="1H RSI Trail"
-            description={`Trail completed 1H RSI above 70 or below 30, enter on the first reversal, then close at the configured take profit or after a ${RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point RSI reversal.`}
+            description="Trail completed 1H RSI above 70 or below 30, enter on the first reversal, then close at the configured percentage take profit."
             onClick={() => set(strategySelectionPatch(RSI_EXTREMES_KEY))}
           />
         </div>
@@ -130,7 +130,7 @@ function Strategy() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Entry long</span><div className="mt-1 mono text-base">Trail ≤{RSI_EXTREMES_DEFAULTS.oversold} → reverse up</div></div>
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Entry short</span><div className="mt-1 mono text-base">Trail ≥{RSI_EXTREMES_DEFAULTS.overbought} → reverse down</div></div>
-            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">RSI trailing exit</span><div className="mt-1 mono text-base">{RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point reversal</div></div>
+            <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Profit exit</span><div className="mt-1 mono text-base">Configured {Number(s.scalp_tp_pct ?? 1)}% TP</div></div>
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Price stop</span><div className="mt-1 mono text-base">None</div></div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
@@ -149,7 +149,7 @@ function Strategy() {
           </div>
           <p className="text-xs text-muted-foreground">
             This strategy deliberately uses RSI only for the trading thesis. It trails the RSI peak above 70 or trough below 30 and enters on the first reversal confirmed by a completed 1H candle,
-            then exits at the configured percentage take profit or after a {RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point RSI reversal on a completed candle, whichever comes first. Deeper extremes and faster RSI reversals increase confidence. EMA, MACD, volume, ATR,
+            then exits at the configured percentage take profit. Deeper extremes and faster RSI reversals increase confidence. EMA, MACD, volume, ATR,
             trendlines and higher-timeframe direction do not gate entries or exits. It has no price stop; global exposure and daily-loss controls still apply.
           </p>
         </section>

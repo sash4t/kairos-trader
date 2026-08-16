@@ -19,8 +19,8 @@ import {
   squeezeRiskSizedQuantity, favorablePct, adverseAbsPct, squeezeTrailStop,
 } from "./strategies/volatilitySqueezeBreakout";
 import {
-  RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes, latestRsi,
-  rsiTakeProfitHit, rsiTakeProfitPrice, updateRsiExitTrail,
+  RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes,
+  rsiTakeProfitHit, rsiTakeProfitPrice,
 } from "./strategies/rsiExtremes";
 import { clampMaxPositions } from "./scalp";
 
@@ -115,7 +115,6 @@ export class PaperEngine {
   private seriesCache = new Map<string, { bars: Bar[]; ts: number }>();
   private lastSqueezeScanTs = 0;
   private lastRsiScanTs = 0;
-  private lastRsiExitCheckTs = 0;
 
   constructor(userId: string, settings: Settings, log: Log) {
     this.userId = userId;
@@ -317,22 +316,6 @@ export class PaperEngine {
     this.persistPositionUpdate(p);
   }
 
-  private async manageRsiExits() {
-    for (const p of [...this.positions]) {
-      if (!this.isRsiPosition(p)) continue;
-      const hourly = await this.bars(p.coin, "1h", 100, HOUR);
-      if (!hourly || hourly.length < 40) continue;
-      const value = latestRsi(hourly);
-      if (!Number.isFinite(value)) continue;
-      const trail = updateRsiExitTrail(p.side, value, p.indicators?.rsiExitTrail);
-      p.indicators = { ...(p.indicators ?? {}), rsi: value, rsiExitTrail: trail.extreme, rsiExitReversal: trail.reversalPoints };
-      this.persistPositionUpdate(p);
-      if (trail.shouldExit) {
-        await this.closePosition(p, this.mid(p.coin) ?? p.entry_price, `rsi_trail_reversal_${RSI_EXTREMES_DEFAULTS.exitReversalPoints}`);
-      }
-    }
-  }
-
   private tick() {
     if (this.isLive()) return;
     const dayStart = new Date().setUTCHours(0, 0, 0, 0);
@@ -353,10 +336,6 @@ export class PaperEngine {
         if (rsiTakeProfitHit(p.side, mark, p.take_profit)) {
           this.closePosition(p, mark, "rsi_take_profit").catch(() => {});
           continue;
-        }
-        if (Date.now() - this.lastRsiExitCheckTs >= 60_000) {
-          this.lastRsiExitCheckTs = Date.now();
-          this.manageRsiExits().catch((e) => this.log("error", `RSI exit check: ${e.message}`));
         }
         continue;
       }

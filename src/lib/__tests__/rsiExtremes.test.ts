@@ -7,7 +7,6 @@ import {
   evaluateRsiValues,
   rsiTakeProfitHit,
   rsiTakeProfitPrice,
-  updateRsiExitTrail,
 } from "../strategies/rsiExtremes";
 
 const HOUR = 60 * 60 * 1000;
@@ -62,7 +61,6 @@ describe("1H RSI Extremes", () => {
   it("uses the intended RSI thresholds and safety defaults", () => {
     expect(RSI_EXTREMES_DEFAULTS.oversold).toBe(30);
     expect(RSI_EXTREMES_DEFAULTS.overbought).toBe(70);
-    expect(RSI_EXTREMES_DEFAULTS.exitReversalPoints).toBe(4);
     expect(RSI_EXTREMES_DEFAULTS.maxLeverage).toBe(3);
   });
 
@@ -70,18 +68,6 @@ describe("1H RSI Extremes", () => {
     const bars = barsFromCloses([100, 101, 102]);
     const now = bars[2].t + HOUR - 1;
     expect(completedHourlyBars(bars, now)).toHaveLength(2);
-  });
-
-  it("trails favorable RSI and exits after a four-point reversal", () => {
-    expect(updateRsiExitTrail("long", 67, 70)).toMatchObject({ extreme: 70, reversalPoints: 3, shouldExit: false });
-    expect(updateRsiExitTrail("long", 66, 70)).toMatchObject({ extreme: 70, reversalPoints: 4, shouldExit: true });
-    expect(updateRsiExitTrail("short", 33, 30)).toMatchObject({ extreme: 30, reversalPoints: 3, shouldExit: false });
-    expect(updateRsiExitTrail("short", 34, 30)).toMatchObject({ extreme: 30, reversalPoints: 4, shouldExit: true });
-  });
-
-  it("moves the exit trail only in the favorable RSI direction", () => {
-    expect(updateRsiExitTrail("long", 74, 70).extreme).toBe(74);
-    expect(updateRsiExitTrail("short", 26, 30).extreme).toBe(26);
   });
 
   it("applies the configured percentage take profit in both directions", () => {

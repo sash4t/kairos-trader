@@ -16,8 +16,8 @@ import {
   favorablePct as squeezeFavorablePct, adverseAbsPct, squeezeTrailStop,
 } from "./strategies/volatilitySqueezeBreakout";
 import {
-  RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes, latestRsi,
-  rsiTakeProfitHit, rsiTakeProfitPrice, updateRsiExitTrail,
+  RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes,
+  rsiTakeProfitHit, rsiTakeProfitPrice,
 } from "./strategies/rsiExtremes";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
@@ -364,16 +364,6 @@ export async function runTradingCycle(): Promise<CycleReport> {
                 await log(s.user_id, "error", `Could not install native RSI take profit for ${p.coin}: ${err instanceof Error ? err.message : String(err)}`);
               }
             }
-          }
-          const hourly = await loadBars(p.coin, "1h", 100);
-          if (!hourly || hourly.length < 40) continue;
-          const value = latestRsi(hourly);
-          if (!Number.isFinite(value)) continue;
-          const trail = updateRsiExitTrail(p.side, value, p.indicators?.rsiExitTrail);
-          p.indicators = { ...(p.indicators ?? {}), rsi: value, rsiExitTrail: trail.extreme, rsiExitReversal: trail.reversalPoints };
-          await (supabaseAdmin as any).from("paper_positions").update({ indicators: p.indicators }).eq("id", p.id).eq("status", "open");
-          if (trail.shouldExit) {
-            await closeTbPosition(p, mark, `rsi_trail_reversal_${RSI_EXTREMES_DEFAULTS.exitReversalPoints}`);
           }
         }
       }

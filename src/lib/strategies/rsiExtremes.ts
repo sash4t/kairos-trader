@@ -7,7 +7,6 @@ export const RSI_EXTREMES_DEFAULTS = {
   period: 14,
   oversold: 30,
   overbought: 70,
-  exitReversalPoints: 4,
   maxLeverage: 3,
   // Scan every eligible RSI market on each due scan.
   scanLimit: 10_000,
@@ -96,7 +95,6 @@ export function evaluateRsiExtremes(coin: string, hourly: Bar[]): RsiExtremeSign
     rsi: result.current,
     rsiPrevious: result.previous,
     trailedRsiExtreme: result.extreme,
-    rsiExitTrail: result.current,
     signalCandleTs,
   };
 
@@ -109,22 +107,10 @@ export function evaluateRsiExtremes(coin: string, hourly: Bar[]): RsiExtremeSign
       ? `Completed 1H RSI reversed up from trailed low ${result.extreme.toFixed(1)}`
       : `Completed 1H RSI reversed down from trailed high ${result.extreme.toFixed(1)}`,
     `RSI ${result.previous.toFixed(1)} → ${result.current.toFixed(1)}`,
-    `Trail RSI until a ${RSI_EXTREMES_DEFAULTS.exitReversalPoints}-point completed-candle reversal`,
+    "Exit at the configured percentage take profit",
   ];
 
   return { coin, side: result.side, confidence: result.confidence, reasons, price, indicators };
-}
-
-export function latestRsi(hourly: Bar[]): number {
-  const completed = completedHourlyBars(hourly);
-  if (completed.length < RSI_EXTREMES_DEFAULTS.period + 2) return Number.NaN;
-  return rsi(completed.map((b) => b.c), RSI_EXTREMES_DEFAULTS.period).at(-1) ?? Number.NaN;
-}
-
-export interface RsiExitTrail {
-  extreme: number;
-  reversalPoints: number;
-  shouldExit: boolean;
 }
 
 export function rsiTakeProfitPrice(side: RsiExtremeSide, entryPrice: number, takeProfitPct: number): number {
@@ -137,19 +123,4 @@ export function rsiTakeProfitPrice(side: RsiExtremeSide, entryPrice: number, tak
 export function rsiTakeProfitHit(side: RsiExtremeSide, mark: number, takeProfit: number): boolean {
   if (!Number.isFinite(mark) || !Number.isFinite(takeProfit)) return false;
   return side === "long" ? mark >= takeProfit : mark <= takeProfit;
-}
-
-/** Trail favorable RSI movement and exit after a completed-candle reversal. */
-export function updateRsiExitTrail(side: RsiExtremeSide, rsiValue: number, priorExtreme?: number): RsiExitTrail {
-  if (!Number.isFinite(rsiValue)) {
-    return { extreme: Number.NaN, reversalPoints: 0, shouldExit: false };
-  }
-  const seed = Number.isFinite(priorExtreme) ? priorExtreme! : rsiValue;
-  const extreme = side === "long" ? Math.max(seed, rsiValue) : Math.min(seed, rsiValue);
-  const reversalPoints = side === "long" ? extreme - rsiValue : rsiValue - extreme;
-  return {
-    extreme,
-    reversalPoints,
-    shouldExit: reversalPoints >= RSI_EXTREMES_DEFAULTS.exitReversalPoints,
-  };
 }
