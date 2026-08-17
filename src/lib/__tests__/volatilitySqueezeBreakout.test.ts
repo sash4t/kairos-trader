@@ -20,6 +20,13 @@ function hourlyMomentum(): Bar[] {
   });
 }
 
+function hourlyBearishMomentum(): Bar[] {
+  return Array.from({ length: 80 }, (_, i) => {
+    const c = 100 - 0.02 * i + 0.3 * Math.sin(i * 1.3);
+    return { t: T0 + i * HOUR, o: c + 0.02, h: c + 0.08, l: c - 0.08, c, v: 1_000 };
+  });
+}
+
 function breakout(volume = 200, compressed = true): Bar[] {
   const bars: Bar[] = Array.from({ length: 39 }, (_, i) => {
     const wave = compressed ? (i % 2 === 0 ? 0.02 : -0.02) : Math.sin(i * 0.8) * 0.7;
@@ -30,21 +37,43 @@ function breakout(volume = 200, compressed = true): Bar[] {
   return bars;
 }
 
+function shortBreakout(volume = 160): Bar[] {
+  const bars: Bar[] = Array.from({ length: 39 }, (_, i) => {
+    const c = 100 + Math.sin(i * 0.8) * 0.7;
+    return { t: T0 + i * FIFTEEN, o: 100, h: c + 0.35, l: c - 0.35, c, v: 100 };
+  });
+  bars.push({ t: T0 + 39 * FIFTEEN, o: 99.9, h: 100, l: 97.8, c: 98, v: volume });
+  return bars;
+}
+
 function signalNow(bars: Bar[], offsetMs = 60_000): number {
   return bars.at(-1)!.t + FIFTEEN + offsetMs;
 }
 
 describe("Volatility Squeeze Breakout momentum mode", () => {
-  it("fires on a fresh breakout with 2x volume, 50-70 RSI, and expanding Bollinger width", () => {
-    const bars = breakout(200, false);
+  it("fires on a fresh long breakout with 1.5x volume, 50-70 RSI, and expanding Bollinger width", () => {
+    const bars = breakout(160, false);
     const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), bars, signalNow(bars));
     expect(sig.side).toBe("long");
     expect(sig.confidence).toBeGreaterThanOrEqual(SQUEEZE_DEFAULTS.minConfidence);
-    expect(sig.indicators.volumeRatio).toBeGreaterThanOrEqual(2);
+    expect(sig.indicators.volumeRatio).toBeGreaterThanOrEqual(1.5);
+    expect(sig.indicators.hourlyRsi).toBeGreaterThanOrEqual(50);
+    expect(sig.indicators.hourlyRsi).toBeLessThanOrEqual(70);
     expect(sig.indicators.bbExpanding).toBe(1);
     expect(sig.indicators.signalFresh).toBe(1);
     expect(sig.stopLoss).toBeCloseTo(102 * (1 - 0.0045), 8);
     expect(sig.takeProfit).toBeCloseTo(102 * 1.01, 8);
+  });
+
+  it("fires on a fresh short breakout with 1.5x volume and 30-50 RSI", () => {
+    const bars = shortBreakout(160);
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyBearishMomentum(), bars, signalNow(bars));
+    expect(sig.side).toBe("short");
+    expect(sig.confidence).toBeGreaterThanOrEqual(SQUEEZE_DEFAULTS.minConfidence);
+    expect(sig.indicators.volumeRatio).toBeGreaterThanOrEqual(1.5);
+    expect(sig.indicators.hourlyRsi).toBeGreaterThanOrEqual(30);
+    expect(sig.indicators.hourlyRsi).toBeLessThanOrEqual(50);
+    expect(sig.indicators.bbExpanding).toBe(1);
   });
 
   it("treats a recent squeeze as a confidence booster rather than a gate", () => {
@@ -57,8 +86,8 @@ describe("Volatility Squeeze Breakout momentum mode", () => {
     expect(withSqueeze.confidence).toBeGreaterThanOrEqual(withoutSqueeze.confidence);
   });
 
-  it("rejects an otherwise valid breakout below the 2x volume floor", () => {
-    const bars = breakout(110, false);
+  it("rejects an otherwise valid breakout below the 1.5x volume floor", () => {
+    const bars = breakout(140, false);
     const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), bars, signalNow(bars));
     expect(sig.side).toBeNull();
     expect(sig.reasons.join(" ")).toMatch(/volume/i);
@@ -95,7 +124,7 @@ describe("Volatility Squeeze Breakout momentum mode", () => {
     expect(SQUEEZE_DEFAULTS.kcMult).toBe(1.8);
     expect(SQUEEZE_DEFAULTS.breakoutLookback).toBe(4);
     expect(SQUEEZE_DEFAULTS.squeezeLookbackBars).toBe(5);
-    expect(SQUEEZE_DEFAULTS.minVolumeRatio).toBe(2);
+    expect(SQUEEZE_DEFAULTS.minVolumeRatio).toBe(1.5);
     expect(SQUEEZE_DEFAULTS.minConfidence).toBe(82);
     expect(SQUEEZE_DEFAULTS.signalFreshMs).toBe(5 * 60_000);
     expect(SQUEEZE_DEFAULTS.sameDirectionBlockBars).toBe(2);
