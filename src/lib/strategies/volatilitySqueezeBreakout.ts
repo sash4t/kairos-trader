@@ -14,7 +14,7 @@ export const SQUEEZE_DEFAULTS = {
   kcMult: 1.8,
   breakoutLookback: 4,
   squeezeLookbackBars: 5,
-  minVolumeRatio: 2.0,
+  minVolumeRatio: 1.5,
   riskPct: 1.5,
   stopPct: 0.45,
   targetPct: 1.0,
@@ -117,7 +117,9 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const hourPrice = hourly.at(-1)!.c;
   const hourEma20 = last(ema(closes1h, 20)) ?? hourPrice;
   const hourRsi = last(rsi(closes1h, 14)) ?? 50;
-  const rsiOk = hourRsi >= 50 && hourRsi <= 70;
+  const rsiMin = side === "short" ? 30 : 50;
+  const rsiMax = side === "short" ? 50 : 70;
+  const rsiOk = side != null && hourRsi >= rsiMin && hourRsi <= rsiMax;
 
   const indicators = {
     priorSqueezed: recentSqueeze ? 1 : 0,
@@ -144,10 +146,10 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   if (volumeRatio < SQUEEZE_DEFAULTS.minVolumeRatio) {
     return { ...empty, indicators, reasons: [`Breakout volume ${volumeRatio.toFixed(2)}x < ${SQUEEZE_DEFAULTS.minVolumeRatio.toFixed(1)}x minimum`] };
   }
-  if (!rsiOk) {
-    return { ...empty, indicators, reasons: [`1H RSI ${hourRsi.toFixed(1)} outside 50-70 momentum band`] };
-  }
   if (!side) return { ...empty, indicators, reasons: [`No close beyond prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle extreme`] };
+  if (!rsiOk) {
+    return { ...empty, indicators, reasons: [`1H RSI ${hourRsi.toFixed(1)} outside ${rsiMin}-${rsiMax} ${side} momentum band`] };
+  }
   if (!bbExpanding) {
     return { ...empty, indicators, reasons: ["Bollinger width is not expanding"] };
   }
@@ -165,13 +167,14 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const reasons = [
     `Fresh 15m close broke prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle ${side === "long" ? "high" : "low"}`,
     `Volume ${volumeRatio.toFixed(2)}x 20-candle average`,
-    `1H RSI ${hourRsi.toFixed(1)} inside 50-70 momentum band`,
+    `1H RSI ${hourRsi.toFixed(1)} inside ${rsiMin}-${rsiMax} ${side} momentum band`,
     "Bollinger width is expanding",
   ];
 
-  confidence += 12; // Mandatory >=2x volume confirmation.
+  confidence += 8; // Mandatory >=1.5x volume confirmation.
+  if (volumeRatio >= 2) confidence += 4;
   if (volumeRatio >= 3) confidence += 4;
-  confidence += 10; // Mandatory 50-70 RSI momentum regime.
+  confidence += 10; // Mandatory directional RSI momentum regime.
   confidence += 10; // Mandatory volatility expansion.
 
   if (oppositeDirectionRecently) {
