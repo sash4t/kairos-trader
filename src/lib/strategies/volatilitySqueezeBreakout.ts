@@ -14,7 +14,7 @@ export const SQUEEZE_DEFAULTS = {
   kcMult: 1.8,
   breakoutLookback: 4,
   squeezeLookbackBars: 5,
-  minVolumeRatio: 1.2,
+  minVolumeRatio: 2.0,
   riskPct: 1.5,
   stopPct: 0.45,
   targetPct: 1.0,
@@ -25,7 +25,7 @@ export const SQUEEZE_DEFAULTS = {
   staleMovePct: 0.3,
   staleMinutes: 20,
   maxMinutes: 120,
-  minConfidence: 70,
+  minConfidence: 82,
   // A completed 15m breakout can only be acted on during the first scanner window after close.
   signalFreshMs: 5 * 60 * 1000,
   // Do not fire the same direction again for the next two completed 15m bars after a breakout.
@@ -114,7 +114,7 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const hourPrice = hourly.at(-1)!.c;
   const hourEma20 = last(ema(closes1h, 20)) ?? hourPrice;
   const hourRsi = last(rsi(closes1h, 14)) ?? 50;
-  const rsiOk = hourRsi >= 30 && hourRsi <= 75;
+  const rsiOk = hourRsi >= 50 && hourRsi <= 70;
 
   const indicators = {
     priorSqueezed: recentSqueeze ? 1 : 0,
@@ -142,9 +142,12 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     return { ...empty, indicators, reasons: [`Breakout volume ${volumeRatio.toFixed(2)}x < ${SQUEEZE_DEFAULTS.minVolumeRatio.toFixed(1)}x minimum`] };
   }
   if (!rsiOk) {
-    return { ...empty, indicators, reasons: [`1H RSI ${hourRsi.toFixed(1)} outside 30-75 momentum band`] };
+    return { ...empty, indicators, reasons: [`1H RSI ${hourRsi.toFixed(1)} outside 50-70 momentum band`] };
   }
   if (!side) return { ...empty, indicators, reasons: [`No close beyond prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle extreme`] };
+  if (!bbExpanding) {
+    return { ...empty, indicators, reasons: ["Bollinger width is not expanding"] };
+  }
   if (!signalFresh) {
     return { ...empty, indicators, reasons: [signalAgeMs < 0 ? "Waiting for breakout candle to complete" : "Breakout signal is stale; same 15m candle will not be re-traded"] };
   }
@@ -155,34 +158,32 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const stopLoss = side === "long" ? price * (1 - SQUEEZE_DEFAULTS.stopPct / 100) : price * (1 + SQUEEZE_DEFAULTS.stopPct / 100);
   const takeProfit = side === "long" ? price * (1 + SQUEEZE_DEFAULTS.targetPct / 100) : price * (1 - SQUEEZE_DEFAULTS.targetPct / 100);
 
-  let confidence = 70;
+  let confidence = 60;
   const reasons = [
     `Fresh 15m close broke prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle ${side === "long" ? "high" : "low"}`,
     `Volume ${volumeRatio.toFixed(2)}x 20-candle average`,
-    `1H RSI ${hourRsi.toFixed(1)} inside 30-75 momentum band`,
+    `1H RSI ${hourRsi.toFixed(1)} inside 50-70 momentum band`,
+    "Bollinger width is expanding",
   ];
+
+  confidence += 12; // Mandatory >=2x volume confirmation.
+  if (volumeRatio >= 3) confidence += 4;
+  confidence += 10; // Mandatory 50-70 RSI momentum regime.
+  confidence += 10; // Mandatory volatility expansion.
 
   if (oppositeDirectionRecently) {
     confidence += 4;
     reasons.push("Fresh opposite breakout after recent failed-direction move");
   }
   if (recentSqueeze) {
-    confidence += 4;
+    confidence += 5;
     reasons.push(`Recent Bollinger/Keltner squeeze (${squeezeAge} bar${squeezeAge === 1 ? "" : "s"} ago)`);
-    if (squeezeAge <= 2) confidence += 2;
   }
   const emaAligned = side === "long" ? hourPrice >= hourEma20 : hourPrice <= hourEma20;
-  if (emaAligned) { confidence += 3; reasons.push("1H EMA20 direction agrees"); }
-  if (released) { confidence += 2; reasons.push("Current candle is outside Keltner squeeze"); }
-  if (bbExpanding) { confidence += 2; reasons.push("Bollinger width is expanding"); }
-  if (volumeRatio >= 2) confidence += 6;
-  else if (volumeRatio >= 1.5) confidence += 4;
-  else if (volumeRatio >= 1.3) confidence += 2;
+  if (emaAligned) { confidence += 2; reasons.push("1H EMA20 direction agrees"); }
+  if (released) reasons.push("Current candle is outside Keltner squeeze");
 
   const widthExpansion = bb.width[i - 1] > 0 ? bb.width[i] / bb.width[i - 1] : 1;
-  if (widthExpansion >= 1.25) confidence += 3;
-  else if (widthExpansion >= 1.1) confidence += 1;
-
   return {
     coin,
     side,

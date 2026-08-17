@@ -280,9 +280,12 @@ export class PaperEngine {
     const opened = Date.parse(p.opened_at ?? "");
     const ageMs = Number.isFinite(opened) ? Date.now() - opened : 0;
     const absMove = adverseAbsPct(p.entry_price, mark);
+    const directionalMove = favorablePct(p.side, p.entry_price, mark);
     const indicators = p.indicators ?? (p.indicators = {});
     const maxAbsMovePct = Math.max(Number(indicators.maxAbsMovePct ?? 0), absMove);
     indicators.maxAbsMovePct = maxAbsMovePct;
+    indicators.maxFavorablePct = Math.max(Number(indicators.maxFavorablePct ?? 0), directionalMove);
+    indicators.maxAdversePct = Math.max(Number(indicators.maxAdversePct ?? 0), -directionalMove);
 
     if (ageMs >= SQUEEZE_DEFAULTS.maxMinutes * 60_000) {
       await this.closePosition(p, mark, "squeeze_hard_time_exit");

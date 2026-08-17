@@ -326,7 +326,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
             const exitPrice = isLive ? mark : protectiveStop;
             if (squeezePosition) await log(s.user_id, "warn", `${p.coin} breached squeeze stop @ ${protectiveStop.toFixed(6)}.`, { observedMark: mark, simulatedFill: exitPrice });
             else await log(s.user_id, "warn", `${p.coin} breached hard ${hardSlPct.toFixed(2)}% stop (${protectiveStop.toFixed(6)}); forcing close now.`, { mark, hardStop: protectiveStop, side: p.side });
-            await closeTbPosition(p, exitPrice, squeezePosition ? "squeeze_stop_loss" : "hard_stop_loss");
+            const protectedProfit = p.side === "long" ? protectiveStop >= p.entry_price : protectiveStop <= p.entry_price;
+            const exitReason = squeezePosition
+              ? (protectedProfit ? "squeeze_breakeven_or_trail" : "squeeze_stop_loss")
+              : "hard_stop_loss";
+            await closeTbPosition(p, exitPrice, exitReason);
             continue;
           }
           if (isLive && creds) {
@@ -380,8 +384,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const opened = Date.parse(p.opened_at ?? "");
           const ageMs = Number.isFinite(opened) ? Date.now() - opened : 0;
           const absMove = adverseAbsPct(p.entry_price, mark);
+          const directionalMove = squeezeFavorablePct(p.side, p.entry_price, mark);
           const indicators = p.indicators ?? (p.indicators = {});
           indicators.maxAbsMovePct = Math.max(Number(indicators.maxAbsMovePct ?? 0), absMove);
+          indicators.maxFavorablePct = Math.max(Number(indicators.maxFavorablePct ?? 0), directionalMove);
+          indicators.maxAdversePct = Math.max(Number(indicators.maxAdversePct ?? 0), -directionalMove);
 
           if (ageMs >= SQUEEZE_DEFAULTS.maxMinutes * 60_000) { await closeTbPosition(p, mark, "squeeze_hard_time_exit"); continue; }
           if (ageMs >= SQUEEZE_DEFAULTS.staleMinutes * 60_000 && indicators.maxAbsMovePct < SQUEEZE_DEFAULTS.staleMovePct) { await closeTbPosition(p, mark, "squeeze_stale_exit"); continue; }
