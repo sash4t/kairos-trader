@@ -1,5 +1,5 @@
 import { fetchCandles, fetchMetaAndCtxs, subscribeAllMids, type AssetCtx, type AssetMeta } from "./hyperliquid";
-import { candlesToBars, evaluateMultiTimeframeSignal, bucket, type Signal, type Bar, MODE_MIN_CONFIDENCE, type StrategyMode } from "./strategy";
+import { candlesToBars, evaluateMultiTimeframeSignal, bucket, type Signal, type Bar, MODE_MIN_CONFIDENCE, TRENDLINE_STRATEGY_KEY, type StrategyMode } from "./strategy";
 import { supabase } from "@/integrations/supabase/client";
 import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
 import {
@@ -416,7 +416,11 @@ export class PaperEngine {
     const equity = this.currentEquity(); const notionalCap = equity * (this.settings.position_size_pct / 100) * Math.min(this.settings.max_leverage, meta.maxLeverage);
     const currentExposure = this.positions.reduce((s, p) => s + p.notional, 0); if (currentExposure + notionalCap > equity * (this.settings.max_exposure_pct / 100) * this.settings.max_leverage) return;
     const leverage = Math.min(this.settings.max_leverage, meta.maxLeverage); const size = notionalCap / sig.price;
-    const stopDist = this.settings.sl_type === "atr" ? sig.atrValue * this.settings.sl_atr_mult : sig.price * (this.settings.sl_fixed_pct / 100);
+    // Only canonical Trendline Price Action is governed by the Settings stop.
+    // Preserve the legacy ATR/fixed behavior for every other strategy routed here.
+    const stopDist = this.settings.strategy_key === TRENDLINE_STRATEGY_KEY
+      ? sig.price * (this.hardSlPct() / 100)
+      : this.settings.sl_type === "atr" ? sig.atrValue * this.settings.sl_atr_mult : sig.price * (this.settings.sl_fixed_pct / 100);
     const sl = side === "long" ? sig.price - stopDist : sig.price + stopDist; const tp = side === "long" ? sig.price + stopDist * this.settings.tp_rr : sig.price - stopDist * this.settings.tp_rr;
     const reason = `${side.toUpperCase()} ${sig.coin} — ${sig.reasons.join(" + ")}`;
     const { data, error } = await supabase.from("paper_positions").insert({ user_id: this.userId, coin: sig.coin, side, size, notional: size * sig.price, leverage, entry_price: sig.price, stop_loss: sl, take_profit: tp, confidence: sig.confidence, reason, indicators: sig.indicators }).select().single();

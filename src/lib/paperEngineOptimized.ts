@@ -526,16 +526,20 @@ export class PaperEngine {
       const sig = evaluateMultiTimeframeSignal(meta.name, daily, four, hourly);
       const threshold = Math.max(this.settings.min_confidence, Math.min(70, MODE_MIN_CONFIDENCE[this.settings.strategy_mode]));
       if (!sig.side || sig.confidence < threshold || shockHitsSide(this.shockEntryDir, sig.side)) continue;
-      await this.openRiskManagedSignal(sig, meta, 0.4, 6, 2.2);
+      // Canonical Trendline Price Action uses the Stop loss value from Settings.
+      // Other trendline strategies retain their structural/strategy-owned stops.
+      await this.openRiskManagedSignal(sig, meta, 0.4, 6, 2.2, this.hardStopPct());
       held.add(meta.name);
     }
   }
 
-  private async openRiskManagedSignal(sig: Signal, meta: AssetMeta, riskPct: number, capPct: number, takeProfitR: number) {
+  private async openRiskManagedSignal(sig: Signal, meta: AssetMeta, riskPct: number, capPct: number, takeProfitR: number, fixedStopPct?: number) {
     const side = sig.side!;
     const price = sig.price;
     const fallback = Math.max(sig.atrValue * 1.25, price * 0.0035);
-    let stop = sig.safetyLine;
+    let stop = fixedStopPct != null
+      ? (side === "long" ? price * (1 - fixedStopPct / 100) : price * (1 + fixedStopPct / 100))
+      : sig.safetyLine;
     if (stop == null || !Number.isFinite(stop) || (side === "long" ? stop >= price : stop <= price)) stop = side === "long" ? price - fallback : price + fallback;
     const equity = this.currentEquity();
     const leverage = Math.max(1, Math.floor(Math.min(this.settings.max_leverage, meta.maxLeverage)));

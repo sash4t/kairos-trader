@@ -1,4 +1,4 @@
-import { candlesToBars, bucket, type Bar } from "./strategy";
+import { candlesToBars, bucket, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
 import { buildEntryIntent } from "./orderIntent";
 import { clampMaxPositions, evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcProtection, shockHitsSide, type ShockDir } from "./btcShock";
@@ -140,6 +140,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       })) as PositionRow[];
       const isSqueezePosition = (p: PositionRow) => p.reason?.includes(`[${VOLATILITY_SQUEEZE_BREAKOUT_KEY}]`) === true;
       const isRsiPosition = (p: PositionRow) => p.reason?.includes(`[${RSI_EXTREMES_KEY}]`) === true;
+      const isTrendlinePriceActionPosition = (p: PositionRow) => p.reason?.includes(`[${TRENDLINE_STRATEGY_KEY}]`) === true;
       let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
       if (isLive && creds) {
         try {
@@ -182,7 +183,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       };
 
       for (const p of positions) {
-        if (isSqueezePosition(p) || isRsiPosition(p)) continue;
+        if (!isTrendlinePriceActionPosition(p)) continue;
         const hardStop = p.side === "long"
           ? p.entry_price * (1 - hardSlPct / 100)
           : p.entry_price * (1 + hardSlPct / 100);
@@ -327,17 +328,19 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const squeezePosition = isSqueezePosition(p);
           const rsiPosition = isRsiPosition(p);
           if (rsiPosition) continue;
-          const protectiveStop = squeezePosition ? p.stop_loss : (p.side === "long" ? p.entry_price * (1 - hardSlPct / 100) : p.entry_price * (1 + hardSlPct / 100));
+          const protectiveStop = isTrendlinePriceActionPosition(p)
+            ? (p.side === "long" ? p.entry_price * (1 - hardSlPct / 100) : p.entry_price * (1 + hardSlPct / 100))
+            : p.stop_loss;
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           const breached = p.side === "long" ? mark <= protectiveStop : mark >= protectiveStop;
           if (breached) {
             const exitPrice = isLive ? mark : protectiveStop;
             if (squeezePosition) await log(s.user_id, "warn", `${p.coin} breached squeeze stop @ ${protectiveStop.toFixed(6)}.`, { observedMark: mark, simulatedFill: exitPrice });
-            else await log(s.user_id, "warn", `${p.coin} breached hard ${hardSlPct.toFixed(2)}% stop (${protectiveStop.toFixed(6)}); forcing close now.`, { mark, hardStop: protectiveStop, side: p.side });
+            else if (isTrendlinePriceActionPosition(p)) await log(s.user_id, "warn", `${p.coin} breached Trendline Price Action ${hardSlPct.toFixed(2)}% stop (${protectiveStop.toFixed(6)}); forcing close now.`, { mark, hardStop: protectiveStop, side: p.side });
             const protectedProfit = p.side === "long" ? protectiveStop >= p.entry_price : protectiveStop <= p.entry_price;
             const exitReason = squeezePosition
               ? (protectedProfit ? "squeeze_breakeven_or_trail" : "squeeze_stop_loss")
-              : "hard_stop_loss";
+              : isTrendlinePriceActionPosition(p) ? "hard_stop_loss" : "stop_loss";
             await closeTbPosition(p, exitPrice, exitReason);
             continue;
           }
