@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
-import { Activity, BarChart3, History, LayoutDashboard, Radar, Settings, LogOut, Power, Menu, X, UserRound } from "lucide-react";
+import { Activity, BarChart3, History, LayoutDashboard, Radar, Settings, LogOut, Power, Menu, X } from "lucide-react";
 import { useBot } from "@/lib/botContext";
 import { supabase } from "@/integrations/supabase/client";
 import { KillSwitch } from "./KillSwitch";
@@ -36,11 +36,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const sidebar = (
     <>
-      <div className="flex items-center gap-2 border-b border-panel-border px-5 py-4">
-        <div className="h-6 w-6 shrink-0 rounded bg-primary" />
-        <div className="min-w-0">
+      <div className="flex items-start gap-2 border-b border-panel-border px-5 py-4">
+        <div className="mt-0.5 h-6 w-6 shrink-0 rounded bg-primary" />
+        <div className="min-w-0 flex-1">
           <div className="mono truncate text-sm font-semibold">KAIROS</div>
           <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Hyperliquid</div>
+          <div className="mt-1 truncate text-[11px] text-muted-foreground" title={email ?? undefined}>
+            {email ?? "Loading account…"}
+          </div>
         </div>
         <button onClick={() => setOpen(false)} className="ml-auto rounded-md p-1.5 text-muted-foreground hover:bg-accent lg:hidden" aria-label="Close menu">
           <X className="h-4 w-4" />
@@ -75,13 +78,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
         <KillSwitch />
-        <div className="flex items-center gap-2 rounded-md bg-background px-3 py-2" title={email ?? "Authenticated account"}>
-          <UserRound className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <div className="min-w-0">
-            <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Signed in as</div>
-            <div className="truncate text-xs font-medium text-foreground">{email ?? "Loading account…"}</div>
-          </div>
-        </div>
         <button onClick={signOut} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">
           <LogOut className="h-4 w-4" /> Sign out
         </button>
@@ -92,10 +88,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
-      {/* Desktop sidebar */}
       <aside className="hidden w-60 shrink-0 flex-col border-r border-panel-border bg-panel lg:flex">{sidebar}</aside>
 
-      {/* Mobile drawer */}
       {open && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <div className="absolute inset-0 bg-black/60" onClick={() => setOpen(false)} />
@@ -104,17 +98,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Mobile top bar */}
         <header className="sticky top-0 z-40 flex items-center gap-3 border-b border-panel-border bg-panel/95 px-4 py-3 backdrop-blur lg:hidden">
           <button onClick={() => setOpen(true)} className="rounded-md p-1.5 text-muted-foreground hover:bg-accent" aria-label="Open menu">
             <Menu className="h-5 w-5" />
           </button>
-          <div className="flex min-w-0 items-center gap-2">
-            <div className="h-5 w-5 shrink-0 rounded bg-primary" />
-            <span className="mono truncate text-sm font-semibold">KAIROS</span>
+          <div className="flex min-w-0 items-start gap-2">
+            <div className="mt-0.5 h-5 w-5 shrink-0 rounded bg-primary" />
+            <div className="min-w-0">
+              <div className="mono truncate text-sm font-semibold">KAIROS</div>
+              <div className="truncate text-[9px] uppercase tracking-widest text-muted-foreground">Hyperliquid</div>
+              <div className="max-w-[42vw] truncate text-[9px] text-muted-foreground" title={email ?? undefined}>{email ?? "Loading account…"}</div>
+            </div>
           </div>
           <div className="ml-auto flex shrink-0 items-center gap-2">
-            <span className={`mono text-[10px] font-semibold uppercase tracking-widest ${settings?.kill_switch_engaged ? "text-bear" : settings?.bot_enabled ? "text-bull" : "text-muted-foreground"}`}>{statusLabel}</span>
+            <span className={`mono hidden text-[10px] font-semibold uppercase tracking-widest min-[390px]:inline ${settings?.kill_switch_engaged ? "text-bear" : settings?.bot_enabled ? "text-bull" : "text-muted-foreground"}`}>{statusLabel}</span>
             <button
               disabled={!settings || settings.kill_switch_engaged}
               onClick={() => saveSettings({ bot_enabled: !settings?.bot_enabled })}
