@@ -16,7 +16,7 @@ import {
 } from "./strategies/originalTrendPriceAction";
 import {
   VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS, evaluateVolatilitySqueezeBreakout,
-  squeezeRiskSizedQuantity, favorablePct, adverseAbsPct, squeezeTrailStop,
+  squeezeRiskSizedQuantity, favorablePct, adverseAbsPct, squeezeTrailStop, squeezeProfitLockStop,
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes,
@@ -312,6 +312,11 @@ export class PaperEngine {
     const previousBest = p.trail_high ?? p.entry_price;
     const best = p.side === "long" ? Math.max(previousBest, mark) : Math.min(previousBest, mark);
     if (best !== previousBest) { p.trail_high = best; changed = true; }
+
+    if (!p.partial_taken) {
+      const next = squeezeProfitLockStop(p.side, p.entry_price, best, p.stop_loss);
+      if (next !== p.stop_loss) { p.stop_loss = next; changed = true; }
+    }
 
     if (favorable >= SQUEEZE_DEFAULTS.breakevenAtPct) {
       const be = p.entry_price;

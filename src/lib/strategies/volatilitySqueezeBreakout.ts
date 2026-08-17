@@ -18,6 +18,9 @@ export const SQUEEZE_DEFAULTS = {
   riskPct: 1.5,
   stopPct: 0.45,
   targetPct: 1.0,
+  profitTrailActivatePct: 0.2,
+  profitTrailDistancePct: 0.2,
+  minLockedProfitPct: 0.05,
   breakevenAtPct: 0.4,
   partialAtPct: 1.0,
   partialFraction: 0.5,
@@ -214,5 +217,19 @@ export function squeezeTrailStop(side: Side, peak: number, currentStop: number):
   const candidate = side === "long"
     ? peak * (1 - SQUEEZE_DEFAULTS.trailPct / 100)
     : peak * (1 + SQUEEZE_DEFAULTS.trailPct / 100);
+  return side === "long" ? Math.max(currentStop, candidate) : Math.min(currentStop, candidate);
+}
+
+export function squeezeProfitLockStop(side: Side, entry: number, peak: number, currentStop: number): number {
+  const favorable = favorablePct(side, entry, peak);
+  if (favorable < SQUEEZE_DEFAULTS.profitTrailActivatePct) return currentStop;
+
+  const lockedProfit = side === "long"
+    ? entry * (1 + SQUEEZE_DEFAULTS.minLockedProfitPct / 100)
+    : entry * (1 - SQUEEZE_DEFAULTS.minLockedProfitPct / 100);
+  const trailed = side === "long"
+    ? peak * (1 - SQUEEZE_DEFAULTS.profitTrailDistancePct / 100)
+    : peak * (1 + SQUEEZE_DEFAULTS.profitTrailDistancePct / 100);
+  const candidate = side === "long" ? Math.max(lockedProfit, trailed) : Math.min(lockedProfit, trailed);
   return side === "long" ? Math.max(currentStop, candidate) : Math.min(currentStop, candidate);
 }

@@ -4,6 +4,7 @@ import {
   SQUEEZE_DEFAULTS,
   evaluateVolatilitySqueezeBreakout,
   favorablePct,
+  squeezeProfitLockStop,
   squeezeRiskSizedQuantity,
   squeezeTrailStop,
 } from "../strategies/volatilitySqueezeBreakout";
@@ -118,5 +119,16 @@ describe("Volatility Squeeze Breakout risk and exit math", () => {
     expect(squeezeTrailStop("long", 101, 100.8)).toBeCloseTo(100.8, 6);
     expect(squeezeTrailStop("short", 99, 100)).toBeCloseTo(99.495, 6);
     expect(squeezeTrailStop("short", 99, 99.2)).toBeCloseTo(99.2, 6);
+  });
+
+  it("locks a minimum profit and ratchets the pre-partial stop in both directions", () => {
+    expect(squeezeProfitLockStop("long", 100, 100.19, 99.55)).toBe(99.55);
+    expect(squeezeProfitLockStop("long", 100, 100.2, 99.55)).toBeCloseTo(100.05, 8);
+    expect(squeezeProfitLockStop("long", 100, 100.5, 100.05)).toBeCloseTo(100.299, 8);
+    expect(squeezeProfitLockStop("long", 100, 100.3, 100.299)).toBeCloseTo(100.299, 8);
+
+    expect(squeezeProfitLockStop("short", 100, 99.8, 100.45)).toBeCloseTo(99.95, 8);
+    expect(squeezeProfitLockStop("short", 100, 99.5, 99.95)).toBeCloseTo(99.699, 8);
+    expect(squeezeProfitLockStop("short", 100, 99.7, 99.699)).toBeCloseTo(99.699, 8);
   });
 });

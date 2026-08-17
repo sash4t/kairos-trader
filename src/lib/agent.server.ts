@@ -13,7 +13,7 @@ import {
 import { targetFromR } from "./strategies/intradayMomentumPullback";
 import {
   VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS, evaluateVolatilitySqueezeBreakout,
-  favorablePct as squeezeFavorablePct, adverseAbsPct, squeezeTrailStop,
+  favorablePct as squeezeFavorablePct, adverseAbsPct, squeezeTrailStop, squeezeProfitLockStop,
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes,
@@ -406,6 +406,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const best = p.side === "long" ? Math.max(previousPeak, mark) : Math.min(previousPeak, mark);
           let stopChanged = false;
           if (best !== p.trail_high) p.trail_high = best;
+          if (!p.partial_taken) {
+            const next = squeezeProfitLockStop(p.side, p.entry_price, best, p.stop_loss);
+            if (next !== p.stop_loss) { p.stop_loss = next; stopChanged = true; }
+          }
           if (favorable >= SQUEEZE_DEFAULTS.breakevenAtPct) {
             const next = p.side === "long" ? Math.max(p.stop_loss, p.entry_price) : Math.min(p.stop_loss, p.entry_price);
             if (next !== p.stop_loss) { p.stop_loss = next; stopChanged = true; }
