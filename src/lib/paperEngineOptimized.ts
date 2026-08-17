@@ -1,7 +1,7 @@
 import { fetchCandles, fetchMetaAndCtxs, subscribeAllMids, type AssetCtx, type AssetMeta } from "./hyperliquid";
 import { candlesToBars, evaluateMultiTimeframeSignal, bucket, type Bar, type Signal, MODE_MIN_CONFIDENCE, type StrategyMode } from "./strategy";
 import { supabase } from "@/integrations/supabase/client";
-import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
+import { fetchBtcProtection, shockHitsSide, type ShockDir, type BtcProtectionLevel } from "./btcShock";
 import {
   TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, evaluateTrendlineBreak, buildCascade,
   safetyLineFor, riskSize, trailToSafety, safetyStop, TB_SAFETY_BUFFER_PCT, TB_MIN_STOP_PCT, TB_DEFAULTS,
@@ -111,7 +111,9 @@ export class PaperEngine {
   private dayStartEquity: number;
   private dayStartTs = new Date().setUTCHours(0, 0, 0, 0);
   private snapshotTs = 0;
-  private shockDir: ShockDir = null;
+  private shockEntryDir: ShockDir = null;
+  private shockExitDir: ShockDir = null;
+  private shockLevel: BtcProtectionLevel = "normal";
   private seriesCache = new Map<string, { bars: Bar[]; ts: number }>();
   private lastSqueezeScanTs = 0;
   private lastRsiScanTs = 0;
@@ -206,12 +208,23 @@ export class PaperEngine {
   }
 
   private async pollBtcShock() {
-    if (this.settings.btc_shock_enabled === false) { this.shockDir = null; return; }
-    const win = Math.max(1, Math.round(Number(this.settings.btc_shock_window_min ?? 240)));
-    const move = await fetchBtcMovePct(win);
-    const dir = shockDirection(move, Number(this.settings.btc_shock_pct ?? 1.5));
-    if (dir && dir !== this.shockDir) this.log("warn", `BTC shock ${dir} ${move!.toFixed(2)}% / ${win}m`);
-    this.shockDir = dir;
+    if (this.settings.btc_shock_enabled === false) {
+      this.shockEntryDir = null;
+      this.shockExitDir = null;
+      this.shockLevel = "normal";
+      return;
+    }
+    const state = await fetchBtcProtection();
+    const moves = ([5, 15, 60, 240] as const)
+      .map((w) => `${w}m ${state.moves[w] == null ? "n/a" : `${state.moves[w]!.toFixed(2)}%`}`)
+      .join(" · ");
+    if (state.level !== this.shockLevel) {
+      if (state.level === "normal") this.log("info", `BTC protection normal · ${moves}`);
+      else this.log("warn", `BTC protection ${state.level.toUpperCase()} ${state.dir} ${state.triggerMovePct!.toFixed(2)}% / ${state.triggerWindowMin}m · ${moves}`);
+    }
+    this.shockLevel = state.level;
+    this.shockEntryDir = state.level === "normal" ? null : state.dir;
+    this.shockExitDir = state.level === "exit" ? state.dir : null;
   }
 
   private rTrail(p: OpenPosition, mark: number) {
@@ -271,8 +284,6 @@ export class PaperEngine {
     const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
     if (hitStop) {
       const protectedProfit = p.stop_loss === p.entry_price || (p.side === "long" ? p.stop_loss > p.entry_price : p.stop_loss < p.entry_price);
-      // Paper mode models the persisted stop as a resting order, so fill at the
-      // stop instead of charging websocket/timer latency as fake slippage.
       await this.closePosition(p, p.stop_loss, protectedProfit ? "squeeze_breakeven_or_trail" : "squeeze_stop_loss");
       return;
     }
@@ -335,7 +346,7 @@ export class PaperEngine {
 
     for (const p of [...this.positions]) {
       const mark = this.mid(p.coin); if (mark == null) continue;
-      if (shockHitsSide(this.shockDir, p.side)) { this.closePosition(p, mark, "btc_shock").catch(() => {}); continue; }
+      if (shockHitsSide(this.shockExitDir, p.side)) { this.closePosition(p, mark, "btc_shock").catch(() => {}); continue; }
       if (this.isSqueezePosition(p)) { this.manageSqueezePosition(p, mark).catch((e) => this.log("error", `Squeeze exit ${p.coin}: ${e.message}`)); continue; }
       if (this.isRsiPosition(p)) {
         if (rsiTakeProfitHit(p.side, mark, p.take_profit)) {
@@ -412,7 +423,7 @@ export class PaperEngine {
       const sig = evaluateRsiExtremes(meta.name, hourly);
       if (!sig.side) continue;
       if (sig.confidence < Math.max(RSI_EXTREMES_DEFAULTS.minConfidence, this.settings.min_confidence)) continue;
-      if (shockHitsSide(this.shockDir, sig.side)) continue;
+      if (shockHitsSide(this.shockEntryDir, sig.side)) continue;
       const signalCandleTs = sig.indicators.signalCandleTs;
       const { data: consumed } = await (supabase as any).from("paper_positions")
         .select("id").eq("user_id", this.userId).eq("coin", sig.coin).eq("side", sig.side)
@@ -443,7 +454,7 @@ export class PaperEngine {
       const sig = evaluateVolatilitySqueezeBreakout(meta.name, h1, m15);
       if (!sig.side || sig.stopLoss == null || sig.takeProfit == null) continue;
       if (sig.confidence < Math.max(SQUEEZE_DEFAULTS.minConfidence, this.settings.min_confidence)) continue;
-      if (shockHitsSide(this.shockDir, sig.side)) continue;
+      if (shockHitsSide(this.shockEntryDir, sig.side)) continue;
       const equity = this.currentEquity();
       const leverage = Math.max(1, Math.floor(Math.min(3, this.settings.max_leverage, meta.maxLeverage)));
       const riskQty = squeezeRiskSizedQuantity(equity, sig.price, sig.stopLoss, SQUEEZE_DEFAULTS.riskPct);
@@ -466,7 +477,7 @@ export class PaperEngine {
       if (!h4 || !h1 || !m15) continue;
       const sig = evaluateIntradayPullback(meta.name, h4, h1, m15);
       if (!sig.side || sig.stopLoss == null || sig.confidence < Math.max(65, this.settings.min_confidence)) continue;
-      if (shockHitsSide(this.shockDir, sig.side)) continue;
+      if (shockHitsSide(this.shockEntryDir, sig.side)) continue;
       const equity = this.currentEquity();
       const leverage = Math.max(1, Math.floor(Math.min(this.settings.max_leverage, meta.maxLeverage)));
       const riskQty = riskSizedQuantity(equity, INTRADAY_DEFAULTS.riskPct, sig.price, sig.stopLoss);
@@ -492,7 +503,7 @@ export class PaperEngine {
       if (!daily || !four || !hourly || daily.length < 80 || four.length < 80 || hourly.length < 80) continue;
       const sig = evaluateOriginalTrendPriceAction(meta.name, daily, four, hourly);
       const threshold = Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, this.settings.min_confidence);
-      if (!sig.side || sig.confidence < threshold || shockHitsSide(this.shockDir, sig.side)) continue;
+      if (!sig.side || sig.confidence < threshold || shockHitsSide(this.shockEntryDir, sig.side)) continue;
       await this.openRiskManagedSignal(sig, meta, riskPct, ORIGINAL_TPA_DEFAULTS.positionSizePct, ORIGINAL_TPA_DEFAULTS.takeProfitR);
       held.add(meta.name);
     }
@@ -509,7 +520,7 @@ export class PaperEngine {
       if (!daily || !four || !hourly || daily.length < 80 || four.length < 80 || hourly.length < 80) continue;
       const sig = evaluateMultiTimeframeSignal(meta.name, daily, four, hourly);
       const threshold = Math.max(this.settings.min_confidence, Math.min(70, MODE_MIN_CONFIDENCE[this.settings.strategy_mode]));
-      if (!sig.side || sig.confidence < threshold || shockHitsSide(this.shockDir, sig.side)) continue;
+      if (!sig.side || sig.confidence < threshold || shockHitsSide(this.shockEntryDir, sig.side)) continue;
       await this.openRiskManagedSignal(sig, meta, 0.4, 6, 2.2);
       held.add(meta.name);
     }
@@ -570,7 +581,7 @@ export class PaperEngine {
       if (held.has(meta.name)) continue;
       const series = await this.loadTbSeries(meta.name, cfg.timeframes); if (!series) continue;
       const sig = evaluateTrendlineBreak(meta.name, series, cfg);
-      if (!sig.side || sig.safetyLine == null || sig.confidence < this.settings.min_confidence || shockHitsSide(this.shockDir, sig.side)) continue;
+      if (!sig.side || sig.safetyLine == null || sig.confidence < this.settings.min_confidence || shockHitsSide(this.shockEntryDir, sig.side)) continue;
       const stop = safetyStop(sig.side, sig.safetyLine, TB_SAFETY_BUFFER_PCT);
       const stopPct = Math.abs(sig.price - stop) / sig.price * 100;
       if (stopPct < TB_MIN_STOP_PCT || stopPct > this.hardStopPct() || (sig.side === "long" ? stop >= sig.price : stop <= sig.price)) continue;
