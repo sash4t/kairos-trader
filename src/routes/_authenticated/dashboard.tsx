@@ -36,16 +36,6 @@ function Dashboard() {
   const [, tick] = useState(0);
   useEffect(() => { const t = setInterval(() => tick(x => x + 1), 1500); return () => clearInterval(t); }, []);
 
-  const { data: authUser } = useQuery({
-    queryKey: ["dashboard-auth-user", userId],
-    enabled: !!userId,
-    queryFn: async () => {
-      const { data } = await supabase.auth.getUser();
-      return data.user;
-    },
-    staleTime: 60_000,
-  });
-
   const { data: openPos = [] } = useQuery({
     queryKey: ["positions-open", userId, positionsVersion], enabled: !!userId,
     queryFn: async () => (await supabase.from("paper_positions").select("*").eq("user_id", userId!).eq("status", "open").order("opened_at", { ascending: false })).data ?? [],
@@ -114,8 +104,6 @@ function Dashboard() {
         <div className="mono text-[11px] text-muted-foreground sm:text-right sm:text-xs">
           <div>Bot: <span className={settings?.bot_enabled ? "text-bull" : "text-warning"}>{settings?.bot_enabled ? "RUNNING" : "STOPPED"}</span></div>
           <div>Mode: <span className={isLive ? "text-bear" : "text-foreground"}>{isLive ? "LIVE" : "PAPER"}</span> · <span className="text-foreground">{settings?.strategy_mode?.toUpperCase()}</span></div>
-          <div className="mt-1 max-w-[280px] truncate sm:ml-auto">Signed in: <span className="text-foreground">{authUser?.email ?? "—"}</span></div>
-          <div className="max-w-[280px] truncate sm:ml-auto" title={userId ?? undefined}>User ID: <span className="text-foreground">{userId ?? "—"}</span></div>
         </div>
       </div>
 
