@@ -1,7 +1,7 @@
 import { candlesToBars, bucket, type Bar } from "./strategy";
 import { buildEntryIntent } from "./orderIntent";
 import { clampMaxPositions, evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
-import { fetchBtcMovePct, shockDirection, shockHitsSide, type ShockDir } from "./btcShock";
+import { fetchBtcProtection, shockHitsSide, type ShockDir } from "./btcShock";
 import {
   TRENDLINE_BREAK_KEY, TB_INTERVAL_MS, parseTimeframes, buildCascade, evaluateTrendlineBreak,
   safetyLineFor, riskSize, trailToSafety, dynamicTrailStop, safetyStop, TB_SAFETY_BUFFER_PCT, TB_MIN_STOP_PCT, TB_DEFAULTS,
@@ -100,14 +100,27 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const trailActivatePct = Number.isFinite(+(s.trail_activate_pct ?? 0)) && +(s.trail_activate_pct ?? 0) > 0 ? +(s.trail_activate_pct ?? 0) : 1;
       const trailDistPct = Number.isFinite(+(s.trail_dist_pct ?? 0)) && +(s.trail_dist_pct ?? 0) > 0 ? +(s.trail_dist_pct ?? 0) : 0.5;
       const exits: ExitParams = { tpPct: +s.scalp_tp_pct, slPct: hardSlPct, trailActivatePct, trailDistPct };
-      const shockWindow = Math.max(1, Math.round(+(s.btc_shock_window_min ?? 240)));
-      let shockDir: ShockDir = null; let shockMove: number | null = null;
+      let shockEntryDir: ShockDir = null;
+      let shockExitDir: ShockDir = null;
       if (s.btc_shock_enabled !== false) {
-        shockMove = await fetchBtcMovePct(shockWindow);
-        shockDir = shockDirection(shockMove, +(s.btc_shock_pct ?? 1.5));
-        if (shockDir) {
-          notes.push(`BTC shock ${shockDir} ${shockMove!.toFixed(2)}% / ${shockWindow}m`);
-          await log(s.user_id, "warn", `BTC shock detected: ${shockMove!.toFixed(2)}% within ${shockWindow}m — flattening ${shockDir === "down" ? "longs" : "shorts"} and pausing opposing entries.`, { shockDir, shockMove, windowMin: shockWindow });
+        const protection = await fetchBtcProtection();
+        shockEntryDir = protection.level === "normal" ? null : protection.dir;
+        shockExitDir = protection.level === "exit" ? protection.dir : null;
+        const moves = ([5, 15, 60, 240] as const)
+          .map((w) => `${w}m ${protection.moves[w] == null ? "n/a" : `${protection.moves[w]!.toFixed(2)}%`}`)
+          .join(" · ");
+        notes.push(`BTC ${protection.level} · ${moves}`);
+        if (protection.level !== "normal") {
+          const action = protection.level === "exit"
+            ? `flattening ${protection.dir === "down" ? "longs" : "shorts"} and pausing opposing entries`
+            : "pausing new positions that oppose BTC";
+          await log(s.user_id, "warn", `BTC protection ${protection.level.toUpperCase()}: ${protection.triggerMovePct!.toFixed(2)}% within ${protection.triggerWindowMin}m — ${action}.`, {
+            level: protection.level,
+            shockDir: protection.dir,
+            triggerMovePct: protection.triggerMovePct,
+            triggerWindowMin: protection.triggerWindowMin,
+            moves: protection.moves,
+          });
         }
       }
 
@@ -313,16 +326,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
         for (const p of [...positions]) {
           const squeezePosition = isSqueezePosition(p);
           const rsiPosition = isRsiPosition(p);
-          // RSI positions are managed only by completed-candle RSI exits.
           if (rsiPosition) continue;
           const protectiveStop = squeezePosition ? p.stop_loss : (p.side === "long" ? p.entry_price * (1 - hardSlPct / 100) : p.entry_price * (1 + hardSlPct / 100));
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           const breached = p.side === "long" ? mark <= protectiveStop : mark >= protectiveStop;
           if (breached) {
-            // A paper position models a resting stop order. The minute agent may
-            // observe the market well beyond the trigger, but that scheduler lag
-            // must not be charged as simulated slippage. Live positions still use
-            // the real market/fill path below.
             const exitPrice = isLive ? mark : protectiveStop;
             if (squeezePosition) await log(s.user_id, "warn", `${p.coin} breached squeeze stop @ ${protectiveStop.toFixed(6)}.`, { observedMark: mark, simulatedFill: exitPrice });
             else await log(s.user_id, "warn", `${p.coin} breached hard ${hardSlPct.toFixed(2)}% stop (${protectiveStop.toFixed(6)}); forcing close now.`, { mark, hardStop: protectiveStop, side: p.side });
@@ -348,9 +356,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
         }
       }
 
-      if (canTrade && shockDir) {
+      if (canTrade && shockExitDir) {
         for (const p of [...positions]) {
-          if (!shockHitsSide(shockDir, p.side)) continue;
+          if (!shockHitsSide(shockExitDir, p.side)) continue;
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           await closeTbPosition(p, mark, "btc_shock");
         }
@@ -539,7 +547,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
               ? Math.max(SQUEEZE_DEFAULTS.minConfidence, +s.min_confidence)
               : isOriginalTpa ? Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, +s.min_confidence) : +s.min_confidence;
           if (!sig.side || sig.confidence < minConfidence) continue;
-          if (shockHitsSide(shockDir, sig.side)) continue;
+          if (shockHitsSide(shockEntryDir, sig.side)) { report.vetoed++; continue; }
           if (isRsi) {
             const signalCandleTs = sig.indicators.signalCandleTs;
             const { data: consumed } = await (supabaseAdmin as any).from("paper_positions")
@@ -624,7 +632,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const sl = isTb && tbStop > 0
             ? tbStop
             : isRsi
-              ? 0 // persisted sentinel: RSI positions have no price stop
+              ? 0
               : isSqueeze
                 ? (sig.side === "long" ? entry * (1 - SQUEEZE_DEFAULTS.stopPct / 100) : entry * (1 + SQUEEZE_DEFAULTS.stopPct / 100))
                 : isOriginalTpa && originalStop > 0
