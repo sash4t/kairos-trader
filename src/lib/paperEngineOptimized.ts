@@ -271,7 +271,9 @@ export class PaperEngine {
     const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
     if (hitStop) {
       const protectedProfit = p.stop_loss === p.entry_price || (p.side === "long" ? p.stop_loss > p.entry_price : p.stop_loss < p.entry_price);
-      await this.closePosition(p, mark, protectedProfit ? "squeeze_breakeven_or_trail" : "squeeze_stop_loss");
+      // Paper mode models the persisted stop as a resting order, so fill at the
+      // stop instead of charging websocket/timer latency as fake slippage.
+      await this.closePosition(p, p.stop_loss, protectedProfit ? "squeeze_breakeven_or_trail" : "squeeze_stop_loss");
       return;
     }
 
@@ -344,7 +346,7 @@ export class PaperEngine {
       const hitTp = Number.isFinite(p.take_profit) && (p.side === "long" ? mark >= p.take_profit : mark <= p.take_profit);
       if (hitStop) {
         const protectedProfit = p.side === "long" ? p.stop_loss >= p.entry_price : p.stop_loss <= p.entry_price;
-        this.closePosition(p, mark, protectedProfit ? "r_trailing_stop" : "stop_loss").catch(() => {});
+        this.closePosition(p, p.stop_loss, protectedProfit ? "r_trailing_stop" : "stop_loss").catch(() => {});
       } else if (hitTp) this.closePosition(p, mark, "take_profit").catch(() => {});
     }
 

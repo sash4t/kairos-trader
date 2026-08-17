@@ -319,9 +319,14 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
           const breached = p.side === "long" ? mark <= protectiveStop : mark >= protectiveStop;
           if (breached) {
-            if (squeezePosition) await log(s.user_id, "warn", `${p.coin} breached squeeze stop @ ${protectiveStop.toFixed(6)}.`);
+            // A paper position models a resting stop order. The minute agent may
+            // observe the market well beyond the trigger, but that scheduler lag
+            // must not be charged as simulated slippage. Live positions still use
+            // the real market/fill path below.
+            const exitPrice = isLive ? mark : protectiveStop;
+            if (squeezePosition) await log(s.user_id, "warn", `${p.coin} breached squeeze stop @ ${protectiveStop.toFixed(6)}.`, { observedMark: mark, simulatedFill: exitPrice });
             else await log(s.user_id, "warn", `${p.coin} breached hard ${hardSlPct.toFixed(2)}% stop (${protectiveStop.toFixed(6)}); forcing close now.`, { mark, hardStop: protectiveStop, side: p.side });
-            await closeTbPosition(p, mark, squeezePosition ? "squeeze_stop_loss" : "hard_stop_loss");
+            await closeTbPosition(p, exitPrice, squeezePosition ? "squeeze_stop_loss" : "hard_stop_loss");
             continue;
           }
           if (isLive && creds) {
