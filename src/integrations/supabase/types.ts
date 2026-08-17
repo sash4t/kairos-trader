@@ -62,6 +62,7 @@ export type Database = {
           mode: string
           paper_equity: number
           position_size_pct: number
+          rsi_last_scan_at: string | null
           safety_buffer_pct: number
           scalp_enabled: boolean
           scalp_sl_pct: number
@@ -70,6 +71,7 @@ export type Database = {
           sl_atr_mult: number
           sl_fixed_pct: number
           sl_type: string
+          squeeze_last_scan_at: string | null
           strategy_key: string
           strategy_mode: string
           tb_pivot_strength: number
@@ -105,6 +107,7 @@ export type Database = {
           mode?: string
           paper_equity?: number
           position_size_pct?: number
+          rsi_last_scan_at?: string | null
           safety_buffer_pct?: number
           scalp_enabled?: boolean
           scalp_sl_pct?: number
@@ -113,6 +116,7 @@ export type Database = {
           sl_atr_mult?: number
           sl_fixed_pct?: number
           sl_type?: string
+          squeeze_last_scan_at?: string | null
           strategy_key?: string
           strategy_mode?: string
           tb_pivot_strength?: number
@@ -148,6 +152,7 @@ export type Database = {
           mode?: string
           paper_equity?: number
           position_size_pct?: number
+          rsi_last_scan_at?: string | null
           safety_buffer_pct?: number
           scalp_enabled?: boolean
           scalp_sl_pct?: number
@@ -156,6 +161,7 @@ export type Database = {
           sl_atr_mult?: number
           sl_fixed_pct?: number
           sl_type?: string
+          squeeze_last_scan_at?: string | null
           strategy_key?: string
           strategy_mode?: string
           tb_pivot_strength?: number
@@ -218,6 +224,7 @@ export type Database = {
           leverage: number
           notional: number
           opened_at: string
+          partial_taken: boolean
           pnl: number | null
           reason: string
           risk_pct: number | null
@@ -245,6 +252,7 @@ export type Database = {
           leverage: number
           notional: number
           opened_at?: string
+          partial_taken?: boolean
           pnl?: number | null
           reason: string
           risk_pct?: number | null
@@ -272,6 +280,7 @@ export type Database = {
           leverage?: number
           notional?: number
           opened_at?: string
+          partial_taken?: boolean
           pnl?: number | null
           reason?: string
           risk_pct?: number | null

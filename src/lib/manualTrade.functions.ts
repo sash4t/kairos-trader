@@ -48,8 +48,7 @@ export const placeScannerTrades = createServerFn({ method: "POST" })
     const maxLeverage = Math.max(1, Number(settings.max_leverage ?? 1));
     const positionSizePct = Math.max(0.1, Number(settings.position_size_pct ?? 5));
     const maxExposurePct = Math.max(1, Number(settings.max_exposure_pct ?? 100));
-    // The Agent panel edits scalp_sl_pct. Keep hard_sl_pct only as a legacy fallback.
-    const configuredStop = Number(settings.scalp_sl_pct ?? settings.hard_sl_pct ?? 2);
+    const configuredStop = Number(settings.scalp_sl_pct ?? 2);
     const hardStopPct = Number.isFinite(configuredStop) && configuredStop > 0 ? configuredStop : 2;
     const isLive = settings.mode === "live";
 
