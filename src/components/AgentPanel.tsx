@@ -1,4 +1,5 @@
 import { useBot } from "@/lib/botContext";
+import { TRENDLINE_STRATEGY_KEY } from "@/lib/strategy";
 import { Bot, Clock, Zap } from "lucide-react";
 
 function Toggle({ on, onChange, label, desc }: { on: boolean; onChange: (v: boolean) => void; label: string; desc: string }) {
@@ -41,6 +42,7 @@ export function AgentPanel() {
   const last = settings.last_cycle_at ? new Date(settings.last_cycle_at) : null;
   const ageSec = last ? Math.round((Date.now() - last.getTime()) / 1000) : null;
   const healthy = ageSec != null && ageSec < 180;
+  const isTrendlinePriceAction = (settings.strategy_key ?? TRENDLINE_STRATEGY_KEY) === TRENDLINE_STRATEGY_KEY;
 
   return (
     <div className="panel space-y-4 p-4 sm:p-5">
@@ -79,6 +81,25 @@ export function AgentPanel() {
           </span>
         </div>
       </div>
+
+      {isTrendlinePriceAction && (
+        <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+          <div className="mb-3">
+            <div className="text-sm font-semibold">Trendline Price Action sizing</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Sets the margin allocation per new Trendline Price Action trade. Notional exposure is this percentage of equity multiplied by leverage, subject to the portfolio exposure cap.
+            </p>
+          </div>
+          <div className="max-w-xs">
+            <NumField
+              label="Position size"
+              suffix="% equity"
+              value={+settings.position_size_pct}
+              onChange={(v) => saveSettings({ position_size_pct: Math.min(100, Math.max(0.1, v)) })}
+            />
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <NumField label="Take profit" suffix="%" value={+settings.scalp_tp_pct} onChange={(v) => saveSettings({ scalp_tp_pct: v })} />
