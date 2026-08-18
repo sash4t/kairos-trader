@@ -1,12 +1,12 @@
 import { evaluateMultiTimeframeSignal, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
-import { TRENDLINE_BREAK_KEY } from "./strategies/trendlineBreak";
 import { INTRADAY_PULLBACK_KEY } from "./strategies/intradayMomentumPullback";
 import { ORIGINAL_TREND_PRICE_ACTION_KEY } from "./strategies/originalTrendPriceAction";
 import { VOLATILITY_SQUEEZE_BREAKOUT_KEY } from "./strategies/volatilitySqueezeBreakout";
 import { RSI_EXTREMES_KEY } from "./strategies/rsiExtremes";
+import { TREND_PULSE_KEY } from "./strategies/trendPulse";
 
 export type ScalpSide = "long" | "short";
-export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TRENDLINE_BREAK_KEY | typeof INTRADAY_PULLBACK_KEY | typeof ORIGINAL_TREND_PRICE_ACTION_KEY | typeof VOLATILITY_SQUEEZE_BREAKOUT_KEY | typeof RSI_EXTREMES_KEY;
+export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TREND_PULSE_KEY | typeof INTRADAY_PULLBACK_KEY | typeof ORIGINAL_TREND_PRICE_ACTION_KEY | typeof VOLATILITY_SQUEEZE_BREAKOUT_KEY | typeof RSI_EXTREMES_KEY;
 export const MAX_OPEN_POSITIONS = 30;
 export function clampMaxPositions(value: number): number {
   return Math.min(MAX_OPEN_POSITIONS, Math.max(1, Math.floor(value || 1)));
@@ -19,7 +19,7 @@ export interface ScalpSignal {
 
 export const STRATEGY_OPTIONS = [
   { key: TRENDLINE_STRATEGY_KEY, name: "Trendline Price Action", description: "Top-down trend lines: Daily → 4H → 1H. Daily sets the major bias, 4H confirms it, and 1H provides the action-line break." },
-  { key: TRENDLINE_BREAK_KEY, name: "Trendline Break", description: "Chained multi-timeframe trendlines. Close through an upward line goes short; close through a downward line goes long; the opposing line is the structural safety stop." },
+  { key: TREND_PULSE_KEY, name: "Trend-Pulse", description: "4H trend regime + 1H RSI extreme reversal + 15m squeeze release with volume, using ATR-based risk and layered exits." },
   { key: INTRADAY_PULLBACK_KEY, name: "Intraday Momentum Pullback", description: "Paper-mode 4H → 1H → 15m momentum pullbacks with EMA20 rejection entries, structure + ATR stops, risk-based sizing and R-based profit protection." },
   { key: ORIGINAL_TREND_PRICE_ACTION_KEY, name: "Original Trend Price Action", description: "1H trend-line execution with EMA20/50, RSI, MACD, volume and ATR confidence scoring, gated by aligned Daily and 4H direction." },
   { key: VOLATILITY_SQUEEZE_BREAKOUT_KEY, name: "Volatility Squeeze Breakout", description: "15m momentum breakout: 4-candle breakout + ≥1.2x volume + non-extreme 1H RSI; recent squeeze only boosts confidence." },
@@ -84,5 +84,6 @@ export function strategySelectionPatch(key: StrategyKey): Record<string, unknown
   if (key === ORIGINAL_TREND_PRICE_ACTION_KEY) return { strategy_key: key, min_confidence: 60, trailing_enabled: true };
   if (key === VOLATILITY_SQUEEZE_BREAKOUT_KEY) return { strategy_key: key, min_confidence: 70, trailing_enabled: true, max_positions: 5 };
   if (key === RSI_EXTREMES_KEY) return { strategy_key: key, min_confidence: 70, trailing_enabled: false, max_positions: MAX_OPEN_POSITIONS, daily_loss_pct: 5, rsi_risk_pct: 1, rsi_max_leverage: 5 };
+  if (key === TREND_PULSE_KEY) return { strategy_key: key, min_confidence: 75, trailing_enabled: true, max_positions: 5 };
   return { strategy_key: key };
 }

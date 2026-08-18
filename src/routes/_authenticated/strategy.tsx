@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { useBot } from "@/lib/botContext";
 import { MODE_MIN_CONFIDENCE, TRENDLINE_STRATEGY_KEY } from "@/lib/strategy";
-import { TRENDLINE_BREAK_KEY, TB_DEFAULTS, TB_TIMEFRAMES, parseTimeframes } from "@/lib/strategies/trendlineBreak";
+import { TREND_PULSE_KEY } from "@/lib/strategies/trendPulse";
 import { INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS } from "@/lib/strategies/intradayMomentumPullback";
 import { ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS } from "@/lib/strategies/originalTrendPriceAction";
 import { VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS } from "@/lib/strategies/volatilitySqueezeBreakout";
@@ -55,12 +55,11 @@ function Strategy() {
   if (!settings) return <div className="p-8 text-sm text-muted-foreground">Loading strategy settings…</div>;
   const s = settings as any;
   const key = s.strategy_key || TRENDLINE_STRATEGY_KEY;
-  const isTb = key === TRENDLINE_BREAK_KEY;
+  const isTrendPulse = key === TREND_PULSE_KEY;
   const isIntraday = key === INTRADAY_PULLBACK_KEY;
   const isOriginal = key === ORIGINAL_TREND_PRICE_ACTION_KEY;
   const isSqueeze = key === VOLATILITY_SQUEEZE_BREAKOUT_KEY;
   const isRsi = key === RSI_EXTREMES_KEY;
-  const tf = parseTimeframes(s.tb_timeframes);
   const set = (patch: any) => saveSettings(patch);
 
   return (
@@ -88,10 +87,10 @@ function Strategy() {
             onClick={() => set(strategySelectionPatch(TRENDLINE_STRATEGY_KEY))}
           />
           <StrategyCard
-            active={isTb}
-            title="Trendline Break"
-            description="Multi-timeframe action-line breakout. Opposing safety-line stop; ATR volatility gate; momentum inputs improve confidence."
-            onClick={() => set(strategySelectionPatch(TRENDLINE_BREAK_KEY))}
+            active={isTrendPulse}
+            title="Trend-Pulse"
+            description="4H trend regime + 1H RSI extreme reversal + 15m squeeze release with volume and ATR risk."
+            onClick={() => set(strategySelectionPatch(TREND_PULSE_KEY))}
           />
           <StrategyCard
             active={isIntraday}
@@ -232,27 +231,7 @@ function Strategy() {
         </section>
       )}
 
-      {isTb && (
-        <section className="panel space-y-5 p-4 sm:p-5">
-          <div><div className="text-sm font-semibold">Trendline Break — cascade & risk</div><p className="mt-1 text-xs text-muted-foreground">Keep at least two timeframes. The last selected timeframe is the execution timeframe.</p></div>
-          <div className="flex flex-wrap gap-2">
-            {TB_TIMEFRAMES.map(t => (
-              <button key={t} type="button" onClick={() => {
-                const next = tf.includes(t) ? tf.filter((x: string) => x !== t) : [...tf, t];
-                if (next.length >= 2) set({ tb_timeframes: parseTimeframes(next.join(",")).join(",") });
-              }} className={`rounded-md border px-3 py-1.5 mono text-xs ${tf.includes(t) ? "border-primary bg-primary/10" : "border-panel-border hover:bg-muted/40"}`}>
-                {t}
-              </button>
-            ))}
-          </div>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
-            <NumField label="Pivot strength" value={Number(s.tb_pivot_strength ?? TB_DEFAULTS.pivotStrength)} onChange={v => set({ tb_pivot_strength: Math.min(10, Math.max(2, Math.round(v))) })} />
-            <NumField label="Risk per trade" value={Number(s.tb_risk_pct ?? 0.4)} onChange={v => set({ tb_risk_pct: Math.min(2, Math.max(0.05, v)) })} step={0.05} suffix="% equity" />
-            <NumField label="Position size cap" value={Number(s.tb_position_size_pct ?? 6)} onChange={v => set({ tb_position_size_pct: Math.min(25, Math.max(0.5, v)) })} step={0.5} suffix="% equity" />
-            <NumField label="Line refresh" value={Number(s.tb_refresh_min ?? TB_DEFAULTS.refreshMin)} onChange={v => set({ tb_refresh_min: Math.min(1440, Math.max(1, Math.round(v))) })} suffix="minutes" />
-          </div>
-        </section>
-      )}
+      {isTrendPulse && <section className="panel p-4 text-sm sm:p-5">Trend-Pulse uses fixed defaults: 1.5% equity risk, up to 5× leverage, 1.2 ATR stop, 1.5 ATR partial target, and 3.5 ATR runner target.</section>}
 
       <section className="panel space-y-5 p-4 sm:p-5">
         <div className="text-sm font-semibold">Global risk limits</div>

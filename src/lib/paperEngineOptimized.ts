@@ -24,6 +24,7 @@ import {
   rsiBreakevenTrigger, rsiProtectedStop, rsiRiskMultiplier, rsiTakeProfitHit, rsiTakeProfitPrice,
 } from "./strategies/rsiExtremes";
 import { clampMaxPositions } from "./scalp";
+import { TREND_PULSE_KEY, TREND_PULSE_DEFAULTS, evaluateTrendPulse, trendPulseRiskSizedQuantity } from "./strategies/trendPulse";
 
 export interface Settings {
   user_id: string;
@@ -120,6 +121,7 @@ export class PaperEngine {
   private seriesCache = new Map<string, { bars: Bar[]; ts: number }>();
   private lastSqueezeScanTs = 0;
   private lastRsiScanTs = 0;
+  private lastTrendPulseScanTs = 0;
 
   constructor(userId: string, settings: Settings, log: Log) {
     this.userId = userId;
@@ -135,6 +137,7 @@ export class PaperEngine {
   private isOriginalTpa() { return this.settings.strategy_key === ORIGINAL_TREND_PRICE_ACTION_KEY; }
   private isSqueeze() { return this.settings.strategy_key === VOLATILITY_SQUEEZE_BREAKOUT_KEY; }
   private isRsi() { return this.settings.strategy_key === RSI_EXTREMES_KEY; }
+  private isTrendPulse() { return this.settings.strategy_key === TREND_PULSE_KEY; }
   private isSqueezePosition(p: OpenPosition) { return p.reason?.includes(`[${VOLATILITY_SQUEEZE_BREAKOUT_KEY}]`) === true; }
   private isRsiPosition(p: OpenPosition) { return p.reason?.includes(`[${RSI_EXTREMES_KEY}]`) === true; }
   private hardStopPct() {
@@ -426,6 +429,11 @@ export class PaperEngine {
           this.lastRsiScanTs = Date.now();
           await this.runRsiCycle();
         }
+      } else if (this.isTrendPulse()) {
+        if (Date.now() - this.lastTrendPulseScanTs >= TREND_PULSE_DEFAULTS.scanEveryMs) {
+          this.lastTrendPulseScanTs = Date.now();
+          await this.runTrendPulseCycle();
+        }
       } else if (this.isSqueeze()) {
         if (Date.now() - this.lastSqueezeScanTs >= SQUEEZE_DEFAULTS.scanEveryMs) {
           this.lastSqueezeScanTs = Date.now();
@@ -532,6 +540,26 @@ export class PaperEngine {
       const size = Math.min(riskQty, roomQty);
       if (!(size > 0) || !Number.isFinite(size)) continue;
       await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, sig.takeProfit, sig.confidence, sig.reasons, sig.indicators, SQUEEZE_DEFAULTS.riskPct, undefined, undefined, "15m", VOLATILITY_SQUEEZE_BREAKOUT_KEY);
+      held.add(meta.name);
+    }
+  }
+
+  private async runTrendPulseCycle() {
+    const held = new Set(this.positions.map((p) => p.coin));
+    for (const { meta } of this.candidates(TREND_PULSE_DEFAULTS.scanLimit, { includeMajors: true })) {
+      if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
+      if (held.has(meta.name)) continue;
+      const [h4, h1, m15] = await Promise.all([this.bars(meta.name, "4h", 100, FOUR_HOUR), this.bars(meta.name, "1h", 100, HOUR), this.bars(meta.name, "15m", 120, FIFTEEN)]);
+      if (!h4 || !h1 || !m15) continue;
+      const sig = evaluateTrendPulse(meta.name, h4, h1, m15);
+      if (!sig.side || sig.stopLoss == null || sig.takeProfit == null || sig.confidence < Math.max(TREND_PULSE_DEFAULTS.minConfidence, this.settings.min_confidence)) continue;
+      if (shockHitsSide(this.shockEntryDir, sig.side)) continue;
+      const equity = this.currentEquity();
+      const leverage = Math.max(1, Math.floor(Math.min(TREND_PULSE_DEFAULTS.maxLeverage, this.settings.max_leverage, meta.maxLeverage)));
+      const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;
+      const size = Math.min(trendPulseRiskSizedQuantity(equity, sig.price, sig.stopLoss), roomQty);
+      if (!(size > 0) || !Number.isFinite(size)) continue;
+      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, sig.takeProfit, sig.confidence, sig.reasons, sig.indicators, TREND_PULSE_DEFAULTS.riskPct, undefined, undefined, "15m", TREND_PULSE_KEY);
       held.add(meta.name);
     }
   }
