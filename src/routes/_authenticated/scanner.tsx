@@ -26,6 +26,29 @@ const VOLUME_SURGE_X = 1.5;
 const WATCH_DISTANCE_ATR = 0.6;
 const MAX_RESULTS = 30;
 
+type TradeResult = { coin: string; side: "long" | "short"; status: "opened" | "skipped" | "error"; message: string; size?: number; entryPrice?: number; leverage?: number };
+
+function blockReason(message: string): "maxPositions" | "exposure" | "duplicate" | "other" {
+  const m = message.toLowerCase();
+  if (m.includes("max positions")) return "maxPositions";
+  if (m.includes("exposure")) return "exposure";
+  if (m.includes("already exists")) return "duplicate";
+  return "other";
+}
+
+function blockedBreakdown(results: TradeResult[]) {
+  const counts = { maxPositions: 0, exposure: 0, duplicate: 0, other: 0 };
+  for (const r of results) if (r.status === "skipped") counts[blockReason(r.message)] += 1;
+  return counts;
+}
+
+const BLOCK_LABEL: Record<ReturnType<typeof blockReason>, string> = {
+  maxPositions: "Max positions",
+  exposure: "Exposure cap",
+  duplicate: "Already held",
+  other: "Other",
+};
+
 function Scanner() {
   const { mids, settings, syncPositions } = useBot();
   const placeTrades = useServerFn(placeScannerTrades);
@@ -36,6 +59,7 @@ function Scanner() {
   const [scannedCount, setScannedCount] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [lastScannedAt, setLastScannedAt] = useState<number | null>(null);
+  const [lastResult, setLastResult] = useState<{ at: number; results: TradeResult[] } | null>(null);
 
   const runScan = async () => {
     setLoading(true); setOpportunities([]); setSelected(new Set()); setScannedCount(0);
@@ -137,12 +161,23 @@ function Scanner() {
         rsi: o.rsi,
         atrPct: o.atrPct,
       })) } });
+      setLastResult({ at: Date.now(), results: result.results });
       if (result.opened) toast.success(`Opened ${result.opened} scanner position${result.opened === 1 ? "" : "s"}.`);
-      if (result.skipped) toast.warning(`${result.skipped} selected trade${result.skipped === 1 ? " was" : "s were"} skipped by position/exposure/duplicate limits.`);
+      if (result.skipped) {
+        const b = blockedBreakdown(result.results);
+        const parts = [
+          b.maxPositions ? `${b.maxPositions} max positions` : null,
+          b.exposure ? `${b.exposure} exposure cap` : null,
+          b.duplicate ? `${b.duplicate} already held` : null,
+          b.other ? `${b.other} other` : null,
+        ].filter(Boolean);
+        toast.warning(`${result.skipped} candidate${result.skipped === 1 ? "" : "s"} blocked${parts.length ? ` · ${parts.join(" · ")}` : ""}`);
+      }
       if (result.errors) toast.error(`${result.errors} scanner trade${result.errors === 1 ? "" : "s"} failed.`);
       const openedCoins = new Set(result.results.filter((r) => r.status === "opened").map((r) => r.coin));
       setSelected((prev) => new Set([...prev].filter((coin) => !openedCoins.has(coin))));
       await syncPositions();
+
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally { setSubmitting(false); }
@@ -165,6 +200,36 @@ function Scanner() {
     {opportunities.length > 0 ? <div className="panel flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between sm:p-4"><div><div className="text-sm font-medium">Manual scanner trades · {settings?.mode === "live" ? "LIVE" : "PAPER"}</div><div className="text-xs text-muted-foreground">{selected.size} selected · uses current position size, leverage, max-position and exposure settings · duplicate coins are skipped</div></div><div className="flex flex-wrap gap-2"><button onClick={selectAll} disabled={submitting} className="rounded-md border border-panel-border px-3 py-2 text-xs font-medium disabled:opacity-50">Select all {opportunities.length}</button><button onClick={selectConfirmed} disabled={submitting} className="rounded-md border border-panel-border px-3 py-2 text-xs font-medium disabled:opacity-50">Select confirmed</button><button onClick={() => setSelected(new Set())} disabled={submitting || !selected.size} className="rounded-md border border-panel-border px-3 py-2 text-xs font-medium disabled:opacity-50">Clear</button><button onClick={submitSelected} disabled={submitting || !selected.size || settings?.kill_switch_engaged} className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">{submitting ? <><Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" />Placing…</> : `Place ${selected.size} selected trade${selected.size === 1 ? "" : "s"}`}</button></div></div> : null}
 
     {settings?.kill_switch_engaged ? <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">Kill switch is engaged. Scanner trade buttons are disabled.</div> : null}
+
+    {lastResult ? (() => {
+      const opened = lastResult.results.filter((r) => r.status === "opened");
+      const skipped = lastResult.results.filter((r) => r.status === "skipped");
+      const errored = lastResult.results.filter((r) => r.status === "error");
+      const b = blockedBreakdown(lastResult.results);
+      return <div className="panel p-3 sm:p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-medium">Last submission · {new Date(lastResult.at).toLocaleTimeString()}</div>
+          <button onClick={() => setLastResult(null)} className="rounded-md border border-panel-border px-2 py-1 text-[11px] text-muted-foreground">Dismiss</button>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-2 text-xs">
+          <span className="rounded-md border border-panel-border px-2 py-1 text-bull">{opened.length} opened</span>
+          <span className="rounded-md border border-panel-border px-2 py-1 text-warning">{skipped.length} blocked</span>
+          {b.maxPositions ? <span className="rounded-md border border-panel-border px-2 py-1 text-muted-foreground">{b.maxPositions} max positions</span> : null}
+          {b.exposure ? <span className="rounded-md border border-panel-border px-2 py-1 text-muted-foreground">{b.exposure} exposure cap</span> : null}
+          {b.duplicate ? <span className="rounded-md border border-panel-border px-2 py-1 text-muted-foreground">{b.duplicate} already held</span> : null}
+          {b.other ? <span className="rounded-md border border-panel-border px-2 py-1 text-muted-foreground">{b.other} other</span> : null}
+          {errored.length ? <span className="rounded-md border border-panel-border px-2 py-1 text-bear">{errored.length} failed</span> : null}
+        </div>
+        <div className="mt-3 max-h-64 space-y-1 overflow-y-auto text-xs">
+          {[...opened, ...skipped, ...errored].map((r) => <div key={`${r.coin}-${r.status}`} className="flex flex-wrap items-baseline gap-2 rounded-md border border-panel-border px-2 py-1.5">
+            <span className="mono font-semibold">{r.coin}</span>
+            <span className={`text-[11px] font-semibold uppercase ${r.status === "opened" ? "text-bull" : r.status === "error" ? "text-bear" : "text-warning"}`}>{r.status === "skipped" ? BLOCK_LABEL[blockReason(r.message)] : r.status}</span>
+            <span className="text-muted-foreground">{r.message}</span>
+          </div>)}
+        </div>
+      </div>;
+    })() : null}
+
     {lastScannedAt && !loading ? <div className="text-xs text-muted-foreground">Last scan: {new Date(lastScannedAt).toLocaleTimeString()} · WATCH = setup developing · CONFIRMED = 1H support/resistance break</div> : null}
     {!loading && opportunities.length === 0 ? <div className="panel p-8 text-center"><div className="font-medium">No signal list yet</div><div className="mt-1 text-sm text-muted-foreground">Run a scan to check all Hyperliquid perp pairs.</div></div> : null}
 
