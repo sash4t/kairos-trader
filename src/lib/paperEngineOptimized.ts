@@ -17,6 +17,7 @@ import {
 import {
   VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS, evaluateVolatilitySqueezeBreakout,
   squeezeRiskSizedQuantity, favorablePct, adverseAbsPct, squeezeTrailStop, squeezeProfitLockStop,
+  squeezeCooldownMap, formatCooldownRemaining, SQUEEZE_STOP_LOSS_EXIT_REASON,
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes,
@@ -473,9 +474,21 @@ export class PaperEngine {
 
   private async runSqueezeCycle() {
     const held = new Set(this.positions.map((p) => p.coin));
+    // One query per scan: coins locked out by a recent losing squeeze stop-loss.
+    const since = new Date(Date.now() - SQUEEZE_DEFAULTS.stopLossCooldownMs).toISOString();
+    const { data: cooldownRows } = await supabase.from("paper_positions")
+      .select("coin, exit_reason, closed_at")
+      .eq("user_id", this.userId).eq("status", "closed")
+      .eq("exit_reason", SQUEEZE_STOP_LOSS_EXIT_REASON).gte("closed_at", since);
+    const cooldown = squeezeCooldownMap(cooldownRows);
     for (const { meta } of this.candidates(SQUEEZE_DEFAULTS.scanLimit)) {
       if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
+      const remaining = cooldown.get(meta.name);
+      if (remaining) {
+        this.log("info", `${meta.name} skipped · squeeze stop-loss cooldown ${formatCooldownRemaining(remaining)} remaining`);
+        continue;
+      }
       const [h1, m15] = await Promise.all([
         this.bars(meta.name, "1h", 100, HOUR),
         this.bars(meta.name, "15m", 120, FIFTEEN),

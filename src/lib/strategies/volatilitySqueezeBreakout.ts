@@ -34,7 +34,46 @@ export const SQUEEZE_DEFAULTS = {
   minConfidence: 82,
   signalFreshMs: 5 * 60 * 1000,
   sameDirectionBlockBars: 2,
+  // Per-coin lockout after a real losing squeeze stop-loss.
+  stopLossCooldownMs: 4 * 60 * 60 * 1000,
 } as const;
+
+/** Only an actual losing squeeze stop-loss triggers the cooldown. */
+export const SQUEEZE_STOP_LOSS_EXIT_REASON = "squeeze_stop_loss" as const;
+
+export interface SqueezeClosedRow {
+  coin: string;
+  exit_reason?: string | null;
+  closed_at?: string | null;
+}
+
+/**
+ * Maps coin -> remaining cooldown ms from closed squeeze positions.
+ * Only rows whose exit_reason is exactly "squeeze_stop_loss" count.
+ */
+export function squeezeCooldownMap(
+  rows: SqueezeClosedRow[] | null | undefined,
+  nowMs = Date.now(),
+  cooldownMs = SQUEEZE_DEFAULTS.stopLossCooldownMs,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const row of rows ?? []) {
+    if (row?.exit_reason !== SQUEEZE_STOP_LOSS_EXIT_REASON) continue;
+    const closedAt = row.closed_at ? Date.parse(row.closed_at) : NaN;
+    if (!Number.isFinite(closedAt)) continue;
+    const remaining = closedAt + cooldownMs - nowMs;
+    if (remaining <= 0) continue;
+    out.set(row.coin, Math.max(out.get(row.coin) ?? 0, remaining));
+  }
+  return out;
+}
+
+export function formatCooldownRemaining(remainingMs: number): string {
+  const minutes = Math.max(1, Math.ceil(remainingMs / 60_000));
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
 
 type Side = "long" | "short";
 
