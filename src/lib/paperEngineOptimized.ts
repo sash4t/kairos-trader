@@ -21,7 +21,7 @@ import {
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes,
-  rsiBreakevenTrigger, rsiTakeProfitHit, rsiTakeProfitPrice,
+  rsiBreakevenTrigger, rsiProtectedStop, rsiRiskMultiplier, rsiTakeProfitHit, rsiTakeProfitPrice,
 } from "./strategies/rsiExtremes";
 import { clampMaxPositions } from "./scalp";
 
@@ -283,6 +283,29 @@ export class PaperEngine {
     this.log("trade", `PARTIAL ${p.side.toUpperCase()} ${p.coin} @ ${price.toFixed(6)} · closed 50% · realized ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · runner trail ${SQUEEZE_DEFAULTS.trailPct.toFixed(2)}%`);
   }
 
+  private async partialCloseRsi(p: OpenPosition, price: number) {
+    if (p.partial_taken || !(p.size > 0)) return;
+    p.partial_taken = true;
+    const closeSize = p.size * RSI_EXTREMES_DEFAULTS.partialFraction;
+    const pnl = p.side === "long"
+      ? (price - p.entry_price) * closeSize
+      : (p.entry_price - price) * closeSize;
+    this.startEquity += pnl;
+    p.realized_pnl = (p.realized_pnl ?? 0) + pnl;
+    p.size = Math.max(0, p.size - closeSize);
+    p.notional = p.size * p.entry_price;
+    p.stop_loss = rsiProtectedStop(p.side, p.entry_price);
+    await (supabase as any).from("paper_positions").update({
+      size: p.size,
+      notional: p.notional,
+      pnl: p.realized_pnl,
+      partial_taken: true,
+      stop_loss: p.stop_loss,
+      indicators: p.indicators ?? {},
+    }).eq("id", p.id).eq("status", "open");
+    this.log("trade", `PARTIAL ${p.side.toUpperCase()} ${p.coin} @ ${price.toFixed(6)} · closed ${(RSI_EXTREMES_DEFAULTS.partialFraction * 100).toFixed(0)}% · realized ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDC · protected stop ${p.stop_loss.toFixed(6)}`);
+  }
+
   private async manageSqueezePosition(p: OpenPosition, mark: number) {
     const hitStop = p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss;
     if (hitStop) {
@@ -372,10 +395,9 @@ export class PaperEngine {
           this.closePosition(p, mark, "rsi_max_hold_exit").catch(() => {});
           continue;
         }
-        const breakevenAt = rsiBreakevenTrigger(p.side, p.entry_price, p.take_profit);
-        if (p.side === "long" ? mark >= breakevenAt : mark <= breakevenAt) {
-          const next = p.side === "long" ? Math.max(p.stop_loss, p.entry_price) : Math.min(p.stop_loss, p.entry_price);
-          if (next !== p.stop_loss) { p.stop_loss = next; this.persistPositionUpdate(p); }
+        const partialAt = rsiBreakevenTrigger(p.side, p.entry_price, p.take_profit);
+        if (!p.partial_taken && (p.side === "long" ? mark >= partialAt : mark <= partialAt)) {
+          this.partialCloseRsi(p, mark).catch((error) => this.log("error", `RSI partial ${p.coin}: ${error.message}`));
         }
         continue;
       }
@@ -457,7 +479,12 @@ export class PaperEngine {
         .contains("indicators", { signalCandleTs }).limit(1);
       if (consumed?.length) continue;
       const equity = this.currentEquity();
-      const riskPct = Math.min(5, Math.max(0.05, Number(this.settings.rsi_risk_pct ?? RSI_EXTREMES_DEFAULTS.riskPct)));
+      const configuredRiskPct = Math.min(5, Math.max(0.05, Number(this.settings.rsi_risk_pct ?? RSI_EXTREMES_DEFAULTS.riskPct)));
+      const riskMultiplier = rsiRiskMultiplier(sig.confidence, sig.indicators.trailedRsiExtreme);
+      const riskPct = configuredRiskPct * riskMultiplier;
+      sig.indicators.configuredRiskPct = configuredRiskPct;
+      sig.indicators.appliedRiskPct = riskPct;
+      sig.indicators.riskMultiplier = riskMultiplier;
       const rsiMaxLeverage = Math.min(10, Math.max(1, Math.floor(Number(this.settings.rsi_max_leverage ?? RSI_EXTREMES_DEFAULTS.maxLeverage))));
       const leverage = Math.max(1, Math.floor(Math.min(rsiMaxLeverage, this.settings.max_leverage, meta.maxLeverage)));
       if (!(sig.stopLoss && Number.isFinite(sig.stopLoss))) continue;
