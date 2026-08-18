@@ -534,10 +534,33 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const nextCursor = isRsi || isSqueeze ? cursor : (eligibleCount ? (cursor + scanCount) % eligibleCount : 0);
       notes.push(isRsi && !rsiScanDue ? "RSI scan waiting for 1m cadence" : isSqueeze && !squeezeScanDue ? "squeeze scan waiting for 5m cadence" : `scanner ${scanCount}/${eligibleCount} pairs · cursor ${cursor}→${nextCursor}`);
 
+      const squeezeCooldown = new Map<string, number>();
+      if (isSqueeze && squeezeScanDue) {
+        const since = new Date(Date.now() - SQUEEZE_DEFAULTS.stopLossCooldownMs).toISOString();
+        const { data: cooldownRows, error: cooldownErr } = await supabaseAdmin.from("paper_positions")
+          .select("coin, exit_reason, closed_at")
+          .eq("user_id", s.user_id).eq("status", "closed")
+          .eq("exit_reason", SQUEEZE_STOP_LOSS_EXIT_REASON).gte("closed_at", since);
+        if (cooldownErr) {
+          const message = `Could not load squeeze stop-loss cooldowns: ${cooldownErr.message}`;
+          notes.push(message);
+          await log(s.user_id, "warn", message);
+        } else {
+          for (const [coin, remaining] of squeezeCooldownMap(cooldownRows)) squeezeCooldown.set(coin, remaining);
+        }
+      }
+
       if (s.scalp_enabled && canTrade && equityNow > 0 && positions.length < maxPositions) {
         for (const target of scanTargets) {
           if (positions.length >= maxPositions) break;
           if (held.has(target.meta.name)) continue;
+          if (isSqueeze) {
+            const remaining = squeezeCooldown.get(target.meta.name);
+            if (remaining) {
+              await log(s.user_id, "info", `${target.meta.name} skipped · squeeze stop-loss cooldown ${formatCooldownRemaining(remaining)} remaining`);
+              continue;
+            }
+          }
           let sig: ScalpSignal;
           let tbSafety: number | undefined;
           let tbTimeframe: string | undefined;
