@@ -6,7 +6,7 @@ import { fetchCandles, fetchMetaAndCtxs, type AssetCtx, type AssetMeta } from "@
 import { candlesToBars, getTrendlineState } from "@/lib/strategy";
 import { atr, ema, macd, rsi } from "@/lib/indicators";
 import { useBot } from "@/lib/botContext";
-import { placeScannerTrades } from "@/lib/manualTrade.functions";
+import { placeScannerTrades, type ScannerTradeResult } from "@/lib/manualTrade.functions";
 import { Loader2, RefreshCw, TrendingDown, TrendingUp, Zap } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/scanner")({ component: Scanner });
@@ -36,9 +36,10 @@ function Scanner() {
   const [scannedCount, setScannedCount] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [lastScannedAt, setLastScannedAt] = useState<number | null>(null);
+  const [lastTradeResults, setLastTradeResults] = useState<ScannerTradeResult[]>([]);
 
   const runScan = async () => {
-    setLoading(true); setOpportunities([]); setSelected(new Set()); setScannedCount(0);
+    setLoading(true); setOpportunities([]); setSelected(new Set()); setScannedCount(0); setLastTradeResults([]);
     try {
       const [m, ctxs] = await fetchMetaAndCtxs();
       const markets = m.universe.map((meta, i) => ({ meta, ctx: ctxs[i] })).filter((r): r is { meta: AssetMeta; ctx: AssetCtx } => Boolean(r.ctx));
@@ -137,9 +138,23 @@ function Scanner() {
         rsi: o.rsi,
         atrPct: o.atrPct,
       })) } });
+      setLastTradeResults(result.results);
       if (result.opened) toast.success(`Opened ${result.opened} scanner position${result.opened === 1 ? "" : "s"}.`);
-      if (result.skipped) toast.warning(`${result.skipped} selected trade${result.skipped === 1 ? " was" : "s were"} skipped by position/exposure/duplicate limits.`);
-      if (result.errors) toast.error(`${result.errors} scanner trade${result.errors === 1 ? "" : "s"} failed.`);
+      if (result.skipped) {
+        const skipped = result.results.filter((r) => r.status === "skipped");
+        const maxPositions = skipped.filter((r) => r.message.startsWith("Max positions limit reached")).length;
+        const exposure = skipped.filter((r) => r.message === "Exposure limit reached.").length;
+        const alreadyHeld = skipped.filter((r) => r.message === "An open position already exists for this coin.").length;
+        const other = skipped.length - maxPositions - exposure - alreadyHeld;
+        const parts = [
+          maxPositions ? `${maxPositions} max positions` : "",
+          exposure ? `${exposure} exposure cap` : "",
+          alreadyHeld ? `${alreadyHeld} already held` : "",
+          other ? `${other} other` : "",
+        ].filter(Boolean);
+        toast.warning(`${result.skipped} candidate${result.skipped === 1 ? "" : "s"} blocked · ${parts.join(" · ")}`);
+      }
+      if (result.errors) toast.error(`${result.errors} scanner trade${result.errors === 1 ? "" : "s"} failed. See trade results below.`);
       const openedCoins = new Set(result.results.filter((r) => r.status === "opened").map((r) => r.coin));
       setSelected((prev) => new Set([...prev].filter((coin) => !openedCoins.has(coin))));
       await syncPositions();
@@ -154,6 +169,17 @@ function Scanner() {
     watch: opportunities.filter((o) => o.stage === "WATCH").length,
     confirmed: opportunities.filter((o) => o.stage === "CONFIRMED").length,
   }), [opportunities]);
+  const tradeResultSummary = useMemo(() => {
+    const skipped = lastTradeResults.filter((r) => r.status === "skipped");
+    return {
+      opened: lastTradeResults.filter((r) => r.status === "opened").length,
+      skipped: skipped.length,
+      errors: lastTradeResults.filter((r) => r.status === "error").length,
+      maxPositions: skipped.filter((r) => r.message.startsWith("Max positions limit reached")).length,
+      exposure: skipped.filter((r) => r.message === "Exposure limit reached.").length,
+      alreadyHeld: skipped.filter((r) => r.message === "An open position already exists for this coin.").length,
+    };
+  }, [lastTradeResults]);
   const toneFor = (d: Direction) => d === "bullish" ? "text-bull" : d === "bearish" ? "text-bear" : "text-foreground";
   const callFor = (o: Opportunity) => o.stage === "CONFIRMED" ? `${o.direction === "bullish" ? "LONG" : "SHORT"} CONFIRMED` : o.stage === "WATCH" ? `${o.direction === "bullish" ? "LONG" : "SHORT"} WATCH` : "RSI EXTREME";
 
@@ -163,6 +189,8 @@ function Scanner() {
     <div className="grid gap-3 grid-cols-2 xl:grid-cols-4"><div className="panel p-4"><div className="flex items-center gap-2 text-sm text-muted-foreground"><TrendingUp className="h-4 w-4" />Long setups</div><div className="mt-2 text-2xl font-semibold mono">{stats.long}</div></div><div className="panel p-4"><div className="flex items-center gap-2 text-sm text-muted-foreground"><TrendingDown className="h-4 w-4" />Short setups</div><div className="mt-2 text-2xl font-semibold mono">{stats.short}</div></div><div className="panel p-4"><div className="flex items-center gap-2 text-sm text-muted-foreground"><Zap className="h-4 w-4" />Watch</div><div className="mt-2 text-2xl font-semibold mono">{stats.watch}</div></div><div className="panel p-4"><div className="flex items-center gap-2 text-sm text-muted-foreground"><Zap className="h-4 w-4" />Confirmed</div><div className="mt-2 text-2xl font-semibold mono">{stats.confirmed}</div></div></div>
 
     {opportunities.length > 0 ? <div className="panel flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between sm:p-4"><div><div className="text-sm font-medium">Manual scanner trades · {settings?.mode === "live" ? "LIVE" : "PAPER"}</div><div className="text-xs text-muted-foreground">{selected.size} selected · uses current position size, leverage, max-position and exposure settings · duplicate coins are skipped</div></div><div className="flex flex-wrap gap-2"><button onClick={selectAll} disabled={submitting} className="rounded-md border border-panel-border px-3 py-2 text-xs font-medium disabled:opacity-50">Select all {opportunities.length}</button><button onClick={selectConfirmed} disabled={submitting} className="rounded-md border border-panel-border px-3 py-2 text-xs font-medium disabled:opacity-50">Select confirmed</button><button onClick={() => setSelected(new Set())} disabled={submitting || !selected.size} className="rounded-md border border-panel-border px-3 py-2 text-xs font-medium disabled:opacity-50">Clear</button><button onClick={submitSelected} disabled={submitting || !selected.size || settings?.kill_switch_engaged} className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">{submitting ? <><Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" />Placing…</> : `Place ${selected.size} selected trade${selected.size === 1 ? "" : "s"}`}</button></div></div> : null}
+
+    {lastTradeResults.length > 0 ? <div className="panel p-4 sm:p-5"><div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between"><div><div className="text-sm font-semibold">Last scanner trade results</div><div className="mt-1 text-xs text-muted-foreground">{tradeResultSummary.opened} opened · {tradeResultSummary.skipped} blocked · {tradeResultSummary.errors} failed</div></div>{tradeResultSummary.skipped > 0 ? <div className="text-xs text-muted-foreground">{tradeResultSummary.maxPositions} max positions · {tradeResultSummary.exposure} exposure cap · {tradeResultSummary.alreadyHeld} already held</div> : null}</div><div className="mt-3 space-y-2">{lastTradeResults.map((r, i) => <div key={`${r.coin}-${r.side}-${i}`} className="flex items-start justify-between gap-3 rounded-md border border-panel-border p-2.5 text-xs"><div className="min-w-0"><span className="mono font-semibold">{r.coin}</span><span className="ml-2 uppercase text-muted-foreground">{r.side}</span><div className="mt-0.5 text-muted-foreground">{r.message}</div></div><span className={`shrink-0 font-semibold uppercase ${r.status === "opened" ? "text-bull" : r.status === "error" ? "text-bear" : "text-warning"}`}>{r.status === "skipped" ? "blocked" : r.status}</span></div>)}</div></div> : null}
 
     {settings?.kill_switch_engaged ? <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">Kill switch is engaged. Scanner trade buttons are disabled.</div> : null}
     {lastScannedAt && !loading ? <div className="text-xs text-muted-foreground">Last scan: {new Date(lastScannedAt).toLocaleTimeString()} · WATCH = setup developing · CONFIRMED = 1H support/resistance break</div> : null}
