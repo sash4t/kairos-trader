@@ -24,7 +24,7 @@ import {
   rsiBreakevenTrigger, rsiProtectedStop, rsiRiskMultiplier, rsiTakeProfitHit, rsiTakeProfitPrice,
 } from "./strategies/rsiExtremes";
 import { clampMaxPositions } from "./scalp";
-import { TREND_PULSE_KEY, TREND_PULSE_DEFAULTS, evaluateTrendPulse, trendPulseRiskSizedQuantity } from "./strategies/trendPulse";
+import { TREND_PULSE_KEY, TREND_PULSE_DEFAULTS, evaluateTrendPulse, trendPulseRiskSizedQuantity, isTrendPulseKey } from "./strategies/trendPulse";
 
 export interface Settings {
   user_id: string;
@@ -132,12 +132,12 @@ export class PaperEngine {
   }
 
   private isLive() { return this.settings.mode === "live"; }
-  private isTb() { return this.settings.strategy_key === TRENDLINE_BREAK_KEY; }
+  private isTb() { return this.settings.strategy_key === TRENDLINE_BREAK_KEY && !isTrendPulseKey(this.settings.strategy_key); }
   private isIntraday() { return this.settings.strategy_key === INTRADAY_PULLBACK_KEY; }
   private isOriginalTpa() { return this.settings.strategy_key === ORIGINAL_TREND_PRICE_ACTION_KEY; }
   private isSqueeze() { return this.settings.strategy_key === VOLATILITY_SQUEEZE_BREAKOUT_KEY; }
   private isRsi() { return this.settings.strategy_key === RSI_EXTREMES_KEY; }
-  private isTrendPulse() { return this.settings.strategy_key === TREND_PULSE_KEY; }
+  private isTrendPulse() { return isTrendPulseKey(this.settings.strategy_key); }
   private isSqueezePosition(p: OpenPosition) { return p.reason?.includes(`[${VOLATILITY_SQUEEZE_BREAKOUT_KEY}]`) === true; }
   private isRsiPosition(p: OpenPosition) { return p.reason?.includes(`[${RSI_EXTREMES_KEY}]`) === true; }
   private hardStopPct() {

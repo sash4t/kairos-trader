@@ -11,6 +11,7 @@ import { LiveTradingPanel } from "@/components/LiveTradingPanel";
 import { resetPaperAccount } from "@/lib/paper.functions";
 import { Loader2, RotateCcw } from "lucide-react";
 import { STRATEGY_OPTIONS, strategySelectionPatch, type StrategyKey } from "@/lib/scalp";
+import { TREND_PULSE_KEY, isTrendPulseKey } from "@/lib/strategies/trendPulse";
 
 export const Route = createFileRoute("/_authenticated/settings")({ component: SettingsPage });
 
@@ -48,7 +49,8 @@ function SettingsPage() {
 
   useEffect(() => {
     const key = botSettings?.strategy_key;
-    if (key && STRATEGY_OPTIONS.some(o => o.key === key)) setStrategyKey(key as StrategyKey);
+    if (isTrendPulseKey(key)) setStrategyKey(TREND_PULSE_KEY);
+    else if (key && STRATEGY_OPTIONS.some(o => o.key === key)) setStrategyKey(key as StrategyKey);
     else if (botSettings) setStrategyKey("trendline_price_action");
   }, [botSettings]);
 

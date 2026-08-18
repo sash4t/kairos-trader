@@ -3,7 +3,7 @@ import { INTRADAY_PULLBACK_KEY } from "./strategies/intradayMomentumPullback";
 import { ORIGINAL_TREND_PRICE_ACTION_KEY } from "./strategies/originalTrendPriceAction";
 import { VOLATILITY_SQUEEZE_BREAKOUT_KEY } from "./strategies/volatilitySqueezeBreakout";
 import { RSI_EXTREMES_KEY } from "./strategies/rsiExtremes";
-import { TREND_PULSE_KEY } from "./strategies/trendPulse";
+import { TREND_PULSE_KEY, TREND_PULSE_STORAGE_KEY } from "./strategies/trendPulse";
 
 export type ScalpSide = "long" | "short";
 export type StrategyKey = typeof TRENDLINE_STRATEGY_KEY | typeof TREND_PULSE_KEY | typeof INTRADAY_PULLBACK_KEY | typeof ORIGINAL_TREND_PRICE_ACTION_KEY | typeof VOLATILITY_SQUEEZE_BREAKOUT_KEY | typeof RSI_EXTREMES_KEY;
@@ -84,6 +84,6 @@ export function strategySelectionPatch(key: StrategyKey): Record<string, unknown
   if (key === ORIGINAL_TREND_PRICE_ACTION_KEY) return { strategy_key: key, min_confidence: 60, trailing_enabled: true };
   if (key === VOLATILITY_SQUEEZE_BREAKOUT_KEY) return { strategy_key: key, min_confidence: 70, trailing_enabled: true, max_positions: 5 };
   if (key === RSI_EXTREMES_KEY) return { strategy_key: key, min_confidence: 70, trailing_enabled: false, max_positions: MAX_OPEN_POSITIONS, daily_loss_pct: 5, rsi_risk_pct: 1, rsi_max_leverage: 5 };
-  if (key === TREND_PULSE_KEY) return { strategy_key: key, min_confidence: 75, trailing_enabled: true, max_positions: 5 };
+  if (key === TREND_PULSE_KEY) return { strategy_key: TREND_PULSE_STORAGE_KEY, min_confidence: 75, trailing_enabled: true, max_positions: 5 };
   return { strategy_key: key };
 }

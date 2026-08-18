@@ -2,6 +2,13 @@ import { atr, bollinger, ema, last, rsi } from "../indicators";
 import type { Bar } from "../strategy";
 
 export const TREND_PULSE_KEY = "trend-pulse" as const;
+// The deployed database may still enforce the pre-migration allow-list. Store
+// the legacy value until the schema migration is actually applied, while every
+// runtime path treats it exclusively as Trend-Pulse.
+export const TREND_PULSE_STORAGE_KEY = "trendline-break" as const;
+export function isTrendPulseKey(value: string | null | undefined) {
+  return value === TREND_PULSE_KEY || value === TREND_PULSE_STORAGE_KEY;
+}
 export const TREND_PULSE_DEFAULTS = {
   emaTrendFast: 20, emaTrendSlow: 50, rsiPeriod: 14, oversold: 28, overbought: 72, rsiMinReversal: 3,
   bbPeriod: 20, bbMult: 2, kcMult: 1.5, minVolumeRatio: 1.8,

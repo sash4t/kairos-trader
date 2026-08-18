@@ -20,7 +20,7 @@ import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes,
   rsiBreakevenTrigger, rsiTakeProfitHit, rsiTakeProfitPrice,
 } from "./strategies/rsiExtremes";
-import { TREND_PULSE_KEY, TREND_PULSE_DEFAULTS, evaluateTrendPulse } from "./strategies/trendPulse";
+import { TREND_PULSE_KEY, TREND_PULSE_DEFAULTS, evaluateTrendPulse, isTrendPulseKey } from "./strategies/trendPulse";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
 const BARS = 230;
@@ -169,11 +169,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const equityNow = isLive && liveAcct ? liveAcct.accountValue : +s.paper_equity;
       const held = new Set(positions.map(p => p.coin));
 
-      const isTb = (s.strategy_key ?? "") === TRENDLINE_BREAK_KEY;
+      const isTb = (s.strategy_key ?? "") === TRENDLINE_BREAK_KEY && !isTrendPulseKey(s.strategy_key);
       const isOriginalTpa = (s.strategy_key ?? "") === ORIGINAL_TREND_PRICE_ACTION_KEY;
       const isSqueeze = (s.strategy_key ?? "") === VOLATILITY_SQUEEZE_BREAKOUT_KEY;
       const isRsi = (s.strategy_key ?? "") === RSI_EXTREMES_KEY;
-      const isTrendPulse = (s.strategy_key ?? "") === TREND_PULSE_KEY;
+      const isTrendPulse = isTrendPulseKey(s.strategy_key);
       const maxPositions = clampMaxPositions(+s.max_positions);
       const squeezeLastScanMs = s.squeeze_last_scan_at ? Date.parse(s.squeeze_last_scan_at) : 0;
       const squeezeScanDue = (isSqueeze || isTrendPulse) && (!Number.isFinite(squeezeLastScanMs) || Date.now() - squeezeLastScanMs >= (isTrendPulse ? TREND_PULSE_DEFAULTS.scanEveryMs : SQUEEZE_DEFAULTS.scanEveryMs));

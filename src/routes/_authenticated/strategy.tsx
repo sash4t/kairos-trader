@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { useBot } from "@/lib/botContext";
 import { MODE_MIN_CONFIDENCE, TRENDLINE_STRATEGY_KEY } from "@/lib/strategy";
-import { TREND_PULSE_KEY } from "@/lib/strategies/trendPulse";
+import { TREND_PULSE_KEY, isTrendPulseKey } from "@/lib/strategies/trendPulse";
 import { INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS } from "@/lib/strategies/intradayMomentumPullback";
 import { ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS } from "@/lib/strategies/originalTrendPriceAction";
 import { VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS } from "@/lib/strategies/volatilitySqueezeBreakout";
@@ -55,7 +55,7 @@ function Strategy() {
   if (!settings) return <div className="p-8 text-sm text-muted-foreground">Loading strategy settings…</div>;
   const s = settings as any;
   const key = s.strategy_key || TRENDLINE_STRATEGY_KEY;
-  const isTrendPulse = key === TREND_PULSE_KEY;
+  const isTrendPulse = isTrendPulseKey(key);
   const isIntraday = key === INTRADAY_PULLBACK_KEY;
   const isOriginal = key === ORIGINAL_TREND_PRICE_ACTION_KEY;
   const isSqueeze = key === VOLATILITY_SQUEEZE_BREAKOUT_KEY;
