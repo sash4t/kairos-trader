@@ -14,6 +14,8 @@ export const SQUEEZE_DEFAULTS = {
   kcMult: 1.8,
   breakoutLookback: 4,
   squeezeLookbackBars: 5,
+  // Backward-compatible display floor; actual entry threshold is adaptive below.
+  minVolumeRatio: 2.0,
   squeezeMinVolumeRatio: 2.0,
   momentumMinVolumeRatio: 3.0,
   riskPct: 1.5,
