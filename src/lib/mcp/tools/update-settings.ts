@@ -20,6 +20,7 @@ export default defineTool({
     trailing_enabled: z.boolean().describe("Enable trailing stops.").optional(),
     max_positions: z.number().int().min(1).max(30).describe("Maximum concurrent open positions (1-30).").optional(),
     position_size_pct: z.number().describe("Percent of equity per position.").optional(),
+    rsi_risk_pct: z.number().min(0.05).max(5).describe("RSI strategy equity risk per trade (0.05-5%).").optional(),
     max_exposure_pct: z.number().describe("Maximum total exposure percent.").optional(),
     max_leverage: z.number().describe("Maximum leverage.").optional(),
     min_confidence: z.number().describe("Minimum signal confidence required to enter.").optional(),

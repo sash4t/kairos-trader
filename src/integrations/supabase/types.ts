@@ -63,6 +63,7 @@ export type Database = {
           paper_equity: number
           position_size_pct: number
           rsi_last_scan_at: string | null
+          rsi_risk_pct: number
           safety_buffer_pct: number
           scalp_enabled: boolean
           scalp_sl_pct: number
@@ -108,6 +109,7 @@ export type Database = {
           paper_equity?: number
           position_size_pct?: number
           rsi_last_scan_at?: string | null
+          rsi_risk_pct?: number
           safety_buffer_pct?: number
           scalp_enabled?: boolean
           scalp_sl_pct?: number
@@ -153,6 +155,7 @@ export type Database = {
           paper_equity?: number
           position_size_pct?: number
           rsi_last_scan_at?: string | null
+          rsi_risk_pct?: number
           safety_buffer_pct?: number
           scalp_enabled?: boolean
           scalp_sl_pct?: number

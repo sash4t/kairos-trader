@@ -56,6 +56,7 @@ export interface Settings {
   btc_shock_pct?: number;
   btc_shock_window_min?: number;
   strategy_key?: string;
+  rsi_risk_pct?: number;
   trendline_risk_pct?: number;
   tb_timeframes?: string;
   tb_pivot_strength?: number;
@@ -454,15 +455,16 @@ export class PaperEngine {
         .contains("indicators", { signalCandleTs }).limit(1);
       if (consumed?.length) continue;
       const equity = this.currentEquity();
+      const riskPct = Math.min(5, Math.max(0.05, Number(this.settings.rsi_risk_pct ?? RSI_EXTREMES_DEFAULTS.riskPct)));
       const leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, this.settings.max_leverage, meta.maxLeverage)));
       if (!(sig.stopLoss && Number.isFinite(sig.stopLoss))) continue;
       const targetQty = (equity * (Math.max(0, this.settings.position_size_pct) / 100) * leverage) / sig.price;
       const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;
-      const riskQty = riskSize(equity, RSI_EXTREMES_DEFAULTS.riskPct, sig.price, sig.stopLoss);
+      const riskQty = riskSize(equity, riskPct, sig.price, sig.stopLoss);
       const size = Math.min(riskQty, targetQty, roomQty);
       if (!(size > 0) || !Number.isFinite(size)) continue;
       const takeProfit = rsiTakeProfitPrice(sig.side, sig.price, this.settings.scalp_tp_pct);
-      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, takeProfit, sig.confidence, sig.reasons, sig.indicators, RSI_EXTREMES_DEFAULTS.riskPct, undefined, undefined, "1h", RSI_EXTREMES_KEY);
+      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, takeProfit, sig.confidence, sig.reasons, sig.indicators, riskPct, undefined, undefined, "1h", RSI_EXTREMES_KEY);
       held.add(meta.name);
     }
   }

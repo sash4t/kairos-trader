@@ -5,8 +5,8 @@ export const RSI_EXTREMES_KEY = "rsi-extremes-1h" as const;
 
 export const RSI_EXTREMES_DEFAULTS = {
   period: 14,
-  oversold: 30,
-  overbought: 70,
+  oversold: 35,
+  overbought: 65,
   minReversalPoints: 2,
   emergencyAtrMult: 2,
   riskPct: 1,

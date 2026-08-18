@@ -139,9 +139,16 @@ function Strategy() {
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Leverage cap</span><div className="mt-1 mono text-base">{RSI_EXTREMES_DEFAULTS.maxLeverage}x</div></div>
             <div className="rounded-md border border-panel-border p-3"><span className="text-muted-foreground">Maximum hold</span><div className="mt-1 mono text-base">{RSI_EXTREMES_DEFAULTS.maxHoldHours} hours</div></div>
           </div>
-          <div className="max-w-sm">
+          <div className="grid max-w-2xl gap-3 sm:grid-cols-2">
             <NumField
-              label="Position size"
+              label="Equity risk per trade"
+              value={Number(s.rsi_risk_pct ?? RSI_EXTREMES_DEFAULTS.riskPct)}
+              onChange={v => set({ rsi_risk_pct: Math.min(5, Math.max(0.05, v)) })}
+              step={0.05}
+              suffix="% equity"
+            />
+            <NumField
+              label="Position size cap"
               value={Number(s.position_size_pct ?? 5)}
               onChange={v => set({ position_size_pct: Math.min(100, Math.max(0.1, v)) })}
               step={0.5}
@@ -149,8 +156,8 @@ function Strategy() {
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            The strategy trails RSI above 70 or below 30 and requires at least a {RSI_EXTREMES_DEFAULTS.minReversalPoints}-point reversal plus a confirming completed 1H price candle. A strong opposing 4H EMA20/50 trend blocks entry.
-            Position risk is capped near {RSI_EXTREMES_DEFAULTS.riskPct}% using a {RSI_EXTREMES_DEFAULTS.emergencyAtrMult}× ATR emergency stop. Halfway to the configured take profit, the stop moves to breakeven; the full position closes at take profit or after {RSI_EXTREMES_DEFAULTS.maxHoldHours} hours. Global exposure, BTC-shock and daily-loss controls still apply.
+            The strategy trails RSI above {RSI_EXTREMES_DEFAULTS.overbought} or below {RSI_EXTREMES_DEFAULTS.oversold} and requires at least a {RSI_EXTREMES_DEFAULTS.minReversalPoints}-point reversal plus a confirming completed 1H price candle. A strong opposing 4H EMA20/50 trend blocks entry.
+            Position risk uses the adjustable equity-risk setting and a {RSI_EXTREMES_DEFAULTS.emergencyAtrMult}× ATR emergency stop, while the position-size field remains a maximum cap. Halfway to the configured take profit, the stop moves to breakeven; the full position closes at take profit or after {RSI_EXTREMES_DEFAULTS.maxHoldHours} hours. Global exposure, BTC-shock and daily-loss controls still apply.
           </p>
         </section>
       )}

@@ -42,6 +42,7 @@ interface Settings {
   trail_activate_pct: number; trail_dist_pct: number; max_positions: number; max_leverage: number;
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
   paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: string; tp_rr?: number; trendline_risk_pct?: number;
+  rsi_risk_pct?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
   tb_timeframes?: string; tb_pivot_strength?: number; tb_risk_pct?: number; tb_position_size_pct?: number; tb_refresh_min?: number;
   last_cycle_at?: string | null; last_cycle_note?: string | null; squeeze_last_scan_at?: string | null; rsi_last_scan_at?: string | null;
@@ -175,6 +176,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const rsiLastScanMs = s.rsi_last_scan_at ? Date.parse(s.rsi_last_scan_at) : 0;
       const rsiScanDue = isRsi && (!Number.isFinite(rsiLastScanMs) || Date.now() - rsiLastScanMs >= RSI_EXTREMES_DEFAULTS.scanEveryMs);
       const originalRiskPct = Math.min(5, Math.max(0.05, +(s.trendline_risk_pct ?? ORIGINAL_TPA_DEFAULTS.riskPct)));
+      const rsiRiskPct = Math.min(5, Math.max(0.05, +(s.rsi_risk_pct ?? RSI_EXTREMES_DEFAULTS.riskPct)));
       const tbCfg = {
         timeframes: parseTimeframes(s.tb_timeframes),
         pivotStrength: Math.round(+(s.tb_pivot_strength ?? 3)),
@@ -598,7 +600,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
             const positionNotionalCap = equity * (Math.max(0, +s.position_size_pct) / 100) * leverage;
             const room = equity * (+s.max_exposure_pct / 100) * leverage - positions.reduce((sum, p) => sum + p.notional, 0);
             if (room <= 0) { notes.push("exposure cap reached"); break; }
-            const riskBasedSize = riskSize(equity, RSI_EXTREMES_DEFAULTS.riskPct, quotePx, rsiStop);
+            const riskBasedSize = riskSize(equity, rsiRiskPct, quotePx, rsiStop);
             size = Math.min(riskBasedSize, positionNotionalCap / quotePx, room / quotePx);
             if (!(size > 0) || !Number.isFinite(size)) continue;
           } else if (isSqueeze) {
@@ -708,7 +710,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const extra = isTb
             ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: sl, risk_pct: tbCfg.riskPct }
             : isRsi
-              ? { timeframe: "1h", initial_stop: sl, risk_pct: RSI_EXTREMES_DEFAULTS.riskPct }
+              ? { timeframe: "1h", initial_stop: sl, risk_pct: rsiRiskPct }
               : isSqueeze
                 ? { timeframe: "15m", initial_stop: sl, risk_pct: SQUEEZE_DEFAULTS.riskPct, partial_taken: false }
                 : isOriginalTpa
@@ -719,7 +721,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (insErr || !inserted) { report.errors.push(`record ${sig.coin}: ${insErr?.message ?? "insert returned no row"}`); continue; }
           positions.push({ id: inserted.id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: (isOriginalTpa ? originalSafety : tbSafety) ?? null, opened_at: inserted.opened_at, reason, partial_taken: false, realized_pnl: 0, indicators: sig.indicators });
           held.add(sig.coin); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isRsi ? null : isSqueeze ? SQUEEZE_DEFAULTS.riskPct : isTb ? tbCfg.riskPct : isOriginalTpa ? originalRiskPct : null, positionSizePct: isRsi ? +s.position_size_pct : isTb ? tbCfg.positionSizePct : null, hardSlPct: isRsi ? null : isSqueeze ? SQUEEZE_DEFAULTS.stopPct : hardSlPct, leverage, nativeStop: isLive && !isRsi ? sl : null });
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isRsi ? rsiRiskPct : isSqueeze ? SQUEEZE_DEFAULTS.riskPct : isTb ? tbCfg.riskPct : isOriginalTpa ? originalRiskPct : null, positionSizePct: isRsi ? +s.position_size_pct : isTb ? tbCfg.positionSizePct : null, hardSlPct: isRsi ? null : isSqueeze ? SQUEEZE_DEFAULTS.stopPct : hardSlPct, leverage, nativeStop: isLive ? sl : null });
         }
       }
       const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · scanner_cursor=${nextCursor}`;

@@ -67,8 +67,8 @@ describe("1H RSI Extremes", () => {
   });
 
   it("uses the intended RSI thresholds and safety defaults", () => {
-    expect(RSI_EXTREMES_DEFAULTS.oversold).toBe(30);
-    expect(RSI_EXTREMES_DEFAULTS.overbought).toBe(70);
+    expect(RSI_EXTREMES_DEFAULTS.oversold).toBe(35);
+    expect(RSI_EXTREMES_DEFAULTS.overbought).toBe(65);
     expect(RSI_EXTREMES_DEFAULTS.emergencyAtrMult).toBe(2);
     expect(RSI_EXTREMES_DEFAULTS.maxHoldHours).toBe(6);
     expect(RSI_EXTREMES_DEFAULTS.maxLeverage).toBe(3);
