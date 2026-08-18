@@ -30,7 +30,13 @@ function hourlyBearishMomentum(): Bar[] {
 function longWithFallingRsi(): Bar[] {
   const bars = hourlyMomentum();
   const prev = bars.at(-2)!.c;
-  bars[bars.length - 1] = { ...bars.at(-1)!, o: prev, h: prev + 0.08, l: prev - 0.08, c: prev - 0.05 };
+  bars[bars.length - 1] = {
+    ...bars.at(-1)!,
+    o: prev,
+    h: prev + 0.08,
+    l: prev - 0.08,
+    c: prev - 0.05,
+  };
   return bars;
 }
 
@@ -52,7 +58,11 @@ function breakout(volume = 310, compressed = true): Bar[] {
   const bars: Bar[] = Array.from({ length: 39 }, (_, i) => {
     const wave = compressed ? (i % 2 === 0 ? 0.02 : -0.02) : Math.sin(i * 0.8) * 0.7;
     const c = 100 + wave;
-    return { t: T0 + i * FIFTEEN, o: 100, h: c + (compressed ? 0.08 : 0.35), l: c - (compressed ? 0.08 : 0.35), c, v: 100 };
+    // Keep the expanded fixture's intrabar range narrow. A wide high/low
+    // range inflates ATR and therefore the Keltner Channel, which can make
+    // these intentionally volatile closes classify as squeezed.
+    const halfRange = compressed ? 0.08 : 0.05;
+    return { t: T0 + i * FIFTEEN, o: 100, h: c + halfRange, l: c - halfRange, c, v: 100 };
   });
   bars.push({ t: T0 + 39 * FIFTEEN, o: 100.1, h: 102.2, l: 100, c: 102, v: volume });
   return bars;
@@ -85,21 +95,36 @@ describe("Volatility Squeeze Breakout momentum mode", () => {
 
   it("requires 3x volume when there is no recent squeeze", () => {
     const weakBars = breakout(210, false);
-    const weak = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), weakBars, signalNow(weakBars));
+    const weak = evaluateVolatilitySqueezeBreakout(
+      "TEST",
+      hourlyMomentum(),
+      weakBars,
+      signalNow(weakBars),
+    );
     expect(weak.side).toBeNull();
     expect(weak.indicators.priorSqueezed).toBe(0);
     expect(weak.indicators.requiredVolumeRatio).toBe(3);
     expect(weak.reasons.join(" ")).toMatch(/3\.0x/i);
 
     const strongBars = breakout(310, false);
-    const strong = evaluateVolatilitySqueezeBreakout("TEST", hourlyMomentum(), strongBars, signalNow(strongBars));
+    const strong = evaluateVolatilitySqueezeBreakout(
+      "TEST",
+      hourlyMomentum(),
+      strongBars,
+      signalNow(strongBars),
+    );
     expect(strong.side).toBe("long");
     expect(strong.indicators.volumeRatio).toBeGreaterThanOrEqual(3);
   });
 
   it("allows a long above the old RSI 70 ceiling when RSI is still rising", () => {
     const bars = breakout(310, false);
-    const sig = evaluateVolatilitySqueezeBreakout("TEST", highRsiStillRising(), bars, signalNow(bars));
+    const sig = evaluateVolatilitySqueezeBreakout(
+      "TEST",
+      highRsiStillRising(),
+      bars,
+      signalNow(bars),
+    );
     expect(sig.indicators.hourlyRsi).toBeGreaterThan(70);
     expect(sig.indicators.rsiSlope).toBeGreaterThan(0);
     expect(sig.indicators.rsiSlopeOk).toBe(1);
@@ -108,7 +133,12 @@ describe("Volatility Squeeze Breakout momentum mode", () => {
 
   it("allows a short below the old RSI 30 floor when RSI is still falling", () => {
     const bars = shortBreakout(310);
-    const sig = evaluateVolatilitySqueezeBreakout("TEST", lowRsiStillFalling(), bars, signalNow(bars));
+    const sig = evaluateVolatilitySqueezeBreakout(
+      "TEST",
+      lowRsiStillFalling(),
+      bars,
+      signalNow(bars),
+    );
     expect(sig.indicators.hourlyRsi).toBeLessThan(30);
     expect(sig.indicators.rsiSlope).toBeLessThan(0);
     expect(sig.indicators.rsiSlopeOk).toBe(1);
@@ -117,7 +147,12 @@ describe("Volatility Squeeze Breakout momentum mode", () => {
 
   it("rejects a long breakout when RSI is falling", () => {
     const bars = breakout(310, false);
-    const sig = evaluateVolatilitySqueezeBreakout("TEST", longWithFallingRsi(), bars, signalNow(bars));
+    const sig = evaluateVolatilitySqueezeBreakout(
+      "TEST",
+      longWithFallingRsi(),
+      bars,
+      signalNow(bars),
+    );
     expect(sig.indicators.rsiSlope).toBeLessThan(0);
     expect(sig.side).toBeNull();
     expect(sig.reasons.join(" ")).toMatch(/RSI slope/i);
