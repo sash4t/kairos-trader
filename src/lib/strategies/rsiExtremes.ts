@@ -8,10 +8,13 @@ export const RSI_EXTREMES_DEFAULTS = {
   oversold: 35,
   overbought: 65,
   minReversalPoints: 2,
+  marginalMinReversalPoints: 3,
   emergencyAtrMult: 2,
   riskPct: 1,
   maxHoldHours: 6,
+  partialFraction: 0.25,
   breakevenFractionOfTarget: 0.5,
+  breakevenBufferPct: 0.15,
   maxLeverage: 5,
   // Scan every eligible RSI market on each due scan.
   scanLimit: 10_000,
@@ -36,6 +39,28 @@ const HOUR_MS = 60 * 60 * 1000;
 /** Keep only candles whose full 1H interval has closed. */
 export function completedHourlyBars(hourly: Bar[], now = Date.now()): Bar[] {
   return hourly.filter((bar) => bar.t + HOUR_MS <= now);
+}
+
+export function rsiConfidenceRiskMultiplier(confidence: number): number {
+  if (confidence >= 78) return 1;
+  if (confidence >= 74) return 0.75;
+  return 0.5;
+}
+
+export function rsiBandRiskMultiplier(extreme: number): number {
+  if (!Number.isFinite(extreme)) return 0;
+  return extreme <= 30 || extreme >= 70 ? 1 : 0.5;
+}
+
+export function rsiRiskMultiplier(confidence: number, extreme: number): number {
+  return rsiConfidenceRiskMultiplier(confidence) * rsiBandRiskMultiplier(extreme);
+}
+
+function marginalReversalPoints(side: RsiExtremeSide, extreme: number): number {
+  const marginal = side === "long"
+    ? extreme > 30 && extreme <= RSI_EXTREMES_DEFAULTS.oversold
+    : extreme < 70 && extreme >= RSI_EXTREMES_DEFAULTS.overbought;
+  return marginal ? RSI_EXTREMES_DEFAULTS.marginalMinReversalPoints : RSI_EXTREMES_DEFAULTS.minReversalPoints;
 }
 
 function confidenceFor(side: RsiExtremeSide, extreme: number, previous: number, current: number): number {
@@ -73,10 +98,10 @@ export function evaluateRsiValues(values: number[]): { side: RsiExtremeSide | nu
 
   const recoveringLong = previous <= RSI_EXTREMES_DEFAULTS.oversold
     && previous === minRsi
-    && current - previous >= RSI_EXTREMES_DEFAULTS.minReversalPoints;
+    && current - previous >= marginalReversalPoints("long", minRsi);
   const recoveringShort = previous >= RSI_EXTREMES_DEFAULTS.overbought
     && previous === maxRsi
-    && previous - current >= RSI_EXTREMES_DEFAULTS.minReversalPoints;
+    && previous - current >= marginalReversalPoints("short", maxRsi);
 
   if (recoveringLong) {
     return { side: "long", confidence: confidenceFor("long", minRsi, previous, current), extreme: minRsi, current, previous };
@@ -118,6 +143,7 @@ export function evaluateRsiExtremes(coin: string, hourly: Bar[], fourHour: Bar[]
     fourHourEma50: ema50,
     regimeBlocked: regimeBlocked ? 1 : 0,
     signalCandleTs,
+    riskMultiplier: result.side ? rsiRiskMultiplier(result.confidence, result.extreme) : 0,
   };
 
   if (!result.side) {
@@ -137,7 +163,10 @@ export function evaluateRsiExtremes(coin: string, hourly: Bar[], fourHour: Bar[]
     `RSI ${result.previous.toFixed(1)} → ${result.current.toFixed(1)}`,
     "Completed 1H price candle confirmed the reversal",
     fourHour.length >= 50 ? "4H EMA20/50 regime permits the trade" : "4H regime history unavailable; no veto applied",
-    "Exit at the configured percentage take profit",
+    result.extreme > 30 && result.extreme < 70
+      ? "Marginal RSI band: 3-point reversal confirmed at half band risk"
+      : "Primary RSI extreme: normal band risk",
+    "Take 25% profit halfway to the configured target, then protect the runner beyond entry",
   ];
 
   return { coin, side: result.side, confidence: result.confidence, reasons, price, stopLoss, indicators };
@@ -157,4 +186,9 @@ export function rsiTakeProfitHit(side: RsiExtremeSide, mark: number, takeProfit:
 
 export function rsiBreakevenTrigger(side: RsiExtremeSide, entry: number, takeProfit: number): number {
   return entry + (takeProfit - entry) * RSI_EXTREMES_DEFAULTS.breakevenFractionOfTarget;
+}
+
+export function rsiProtectedStop(side: RsiExtremeSide, entry: number): number {
+  const buffer = RSI_EXTREMES_DEFAULTS.breakevenBufferPct / 100;
+  return side === "long" ? entry * (1 + buffer) : entry * (1 - buffer);
 }
