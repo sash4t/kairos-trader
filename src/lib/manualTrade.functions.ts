@@ -102,12 +102,16 @@ export const placeScannerTrades = createServerFn({ method: "POST" })
       }
 
       const leverage = Math.max(1, Math.floor(Math.min(maxLeverage, asset.maxLeverage)));
-      const maxPortfolioNotional = equity * (maxExposurePct / 100) * leverage;
+      // Exposure is an equity-allocation limit, independent of leverage.
+      // 100% exposure means aggregate open notional may use up to 100% of account equity.
+      const maxPortfolioNotional = equity * (maxExposurePct / 100);
       const remainingNotional = Math.max(0, maxPortfolioNotional - totalNotional);
-      const targetNotional = equity * (positionSizePct / 100) * leverage;
+      // Position size is also an equity-allocation percentage. Leverage affects margin required
+      // by the exchange, but does not multiply the configured portfolio exposure budget.
+      const targetNotional = equity * (positionSizePct / 100);
       const orderNotional = Math.min(targetNotional, remainingNotional);
       if (!(orderNotional > 0)) {
-        results.push({ coin, side, status: "skipped", message: "Exposure limit reached." });
+        results.push({ coin, side, status: "skipped", message: `Exposure limit reached (${maxExposurePct}% of equity).` });
         continue;
       }
 
