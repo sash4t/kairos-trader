@@ -11,6 +11,6 @@ describe("maximum open positions", () => {
   });
 
   it("sets the RSI strategy default to 30 positions", () => {
-    expect(strategySelectionPatch(RSI_EXTREMES_KEY)).toMatchObject({ max_positions: 30, rsi_risk_pct: 1 });
+    expect(strategySelectionPatch(RSI_EXTREMES_KEY)).toMatchObject({ max_positions: 30, rsi_risk_pct: 1, rsi_max_leverage: 5 });
   });
 });

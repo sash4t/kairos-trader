@@ -12,7 +12,7 @@ export const RSI_EXTREMES_DEFAULTS = {
   riskPct: 1,
   maxHoldHours: 6,
   breakevenFractionOfTarget: 0.5,
-  maxLeverage: 3,
+  maxLeverage: 5,
   // Scan every eligible RSI market on each due scan.
   scanLimit: 10_000,
   scanEveryMs: 60 * 1000,

@@ -71,7 +71,7 @@ describe("1H RSI Extremes", () => {
     expect(RSI_EXTREMES_DEFAULTS.overbought).toBe(65);
     expect(RSI_EXTREMES_DEFAULTS.emergencyAtrMult).toBe(2);
     expect(RSI_EXTREMES_DEFAULTS.maxHoldHours).toBe(6);
-    expect(RSI_EXTREMES_DEFAULTS.maxLeverage).toBe(3);
+    expect(RSI_EXTREMES_DEFAULTS.maxLeverage).toBe(5);
   });
 
   it("excludes an in-progress 1H candle", () => {

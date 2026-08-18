@@ -57,6 +57,7 @@ export interface Settings {
   btc_shock_window_min?: number;
   strategy_key?: string;
   rsi_risk_pct?: number;
+  rsi_max_leverage?: number;
   trendline_risk_pct?: number;
   tb_timeframes?: string;
   tb_pivot_strength?: number;
@@ -456,7 +457,8 @@ export class PaperEngine {
       if (consumed?.length) continue;
       const equity = this.currentEquity();
       const riskPct = Math.min(5, Math.max(0.05, Number(this.settings.rsi_risk_pct ?? RSI_EXTREMES_DEFAULTS.riskPct)));
-      const leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, this.settings.max_leverage, meta.maxLeverage)));
+      const rsiMaxLeverage = Math.min(10, Math.max(1, Math.floor(Number(this.settings.rsi_max_leverage ?? RSI_EXTREMES_DEFAULTS.maxLeverage))));
+      const leverage = Math.max(1, Math.floor(Math.min(rsiMaxLeverage, this.settings.max_leverage, meta.maxLeverage)));
       if (!(sig.stopLoss && Number.isFinite(sig.stopLoss))) continue;
       const targetQty = (equity * (Math.max(0, this.settings.position_size_pct) / 100) * leverage) / sig.price;
       const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;

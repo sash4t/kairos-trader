@@ -43,6 +43,7 @@ interface Settings {
   position_size_pct: number; max_exposure_pct: number; daily_loss_pct: number; min_confidence: number;
   paper_equity: number; mode: string; live_max_alloc_usd: number; strategy_key?: string; tp_rr?: number; trendline_risk_pct?: number;
   rsi_risk_pct?: number;
+  rsi_max_leverage?: number;
   btc_shock_enabled?: boolean; btc_shock_pct?: number; btc_shock_window_min?: number;
   tb_timeframes?: string; tb_pivot_strength?: number; tb_risk_pct?: number; tb_position_size_pct?: number; tb_refresh_min?: number;
   last_cycle_at?: string | null; last_cycle_note?: string | null; squeeze_last_scan_at?: string | null; rsi_last_scan_at?: string | null;
@@ -177,6 +178,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       const rsiScanDue = isRsi && (!Number.isFinite(rsiLastScanMs) || Date.now() - rsiLastScanMs >= RSI_EXTREMES_DEFAULTS.scanEveryMs);
       const originalRiskPct = Math.min(5, Math.max(0.05, +(s.trendline_risk_pct ?? ORIGINAL_TPA_DEFAULTS.riskPct)));
       const rsiRiskPct = Math.min(5, Math.max(0.05, +(s.rsi_risk_pct ?? RSI_EXTREMES_DEFAULTS.riskPct)));
+      const rsiMaxLeverage = Math.min(10, Math.max(1, Math.floor(+(s.rsi_max_leverage ?? RSI_EXTREMES_DEFAULTS.maxLeverage))));
       const tbCfg = {
         timeframes: parseTimeframes(s.tb_timeframes),
         pivotStrength: Math.round(+(s.tb_pivot_strength ?? 3)),
@@ -591,7 +593,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const quotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
           let leverage: number; let size: number; let tbStop = 0; let originalStop = 0; let rsiStop = 0;
           if (isRsi) {
-            leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, +s.max_leverage, target.meta.maxLeverage)));
+            leverage = Math.max(1, Math.floor(Math.min(rsiMaxLeverage, +s.max_leverage, target.meta.maxLeverage)));
             const hourlyAtr = Number(sig.indicators.hourlyAtr);
             if (!(hourlyAtr > 0)) continue;
             rsiStop = sig.side === "long"
