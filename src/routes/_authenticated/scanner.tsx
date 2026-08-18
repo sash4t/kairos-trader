@@ -137,12 +137,23 @@ function Scanner() {
         rsi: o.rsi,
         atrPct: o.atrPct,
       })) } });
+      setLastResult({ at: Date.now(), results: result.results });
       if (result.opened) toast.success(`Opened ${result.opened} scanner position${result.opened === 1 ? "" : "s"}.`);
-      if (result.skipped) toast.warning(`${result.skipped} selected trade${result.skipped === 1 ? " was" : "s were"} skipped by position/exposure/duplicate limits.`);
+      if (result.skipped) {
+        const b = blockedBreakdown(result.results);
+        const parts = [
+          b.maxPositions ? `${b.maxPositions} max positions` : null,
+          b.exposure ? `${b.exposure} exposure cap` : null,
+          b.duplicate ? `${b.duplicate} already held` : null,
+          b.other ? `${b.other} other` : null,
+        ].filter(Boolean);
+        toast.warning(`${result.skipped} candidate${result.skipped === 1 ? "" : "s"} blocked${parts.length ? ` · ${parts.join(" · ")}` : ""}`);
+      }
       if (result.errors) toast.error(`${result.errors} scanner trade${result.errors === 1 ? "" : "s"} failed.`);
       const openedCoins = new Set(result.results.filter((r) => r.status === "opened").map((r) => r.coin));
       setSelected((prev) => new Set([...prev].filter((coin) => !openedCoins.has(coin))));
       await syncPositions();
+
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally { setSubmitting(false); }
