@@ -26,6 +26,29 @@ const VOLUME_SURGE_X = 1.5;
 const WATCH_DISTANCE_ATR = 0.6;
 const MAX_RESULTS = 30;
 
+type TradeResult = { coin: string; side: "long" | "short"; status: "opened" | "skipped" | "error"; message: string; size?: number; entryPrice?: number; leverage?: number };
+
+function blockReason(message: string): "maxPositions" | "exposure" | "duplicate" | "other" {
+  const m = message.toLowerCase();
+  if (m.includes("max positions")) return "maxPositions";
+  if (m.includes("exposure")) return "exposure";
+  if (m.includes("already exists")) return "duplicate";
+  return "other";
+}
+
+function blockedBreakdown(results: TradeResult[]) {
+  const counts = { maxPositions: 0, exposure: 0, duplicate: 0, other: 0 };
+  for (const r of results) if (r.status === "skipped") counts[blockReason(r.message)] += 1;
+  return counts;
+}
+
+const BLOCK_LABEL: Record<ReturnType<typeof blockReason>, string> = {
+  maxPositions: "Max positions",
+  exposure: "Exposure cap",
+  duplicate: "Already held",
+  other: "Other",
+};
+
 function Scanner() {
   const { mids, settings, syncPositions } = useBot();
   const placeTrades = useServerFn(placeScannerTrades);
