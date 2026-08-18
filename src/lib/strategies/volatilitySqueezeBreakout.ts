@@ -14,7 +14,8 @@ export const SQUEEZE_DEFAULTS = {
   kcMult: 1.8,
   breakoutLookback: 4,
   squeezeLookbackBars: 5,
-  minVolumeRatio: 1.5,
+  squeezeMinVolumeRatio: 2.0,
+  momentumMinVolumeRatio: 3.0,
   riskPct: 1.5,
   stopPct: 0.45,
   targetPct: 1.0,
@@ -29,9 +30,7 @@ export const SQUEEZE_DEFAULTS = {
   staleMinutes: 20,
   maxMinutes: 120,
   minConfidence: 82,
-  // A completed 15m breakout can only be acted on during the first scanner window after close.
   signalFreshMs: 5 * 60 * 1000,
-  // Do not fire the same direction again for the next two completed 15m bars after a breakout.
   sameDirectionBlockBars: 2,
 } as const;
 
@@ -91,6 +90,9 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     if (isSqueezedAt(i - age)) { squeezeAge = age; break; }
   }
   const recentSqueeze = squeezeAge > 0;
+  const requiredVolumeRatio = recentSqueeze
+    ? SQUEEZE_DEFAULTS.squeezeMinVolumeRatio
+    : SQUEEZE_DEFAULTS.momentumMinVolumeRatio;
   const released = Number.isFinite(bb.upper[i]) && Number.isFinite(kc.upper[i])
     && (bb.upper[i] > kc.upper[i] || bb.lower[i] < kc.lower[i]);
   const bbExpanding = Number.isFinite(bb.width[i]) && Number.isFinite(bb.width[i - 1]) && bb.width[i] > bb.width[i - 1];
@@ -116,10 +118,14 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const closes1h = hourly.map((b) => b.c);
   const hourPrice = hourly.at(-1)!.c;
   const hourEma20 = last(ema(closes1h, 20)) ?? hourPrice;
-  const hourRsi = last(rsi(closes1h, 14)) ?? 50;
+  const rsiSeries = rsi(closes1h, 14);
+  const hourRsi = last(rsiSeries) ?? 50;
+  const hourRsiPrev = rsiSeries.at(-2) ?? hourRsi;
+  const rsiSlope = hourRsi - hourRsiPrev;
   const rsiMin = side === "short" ? 30 : 50;
   const rsiMax = side === "short" ? 50 : 70;
   const rsiOk = side != null && hourRsi >= rsiMin && hourRsi <= rsiMax;
+  const rsiSlopeOk = side === "long" ? rsiSlope > 0 : side === "short" ? rsiSlope < 0 : false;
 
   const indicators = {
     priorSqueezed: recentSqueeze ? 1 : 0,
@@ -131,10 +137,14 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     kcUpper: kc.upper[i],
     kcLower: kc.lower[i],
     volumeRatio,
+    requiredVolumeRatio,
     recentHigh,
     recentLow,
     hourlyEma20: hourEma20,
     hourlyRsi: hourRsi,
+    hourlyRsiPrev: hourRsiPrev,
+    rsiSlope,
+    rsiSlopeOk: rsiSlopeOk ? 1 : 0,
     signalCandleTs,
     signalCloseTs,
     signalAgeMs,
@@ -143,12 +153,16 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     oppositeDirectionRecently: oppositeDirectionRecently ? 1 : 0,
   };
 
-  if (volumeRatio < SQUEEZE_DEFAULTS.minVolumeRatio) {
-    return { ...empty, indicators, reasons: [`Breakout volume ${volumeRatio.toFixed(2)}x < ${SQUEEZE_DEFAULTS.minVolumeRatio.toFixed(1)}x minimum`] };
+  if (volumeRatio < requiredVolumeRatio) {
+    const mode = recentSqueeze ? "recent-squeeze" : "non-squeeze momentum";
+    return { ...empty, indicators, reasons: [`Breakout volume ${volumeRatio.toFixed(2)}x < ${requiredVolumeRatio.toFixed(1)}x ${mode} minimum`] };
   }
   if (!side) return { ...empty, indicators, reasons: [`No close beyond prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle extreme`] };
   if (!rsiOk) {
     return { ...empty, indicators, reasons: [`1H RSI ${hourRsi.toFixed(1)} outside ${rsiMin}-${rsiMax} ${side} momentum band`] };
+  }
+  if (!rsiSlopeOk) {
+    return { ...empty, indicators, reasons: [`1H RSI slope ${rsiSlope.toFixed(2)} is not ${side === "long" ? "rising" : "falling"} with the breakout`] };
   }
   if (!bbExpanding) {
     return { ...empty, indicators, reasons: ["Bollinger width is not expanding"] };
@@ -166,16 +180,18 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   let confidence = 60;
   const reasons = [
     `Fresh 15m close broke prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle ${side === "long" ? "high" : "low"}`,
-    `Volume ${volumeRatio.toFixed(2)}x 20-candle average`,
+    `Volume ${volumeRatio.toFixed(2)}x >= ${requiredVolumeRatio.toFixed(1)}x ${recentSqueeze ? "recent-squeeze" : "momentum"} minimum`,
     `1H RSI ${hourRsi.toFixed(1)} inside ${rsiMin}-${rsiMax} ${side} momentum band`,
+    `1H RSI ${hourRsiPrev.toFixed(1)} -> ${hourRsi.toFixed(1)} confirms ${side} direction`,
     "Bollinger width is expanding",
   ];
 
-  confidence += 8; // Mandatory >=1.5x volume confirmation.
-  if (volumeRatio >= 2) confidence += 4;
-  if (volumeRatio >= 3) confidence += 4;
-  confidence += 10; // Mandatory directional RSI momentum regime.
-  confidence += 10; // Mandatory volatility expansion.
+  confidence += 8;
+  if (volumeRatio >= requiredVolumeRatio + 0.5) confidence += 4;
+  if (volumeRatio >= requiredVolumeRatio + 1.0) confidence += 4;
+  confidence += 10;
+  confidence += 4;
+  confidence += 10;
 
   if (oppositeDirectionRecently) {
     confidence += 4;
