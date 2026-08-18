@@ -5,6 +5,7 @@ import {
   completedHourlyBars,
   evaluateRsiExtremes,
   evaluateRsiValues,
+  rsiBreakevenTrigger,
   rsiTakeProfitHit,
   rsiTakeProfitPrice,
 } from "../strategies/rsiExtremes";
@@ -48,6 +49,13 @@ describe("1H RSI Extremes", () => {
     expect(evaluateRsiExtremes("TEST", barsFromCloses(closes)).side).toBeNull();
   });
 
+  it("requires at least a two-point completed-candle RSI reversal", () => {
+    expect(evaluateRsiValues([45, 27, 24, 25]).side).toBeNull();
+    expect(evaluateRsiValues([45, 27, 24, 26]).side).toBe("long");
+    expect(evaluateRsiValues([58, 72, 81, 80]).side).toBeNull();
+    expect(evaluateRsiValues([58, 72, 81, 79]).side).toBe("short");
+  });
+
   it("does not reuse an old extreme after the first reversal", () => {
     expect(evaluateRsiValues([24, 31, 33, 35, 37]).side).toBeNull();
   });
@@ -61,6 +69,8 @@ describe("1H RSI Extremes", () => {
   it("uses the intended RSI thresholds and safety defaults", () => {
     expect(RSI_EXTREMES_DEFAULTS.oversold).toBe(30);
     expect(RSI_EXTREMES_DEFAULTS.overbought).toBe(70);
+    expect(RSI_EXTREMES_DEFAULTS.emergencyAtrMult).toBe(2);
+    expect(RSI_EXTREMES_DEFAULTS.maxHoldHours).toBe(6);
     expect(RSI_EXTREMES_DEFAULTS.maxLeverage).toBe(3);
   });
 
@@ -76,5 +86,7 @@ describe("1H RSI Extremes", () => {
     expect(rsiTakeProfitHit("long", 103, 103)).toBe(true);
     expect(rsiTakeProfitHit("short", 97, 97)).toBe(true);
     expect(rsiTakeProfitHit("long", 102.99, 103)).toBe(false);
+    expect(rsiBreakevenTrigger("long", 100, 104)).toBe(102);
+    expect(rsiBreakevenTrigger("short", 100, 96)).toBe(98);
   });
 });

@@ -17,7 +17,7 @@ import {
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes,
-  rsiTakeProfitHit, rsiTakeProfitPrice,
+  rsiBreakevenTrigger, rsiTakeProfitHit, rsiTakeProfitPrice,
 } from "./strategies/rsiExtremes";
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
@@ -327,6 +327,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
         for (const p of [...positions]) {
           const squeezePosition = isSqueezePosition(p);
           const rsiPosition = isRsiPosition(p);
+          // RSI positions have their own ATR emergency/breakeven/TP management below.
           if (rsiPosition) continue;
           const protectiveStop = isTrendlinePriceActionPosition(p)
             ? (p.side === "long" ? p.entry_price * (1 - hardSlPct / 100) : p.entry_price * (1 + hardSlPct / 100))
@@ -371,15 +372,36 @@ export async function runTradingCycle(): Promise<CycleReport> {
         for (const p of [...positions]) {
           if (!isRsiPosition(p)) continue;
           const mark = mids[p.coin] ? +mids[p.coin] : p.entry_price;
+          const stopHit = p.stop_loss > 0 && (p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss);
+          if (stopHit) {
+            const protectedProfit = p.side === "long" ? p.stop_loss >= p.entry_price : p.stop_loss <= p.entry_price;
+            await closeTbPosition(p, mark, protectedProfit ? "rsi_breakeven_stop" : "rsi_emergency_stop");
+            continue;
+          }
           if (rsiTakeProfitHit(p.side, mark, p.take_profit)) {
             await closeTbPosition(p, mark, "rsi_take_profit");
             continue;
+          }
+          const opened = Date.parse(p.opened_at ?? "");
+          if (Number.isFinite(opened) && Date.now() - opened >= RSI_EXTREMES_DEFAULTS.maxHoldHours * 60 * 60 * 1000) {
+            await closeTbPosition(p, mark, "rsi_max_hold_exit");
+            continue;
+          }
+          const breakevenAt = rsiBreakevenTrigger(p.side, p.entry_price, p.take_profit);
+          const breakevenReached = p.side === "long" ? mark >= breakevenAt : mark <= breakevenAt;
+          if (breakevenReached) {
+            const next = p.side === "long" ? Math.max(p.stop_loss, p.entry_price) : Math.min(p.stop_loss, p.entry_price);
+            if (next !== p.stop_loss) {
+              p.stop_loss = next;
+              await supabaseAdmin.from("paper_positions").update({ stop_loss: next }).eq("id", p.id).eq("status", "open");
+            }
           }
           if (isLive && creds && Number.isFinite(p.take_profit)) {
             const asset = (await assets()).get(p.coin);
             if (asset) {
               try {
                 await ensureNativeTakeProfit(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.take_profit });
+                if (p.stop_loss > 0) await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
               } catch (err) {
                 await log(s.user_id, "error", `Could not install native RSI take profit for ${p.coin}: ${err instanceof Error ? err.message : String(err)}`);
               }
@@ -518,9 +540,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
           let squeezeStop = 0;
           let squeezeTp = 0;
           if (isRsi) {
-            const hourly = await loadBars(target.meta.name, "1h", 100); report.scanned++;
+            const [hourly, fourHour] = await Promise.all([loadBars(target.meta.name, "1h", 100), loadBars(target.meta.name, "4h", 100)]); report.scanned++;
             if (!hourly || hourly.length < 40) continue;
-            const q = evaluateRsiExtremes(target.meta.name, hourly);
+            const q = evaluateRsiExtremes(target.meta.name, hourly, fourHour ?? []);
             sig = { coin: q.coin, side: q.side, family: RSI_EXTREMES_KEY, confidence: q.confidence, reasons: q.reasons, price: q.price, atrPct: 0, indicators: q.indicators };
           } else if (isSqueeze) {
             const [hourly, fifteen] = await Promise.all([loadBars(target.meta.name, "1h", 100), loadBars(target.meta.name, "15m", 120)]);
@@ -565,13 +587,19 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
           const quotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
-          let leverage: number; let size: number; let tbStop = 0; let originalStop = 0;
+          let leverage: number; let size: number; let tbStop = 0; let originalStop = 0; let rsiStop = 0;
           if (isRsi) {
             leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, +s.max_leverage, target.meta.maxLeverage)));
+            const hourlyAtr = Number(sig.indicators.hourlyAtr);
+            if (!(hourlyAtr > 0)) continue;
+            rsiStop = sig.side === "long"
+              ? quotePx - hourlyAtr * RSI_EXTREMES_DEFAULTS.emergencyAtrMult
+              : quotePx + hourlyAtr * RSI_EXTREMES_DEFAULTS.emergencyAtrMult;
             const positionNotionalCap = equity * (Math.max(0, +s.position_size_pct) / 100) * leverage;
             const room = equity * (+s.max_exposure_pct / 100) * leverage - positions.reduce((sum, p) => sum + p.notional, 0);
             if (room <= 0) { notes.push("exposure cap reached"); break; }
-            size = Math.min(positionNotionalCap, room) / quotePx;
+            const riskBasedSize = riskSize(equity, RSI_EXTREMES_DEFAULTS.riskPct, quotePx, rsiStop);
+            size = Math.min(riskBasedSize, positionNotionalCap / quotePx, room / quotePx);
             if (!(size > 0) || !Number.isFinite(size)) continue;
           } else if (isSqueeze) {
             leverage = Math.max(1, Math.floor(Math.min(3, +s.max_leverage, target.meta.maxLeverage)));
@@ -639,7 +667,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const sl = isTb && tbStop > 0
             ? tbStop
             : isRsi
-              ? 0
+              ? (sig.side === "long"
+                ? entry - Number(sig.indicators.hourlyAtr) * RSI_EXTREMES_DEFAULTS.emergencyAtrMult
+                : entry + Number(sig.indicators.hourlyAtr) * RSI_EXTREMES_DEFAULTS.emergencyAtrMult)
               : isSqueeze
                 ? (sig.side === "long" ? entry * (1 - SQUEEZE_DEFAULTS.stopPct / 100) : entry * (1 + SQUEEZE_DEFAULTS.stopPct / 100))
                 : isOriginalTpa && originalStop > 0
@@ -655,7 +685,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
                 ? targetFromR(sig.side, entry, sl, ORIGINAL_TPA_DEFAULTS.takeProfitR)
                 : sig.side === "long" ? entry * (1 + exits.tpPct / 100) : entry * (1 - exits.tpPct / 100);
 
-          if (isLive && creds && liveAsset && !isRsi) {
+          if (isLive && creds && liveAsset && sl > 0) {
             try {
               await ensureNativeStopLoss(creds, liveAsset, { positionSide: sig.side, size, triggerPrice: sl });
             } catch (err) {
@@ -678,7 +708,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const extra = isTb
             ? { safety_line: tbSafety ?? null, action_line: sig.actionLine ?? null, timeframe: tbTimeframe ?? null, initial_stop: sl, risk_pct: tbCfg.riskPct }
             : isRsi
-              ? { timeframe: "1h", initial_stop: null }
+              ? { timeframe: "1h", initial_stop: sl, risk_pct: RSI_EXTREMES_DEFAULTS.riskPct }
               : isSqueeze
                 ? { timeframe: "15m", initial_stop: sl, risk_pct: SQUEEZE_DEFAULTS.riskPct, partial_taken: false }
                 : isOriginalTpa

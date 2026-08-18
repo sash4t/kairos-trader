@@ -20,7 +20,7 @@ import {
 } from "./strategies/volatilitySqueezeBreakout";
 import {
   RSI_EXTREMES_KEY, RSI_EXTREMES_DEFAULTS, evaluateRsiExtremes,
-  rsiTakeProfitHit, rsiTakeProfitPrice,
+  rsiBreakevenTrigger, rsiTakeProfitHit, rsiTakeProfitPrice,
 } from "./strategies/rsiExtremes";
 import { clampMaxPositions } from "./scalp";
 
@@ -354,9 +354,25 @@ export class PaperEngine {
       if (shockHitsSide(this.shockExitDir, p.side)) { this.closePosition(p, mark, "btc_shock").catch(() => {}); continue; }
       if (this.isSqueezePosition(p)) { this.manageSqueezePosition(p, mark).catch((e) => this.log("error", `Squeeze exit ${p.coin}: ${e.message}`)); continue; }
       if (this.isRsiPosition(p)) {
+        const stopHit = p.stop_loss > 0 && (p.side === "long" ? mark <= p.stop_loss : mark >= p.stop_loss);
+        if (stopHit) {
+          const protectedProfit = p.side === "long" ? p.stop_loss >= p.entry_price : p.stop_loss <= p.entry_price;
+          this.closePosition(p, mark, protectedProfit ? "rsi_breakeven_stop" : "rsi_emergency_stop").catch(() => {});
+          continue;
+        }
         if (rsiTakeProfitHit(p.side, mark, p.take_profit)) {
           this.closePosition(p, mark, "rsi_take_profit").catch(() => {});
           continue;
+        }
+        const opened = Date.parse(p.opened_at ?? "");
+        if (Number.isFinite(opened) && Date.now() - opened >= RSI_EXTREMES_DEFAULTS.maxHoldHours * 60 * 60 * 1000) {
+          this.closePosition(p, mark, "rsi_max_hold_exit").catch(() => {});
+          continue;
+        }
+        const breakevenAt = rsiBreakevenTrigger(p.side, p.entry_price, p.take_profit);
+        if (p.side === "long" ? mark >= breakevenAt : mark <= breakevenAt) {
+          const next = p.side === "long" ? Math.max(p.stop_loss, p.entry_price) : Math.min(p.stop_loss, p.entry_price);
+          if (next !== p.stop_loss) { p.stop_loss = next; this.persistPositionUpdate(p); }
         }
         continue;
       }
@@ -423,9 +439,12 @@ export class PaperEngine {
     for (const { meta } of this.candidates(RSI_EXTREMES_DEFAULTS.scanLimit, { minVolume: LIQUIDITY_FLOOR, includeMajors: true })) {
       if (this.positions.length >= clampMaxPositions(this.settings.max_positions)) break;
       if (held.has(meta.name)) continue;
-      const hourly = await this.bars(meta.name, "1h", 100, HOUR);
+      const [hourly, fourHour] = await Promise.all([
+        this.bars(meta.name, "1h", 100, HOUR),
+        this.bars(meta.name, "4h", 100, 4 * HOUR),
+      ]);
       if (!hourly || hourly.length < 40) continue;
-      const sig = evaluateRsiExtremes(meta.name, hourly);
+      const sig = evaluateRsiExtremes(meta.name, hourly, fourHour ?? []);
       if (!sig.side) continue;
       if (sig.confidence < Math.max(RSI_EXTREMES_DEFAULTS.minConfidence, this.settings.min_confidence)) continue;
       if (shockHitsSide(this.shockEntryDir, sig.side)) continue;
@@ -436,12 +455,14 @@ export class PaperEngine {
       if (consumed?.length) continue;
       const equity = this.currentEquity();
       const leverage = Math.max(1, Math.floor(Math.min(RSI_EXTREMES_DEFAULTS.maxLeverage, this.settings.max_leverage, meta.maxLeverage)));
+      if (!(sig.stopLoss && Number.isFinite(sig.stopLoss))) continue;
       const targetQty = (equity * (Math.max(0, this.settings.position_size_pct) / 100) * leverage) / sig.price;
       const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;
-      const size = Math.min(targetQty, roomQty);
+      const riskQty = riskSize(equity, RSI_EXTREMES_DEFAULTS.riskPct, sig.price, sig.stopLoss);
+      const size = Math.min(riskQty, targetQty, roomQty);
       if (!(size > 0) || !Number.isFinite(size)) continue;
       const takeProfit = rsiTakeProfitPrice(sig.side, sig.price, this.settings.scalp_tp_pct);
-      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, 0, takeProfit, sig.confidence, sig.reasons, sig.indicators, undefined, undefined, undefined, "1h", RSI_EXTREMES_KEY);
+      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, takeProfit, sig.confidence, sig.reasons, sig.indicators, RSI_EXTREMES_DEFAULTS.riskPct, undefined, undefined, "1h", RSI_EXTREMES_KEY);
       held.add(meta.name);
     }
   }

@@ -1,4 +1,4 @@
-import { rsi } from "../indicators";
+import { atr, ema, rsi } from "../indicators";
 import type { Bar } from "../strategy";
 
 export const RSI_EXTREMES_KEY = "rsi-extremes-1h" as const;
@@ -7,6 +7,11 @@ export const RSI_EXTREMES_DEFAULTS = {
   period: 14,
   oversold: 30,
   overbought: 70,
+  minReversalPoints: 2,
+  emergencyAtrMult: 2,
+  riskPct: 1,
+  maxHoldHours: 6,
+  breakevenFractionOfTarget: 0.5,
   maxLeverage: 3,
   // Scan every eligible RSI market on each due scan.
   scanLimit: 10_000,
@@ -22,6 +27,7 @@ export interface RsiExtremeSignal {
   confidence: number;
   reasons: string[];
   price: number;
+  stopLoss?: number;
   indicators: Record<string, number>;
 }
 
@@ -67,10 +73,10 @@ export function evaluateRsiValues(values: number[]): { side: RsiExtremeSide | nu
 
   const recoveringLong = previous <= RSI_EXTREMES_DEFAULTS.oversold
     && previous === minRsi
-    && current > previous;
+    && current - previous >= RSI_EXTREMES_DEFAULTS.minReversalPoints;
   const recoveringShort = previous >= RSI_EXTREMES_DEFAULTS.overbought
     && previous === maxRsi
-    && current < previous;
+    && previous - current >= RSI_EXTREMES_DEFAULTS.minReversalPoints;
 
   if (recoveringLong) {
     return { side: "long", confidence: confidenceFor("long", minRsi, previous, current), extreme: minRsi, current, previous };
@@ -82,7 +88,7 @@ export function evaluateRsiValues(values: number[]): { side: RsiExtremeSide | nu
 }
 
 /** Pure RSI(14) mean-reversion signal on completed 1H candles. */
-export function evaluateRsiExtremes(coin: string, hourly: Bar[]): RsiExtremeSignal {
+export function evaluateRsiExtremes(coin: string, hourly: Bar[], fourHour: Bar[] = []): RsiExtremeSignal {
   const completed = completedHourlyBars(hourly);
   const price = completed.at(-1)?.c ?? 0;
   const empty: RsiExtremeSignal = { coin, side: null, confidence: 0, reasons: [], price, indicators: {} };
@@ -90,27 +96,51 @@ export function evaluateRsiExtremes(coin: string, hourly: Bar[]): RsiExtremeSign
 
   const values = rsi(completed.map((b) => b.c), RSI_EXTREMES_DEFAULTS.period);
   const result = evaluateRsiValues(values);
+  const signalBar = completed.at(-1)!;
+  const candleConfirmed = result.side === "long"
+    ? signalBar.c > signalBar.o
+    : result.side === "short" ? signalBar.c < signalBar.o : false;
+  const atrValue = atr(completed, RSI_EXTREMES_DEFAULTS.period).at(-1) ?? Number.NaN;
+  const fourHourCloses = fourHour.map((bar) => bar.c);
+  const ema20 = ema(fourHourCloses, 20).at(-1) ?? Number.NaN;
+  const ema50 = ema(fourHourCloses, 50).at(-1) ?? Number.NaN;
+  const fourHourPrice = fourHour.at(-1)?.c ?? Number.NaN;
+  const strongBullTrend = fourHour.length >= 50 && fourHourPrice > ema20 && ema20 > ema50;
+  const strongBearTrend = fourHour.length >= 50 && fourHourPrice < ema20 && ema20 < ema50;
+  const regimeBlocked = result.side === "short" ? strongBullTrend : result.side === "long" ? strongBearTrend : false;
   const signalCandleTs = completed.at(-1)?.t ?? 0;
   const indicators = {
     rsi: result.current,
     rsiPrevious: result.previous,
     trailedRsiExtreme: result.extreme,
+    hourlyAtr: atrValue,
+    fourHourEma20: ema20,
+    fourHourEma50: ema50,
+    regimeBlocked: regimeBlocked ? 1 : 0,
     signalCandleTs,
   };
 
   if (!result.side) {
-    return { ...empty, indicators, reasons: [`No completed-candle reversal from a trailed RSI <=${RSI_EXTREMES_DEFAULTS.oversold} or >=${RSI_EXTREMES_DEFAULTS.overbought}`] };
+    return { ...empty, indicators, reasons: [`No completed-candle RSI reversal of at least ${RSI_EXTREMES_DEFAULTS.minReversalPoints} points from a trailed extreme`] };
   }
+  if (!candleConfirmed) return { ...empty, indicators, reasons: ["RSI reversed, but the completed 1H price candle did not confirm the direction"] };
+  if (regimeBlocked) return { ...empty, indicators, reasons: [`Blocked ${result.side} against a strong opposing 4H EMA20/50 trend`] };
+
+  const stopLoss = Number.isFinite(atrValue)
+    ? result.side === "long" ? price - atrValue * RSI_EXTREMES_DEFAULTS.emergencyAtrMult : price + atrValue * RSI_EXTREMES_DEFAULTS.emergencyAtrMult
+    : undefined;
 
   const reasons = [
     result.side === "long"
       ? `Completed 1H RSI reversed up from trailed low ${result.extreme.toFixed(1)}`
       : `Completed 1H RSI reversed down from trailed high ${result.extreme.toFixed(1)}`,
     `RSI ${result.previous.toFixed(1)} → ${result.current.toFixed(1)}`,
+    "Completed 1H price candle confirmed the reversal",
+    fourHour.length >= 50 ? "4H EMA20/50 regime permits the trade" : "4H regime history unavailable; no veto applied",
     "Exit at the configured percentage take profit",
   ];
 
-  return { coin, side: result.side, confidence: result.confidence, reasons, price, indicators };
+  return { coin, side: result.side, confidence: result.confidence, reasons, price, stopLoss, indicators };
 }
 
 export function rsiTakeProfitPrice(side: RsiExtremeSide, entryPrice: number, takeProfitPct: number): number {
@@ -123,4 +153,8 @@ export function rsiTakeProfitPrice(side: RsiExtremeSide, entryPrice: number, tak
 export function rsiTakeProfitHit(side: RsiExtremeSide, mark: number, takeProfit: number): boolean {
   if (!Number.isFinite(mark) || !Number.isFinite(takeProfit)) return false;
   return side === "long" ? mark >= takeProfit : mark <= takeProfit;
+}
+
+export function rsiBreakevenTrigger(side: RsiExtremeSide, entry: number, takeProfit: number): number {
+  return entry + (takeProfit - entry) * RSI_EXTREMES_DEFAULTS.breakevenFractionOfTarget;
 }
