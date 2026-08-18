@@ -178,18 +178,6 @@
               "type": "number",
               "description": "Percent of equity per position."
             },
-            "rsi_risk_pct": {
-              "type": "number",
-              "minimum": 0.05,
-              "maximum": 5,
-              "description": "RSI strategy equity risk per trade (0.05-5%)."
-            },
-            "rsi_max_leverage": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 10,
-              "description": "RSI strategy leverage cap (1-10x), also bounded by global and exchange limits."
-            },
             "max_exposure_pct": {
               "type": "number",
               "description": "Maximum total exposure percent."
