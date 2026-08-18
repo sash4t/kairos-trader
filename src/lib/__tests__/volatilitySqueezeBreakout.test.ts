@@ -137,7 +137,6 @@ describe("Volatility Squeeze Breakout momentum mode", () => {
     expect(SQUEEZE_DEFAULTS.squeezeMinVolumeRatio).toBe(2);
     expect(SQUEEZE_DEFAULTS.momentumMinVolumeRatio).toBe(3);
     expect(SQUEEZE_DEFAULTS.minConfidence).toBe(82);
-    expect(SQUEE_DEFAULTS_DO_NOT_EXIST).toBeUndefined;
     expect(SQUEEZE_DEFAULTS.signalFreshMs).toBe(5 * 60_000);
     expect(SQUEEZE_DEFAULTS.sameDirectionBlockBars).toBe(2);
   });
