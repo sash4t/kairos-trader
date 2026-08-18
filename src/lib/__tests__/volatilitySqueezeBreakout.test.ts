@@ -34,6 +34,20 @@ function longWithFallingRsi(): Bar[] {
   return bars;
 }
 
+function highRsiStillRising(): Bar[] {
+  const bars = hourlyMomentum();
+  const prev = bars.at(-2)!.c;
+  bars[bars.length - 1] = { ...bars.at(-1)!, o: prev, h: prev + 8.2, l: prev - 0.05, c: prev + 8 };
+  return bars;
+}
+
+function lowRsiStillFalling(): Bar[] {
+  const bars = hourlyBearishMomentum();
+  const prev = bars.at(-2)!.c;
+  bars[bars.length - 1] = { ...bars.at(-1)!, o: prev, h: prev + 0.05, l: prev - 8.2, c: prev - 8 };
+  return bars;
+}
+
 function breakout(volume = 310, compressed = true): Bar[] {
   const bars: Bar[] = Array.from({ length: 39 }, (_, i) => {
     const wave = compressed ? (i % 2 === 0 ? 0.02 : -0.02) : Math.sin(i * 0.8) * 0.7;
@@ -83,21 +97,27 @@ describe("Volatility Squeeze Breakout momentum mode", () => {
     expect(strong.indicators.volumeRatio).toBeGreaterThanOrEqual(3);
   });
 
-  it("fires shorts only when 1H RSI is 30-50 and falling", () => {
-    const bars = shortBreakout(310);
-    const sig = evaluateVolatilitySqueezeBreakout("TEST", hourlyBearishMomentum(), bars, signalNow(bars));
-    expect(sig.side).toBe("short");
-    expect(sig.indicators.hourlyRsi).toBeGreaterThanOrEqual(30);
-    expect(sig.indicators.hourlyRsi).toBeLessThanOrEqual(50);
-    expect(sig.indicators.rsiSlope).toBeLessThan(0);
+  it("allows a long above the old RSI 70 ceiling when RSI is still rising", () => {
+    const bars = breakout(310, false);
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", highRsiStillRising(), bars, signalNow(bars));
+    expect(sig.indicators.hourlyRsi).toBeGreaterThan(70);
+    expect(sig.indicators.rsiSlope).toBeGreaterThan(0);
     expect(sig.indicators.rsiSlopeOk).toBe(1);
+    expect(sig.side).toBe("long");
   });
 
-  it("rejects a long breakout when RSI is in range but falling", () => {
+  it("allows a short below the old RSI 30 floor when RSI is still falling", () => {
+    const bars = shortBreakout(310);
+    const sig = evaluateVolatilitySqueezeBreakout("TEST", lowRsiStillFalling(), bars, signalNow(bars));
+    expect(sig.indicators.hourlyRsi).toBeLessThan(30);
+    expect(sig.indicators.rsiSlope).toBeLessThan(0);
+    expect(sig.indicators.rsiSlopeOk).toBe(1);
+    expect(sig.side).toBe("short");
+  });
+
+  it("rejects a long breakout when RSI is falling", () => {
     const bars = breakout(310, false);
     const sig = evaluateVolatilitySqueezeBreakout("TEST", longWithFallingRsi(), bars, signalNow(bars));
-    expect(sig.indicators.hourlyRsi).toBeGreaterThanOrEqual(50);
-    expect(sig.indicators.hourlyRsi).toBeLessThanOrEqual(70);
     expect(sig.indicators.rsiSlope).toBeLessThan(0);
     expect(sig.side).toBeNull();
     expect(sig.reasons.join(" ")).toMatch(/RSI slope/i);

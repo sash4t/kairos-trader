@@ -124,9 +124,6 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const hourRsi = last(rsiSeries) ?? 50;
   const hourRsiPrev = rsiSeries.at(-2) ?? hourRsi;
   const rsiSlope = hourRsi - hourRsiPrev;
-  const rsiMin = side === "short" ? 30 : 50;
-  const rsiMax = side === "short" ? 50 : 70;
-  const rsiOk = side != null && hourRsi >= rsiMin && hourRsi <= rsiMax;
   const rsiSlopeOk = side === "long" ? rsiSlope > 0 : side === "short" ? rsiSlope < 0 : false;
 
   const indicators = {
@@ -160,9 +157,6 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     return { ...empty, indicators, reasons: [`Breakout volume ${volumeRatio.toFixed(2)}x < ${requiredVolumeRatio.toFixed(1)}x ${mode} minimum`] };
   }
   if (!side) return { ...empty, indicators, reasons: [`No close beyond prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle extreme`] };
-  if (!rsiOk) {
-    return { ...empty, indicators, reasons: [`1H RSI ${hourRsi.toFixed(1)} outside ${rsiMin}-${rsiMax} ${side} momentum band`] };
-  }
   if (!rsiSlopeOk) {
     return { ...empty, indicators, reasons: [`1H RSI slope ${rsiSlope.toFixed(2)} is not ${side === "long" ? "rising" : "falling"} with the breakout`] };
   }
@@ -183,7 +177,6 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const reasons = [
     `Fresh 15m close broke prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle ${side === "long" ? "high" : "low"}`,
     `Volume ${volumeRatio.toFixed(2)}x >= ${requiredVolumeRatio.toFixed(1)}x ${recentSqueeze ? "recent-squeeze" : "momentum"} minimum`,
-    `1H RSI ${hourRsi.toFixed(1)} inside ${rsiMin}-${rsiMax} ${side} momentum band`,
     `1H RSI ${hourRsiPrev.toFixed(1)} -> ${hourRsi.toFixed(1)} confirms ${side} direction`,
     "Bollinger width is expanding",
   ];
@@ -191,9 +184,8 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   confidence += 8;
   if (volumeRatio >= requiredVolumeRatio + 0.5) confidence += 4;
   if (volumeRatio >= requiredVolumeRatio + 1.0) confidence += 4;
-  confidence += 10;
-  confidence += 4;
-  confidence += 10;
+  confidence += 4; // RSI slope confirmation.
+  confidence += 10; // Mandatory volatility expansion.
 
   if (oppositeDirectionRecently) {
     confidence += 4;
