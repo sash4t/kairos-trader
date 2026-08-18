@@ -59,6 +59,7 @@ function Scanner() {
   const [scannedCount, setScannedCount] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [lastScannedAt, setLastScannedAt] = useState<number | null>(null);
+  const [lastResult, setLastResult] = useState<{ at: number; results: TradeResult[] } | null>(null);
 
   const runScan = async () => {
     setLoading(true); setOpportunities([]); setSelected(new Set()); setScannedCount(0);
