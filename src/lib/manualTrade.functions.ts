@@ -38,7 +38,7 @@ export const placeScannerTrades = createServerFn({ method: "POST" })
 
     const { data: existingRows, error: existingError } = await context.supabase
       .from("paper_positions")
-      .select("coin,side,notional")
+      .select("coin,side,notional,leverage")
       .eq("user_id", context.userId)
       .eq("status", "open");
     if (existingError) throw new Error(existingError.message);
@@ -74,7 +74,17 @@ export const placeScannerTrades = createServerFn({ method: "POST" })
     }
     if (!(equity > 0)) throw new Error("Account equity is unavailable.");
 
-    let totalNotional = (existingRows ?? []).reduce((sum: number, p: any) => sum + Math.abs(Number(p.notional ?? 0)), 0);
+    // Exposure is measured as equity/margin allocated, not leveraged notional.
+    // Example: $10k equity, 5% position size => $500 allocated per trade.
+    // At 5x leverage that trade can control $2,500 notional, but still consumes only $500 of the exposure budget.
+    let allocatedEquity = (existingRows ?? []).reduce((sum: number, p: any) => {
+      const notional = Math.abs(Number(p.notional ?? 0));
+      const leverage = Math.max(1, Number(p.leverage ?? 1));
+      return sum + notional / leverage;
+    }, 0);
+    const maxAllocatedEquity = equity * (maxExposurePct / 100);
+    const targetAllocation = equity * (positionSizePct / 100);
+
     const results: ScannerTradeResult[] = [];
     const unique = new Set<string>();
 
@@ -102,19 +112,16 @@ export const placeScannerTrades = createServerFn({ method: "POST" })
       }
 
       const leverage = Math.max(1, Math.floor(Math.min(maxLeverage, asset.maxLeverage)));
-      // Exposure is an equity-allocation limit, independent of leverage.
-      // 100% exposure means aggregate open notional may use up to 100% of account equity.
-      const maxPortfolioNotional = equity * (maxExposurePct / 100);
-      const remainingNotional = Math.max(0, maxPortfolioNotional - totalNotional);
-      // Position size is also an equity-allocation percentage. Leverage affects margin required
-      // by the exchange, but does not multiply the configured portfolio exposure budget.
-      const targetNotional = equity * (positionSizePct / 100);
-      const orderNotional = Math.min(targetNotional, remainingNotional);
-      if (!(orderNotional > 0)) {
-        results.push({ coin, side, status: "skipped", message: `Exposure limit reached (${maxExposurePct}% of equity).` });
+      const remainingAllocation = Math.max(0, maxAllocatedEquity - allocatedEquity);
+      const allocationForTrade = Math.min(targetAllocation, remainingAllocation);
+      if (!(allocationForTrade > 0)) {
+        const usedPct = equity > 0 ? (allocatedEquity / equity) * 100 : 0;
+        results.push({ coin, side, status: "skipped", message: `Exposure limit reached (${usedPct.toFixed(1)}% used / ${maxExposurePct}% allowed).` });
         continue;
       }
 
+      // Position-size % represents actual account equity committed. Leverage increases notional only.
+      const orderNotional = allocationForTrade * leverage;
       const requestedSize = orderNotional / mark;
       const stop = side === "long" ? mark * (1 - hardStopPct / 100) : mark * (1 + hardStopPct / 100);
       const confidence = Math.max(1, Math.min(100, Number(request.score ?? 0)));
@@ -165,10 +172,10 @@ export const placeScannerTrades = createServerFn({ method: "POST" })
           user_id: context.userId,
           level: "trade",
           message: `${isLive ? "LIVE " : "PAPER "}MANUAL ${side.toUpperCase()} ${coin} @ ${entry.toFixed(6)} · size ${size} · ${leverage}x · scanner ${request.stage}`,
-          meta: { coin, side, scanner: true, score: confidence, stage: request.stage, live: isLive },
+          meta: { coin, side, scanner: true, score: confidence, stage: request.stage, live: isLive, equityAllocation: notional / leverage },
         });
 
-        totalNotional += notional;
+        allocatedEquity += notional / leverage;
         held.add(coin);
         results.push({ coin, side, status: "opened", message: "Position opened.", size, entryPrice: entry, leverage });
       } catch (err) {
