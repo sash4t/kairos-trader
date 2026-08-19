@@ -12,12 +12,9 @@ export const SQUEEZE_DEFAULTS = {
   bbMult: 2,
   kcPeriod: 20,
   kcMult: 1.8,
-  breakoutLookback: 4,
-  squeezeLookbackBars: 5,
-  // Backward-compatible display floor; actual entry threshold is adaptive below.
-  minVolumeRatio: 2.0,
-  squeezeMinVolumeRatio: 2.0,
-  momentumMinVolumeRatio: 3.0,
+  breakoutLookback: 6,
+  squeezeLookbackBars: 3,
+  minVolumeRatio: 1.5,
   riskPct: 1.5,
   stopPct: 0.45,
   targetPct: 1.0,
@@ -31,7 +28,7 @@ export const SQUEEZE_DEFAULTS = {
   staleMovePct: 0.3,
   staleMinutes: 20,
   maxMinutes: 120,
-  minConfidence: 82,
+  minConfidence: 70,
   signalFreshMs: 5 * 60 * 1000,
   sameDirectionBlockBars: 2,
   // Per-coin lockout after a real losing squeeze stop-loss.
@@ -111,6 +108,10 @@ function breakoutSideAt(bars: Bar[], idx: number, lookback: number): Side | null
   return null;
 }
 
+/**
+ * Original Plus: a real recent 15m BB/KC squeeze must precede a fresh 6-bar
+ * breakout with volatility expansion, volume, and light 1H direction support.
+ */
 export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], fifteen: Bar[], nowMs = Date.now()): SqueezeSignal {
   const price = fifteen.at(-1)?.c ?? 0;
   const empty: SqueezeSignal = { coin, side: null, confidence: 0, reasons: [], price, indicators: {} };
@@ -131,9 +132,6 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     if (isSqueezedAt(i - age)) { squeezeAge = age; break; }
   }
   const recentSqueeze = squeezeAge > 0;
-  const requiredVolumeRatio = recentSqueeze
-    ? SQUEEZE_DEFAULTS.squeezeMinVolumeRatio
-    : SQUEEZE_DEFAULTS.momentumMinVolumeRatio;
   const released = Number.isFinite(bb.upper[i]) && Number.isFinite(kc.upper[i])
     && (bb.upper[i] > kc.upper[i] || bb.lower[i] < kc.lower[i]);
   const bbExpanding = Number.isFinite(bb.width[i]) && Number.isFinite(bb.width[i - 1]) && bb.width[i] > bb.width[i - 1];
@@ -163,6 +161,12 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const hourRsi = last(rsiSeries) ?? 50;
   const hourRsiPrev = rsiSeries.at(-2) ?? hourRsi;
   const rsiSlope = hourRsi - hourRsiPrev;
+  const emaAligned = side === "long" ? hourPrice >= hourEma20 : side === "short" ? hourPrice <= hourEma20 : false;
+  const rsiRangeOk = side === "long"
+    ? hourRsi >= 40 && hourRsi <= 75
+    : side === "short"
+      ? hourRsi >= 25 && hourRsi <= 60
+      : false;
   const rsiSlopeOk = side === "long" ? rsiSlope > 0 : side === "short" ? rsiSlope < 0 : false;
 
   const indicators = {
@@ -175,12 +179,15 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     kcUpper: kc.upper[i],
     kcLower: kc.lower[i],
     volumeRatio,
-    requiredVolumeRatio,
+    requiredVolumeRatio: SQUEEZE_DEFAULTS.minVolumeRatio,
     recentHigh,
     recentLow,
+    hourlyPrice: hourPrice,
     hourlyEma20: hourEma20,
+    emaAligned: emaAligned ? 1 : 0,
     hourlyRsi: hourRsi,
     hourlyRsiPrev: hourRsiPrev,
+    rsiRangeOk: rsiRangeOk ? 1 : 0,
     rsiSlope,
     rsiSlopeOk: rsiSlopeOk ? 1 : 0,
     signalCandleTs,
@@ -191,16 +198,23 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
     oppositeDirectionRecently: oppositeDirectionRecently ? 1 : 0,
   };
 
-  if (volumeRatio < requiredVolumeRatio) {
-    const mode = recentSqueeze ? "recent-squeeze" : "non-squeeze momentum";
-    return { ...empty, indicators, reasons: [`Breakout volume ${volumeRatio.toFixed(2)}x < ${requiredVolumeRatio.toFixed(1)}x ${mode} minimum`] };
+  if (!recentSqueeze) {
+    return { ...empty, indicators, reasons: [`No Bollinger-inside-Keltner squeeze in prior ${SQUEEZE_DEFAULTS.squeezeLookbackBars} completed 15m candles`] };
   }
   if (!side) return { ...empty, indicators, reasons: [`No close beyond prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle extreme`] };
+  if (!bbExpanding) return { ...empty, indicators, reasons: ["Bollinger width is not expanding"] };
+  if (volumeRatio < SQUEEZE_DEFAULTS.minVolumeRatio) {
+    return { ...empty, indicators, reasons: [`Breakout volume ${volumeRatio.toFixed(2)}x < ${SQUEEZE_DEFAULTS.minVolumeRatio.toFixed(1)}x minimum`] };
+  }
+  if (!emaAligned) {
+    return { ...empty, indicators, reasons: [`1H price is on the wrong side of EMA20 for ${side} breakout`] };
+  }
+  if (!rsiRangeOk) {
+    const range = side === "long" ? "40-75" : "25-60";
+    return { ...empty, indicators, reasons: [`1H RSI ${hourRsi.toFixed(1)} outside ${range} ${side} range`] };
+  }
   if (!rsiSlopeOk) {
     return { ...empty, indicators, reasons: [`1H RSI slope ${rsiSlope.toFixed(2)} is not ${side === "long" ? "rising" : "falling"} with the breakout`] };
-  }
-  if (!bbExpanding) {
-    return { ...empty, indicators, reasons: ["Bollinger width is not expanding"] };
   }
   if (!signalFresh) {
     return { ...empty, indicators, reasons: [signalAgeMs < 0 ? "Waiting for breakout candle to complete" : "Breakout signal is stale; same 15m candle will not be re-traded"] };
@@ -212,33 +226,27 @@ export function evaluateVolatilitySqueezeBreakout(coin: string, hourly: Bar[], f
   const stopLoss = side === "long" ? price * (1 - SQUEEZE_DEFAULTS.stopPct / 100) : price * (1 + SQUEEZE_DEFAULTS.stopPct / 100);
   const takeProfit = side === "long" ? price * (1 + SQUEEZE_DEFAULTS.targetPct / 100) : price * (1 - SQUEEZE_DEFAULTS.targetPct / 100);
 
-  let confidence = 60;
+  let confidence = 76;
   const reasons = [
+    `Recent Bollinger/Keltner squeeze (${squeezeAge} bar${squeezeAge === 1 ? "" : "s"} ago)`,
     `Fresh 15m close broke prior ${SQUEEZE_DEFAULTS.breakoutLookback}-candle ${side === "long" ? "high" : "low"}`,
-    `Volume ${volumeRatio.toFixed(2)}x >= ${requiredVolumeRatio.toFixed(1)}x ${recentSqueeze ? "recent-squeeze" : "momentum"} minimum`,
-    `1H RSI ${hourRsiPrev.toFixed(1)} -> ${hourRsi.toFixed(1)} confirms ${side} direction`,
+    `Volume ${volumeRatio.toFixed(2)}x >= ${SQUEEZE_DEFAULTS.minVolumeRatio.toFixed(1)}x minimum`,
     "Bollinger width is expanding",
+    `1H price/EMA20 + RSI ${hourRsiPrev.toFixed(1)} -> ${hourRsi.toFixed(1)} support ${side}`,
   ];
 
-  confidence += 8;
-  if (volumeRatio >= requiredVolumeRatio + 0.5) confidence += 4;
-  if (volumeRatio >= requiredVolumeRatio + 1.0) confidence += 4;
-  confidence += 4; // RSI slope confirmation.
-  confidence += 10; // Mandatory volatility expansion.
-
+  if (volumeRatio >= 2) confidence += 6;
+  else if (volumeRatio >= 1.75) confidence += 3;
+  const widthExpansion = bb.width[i - 1] > 0 ? bb.width[i] / bb.width[i - 1] : 1;
+  if (widthExpansion >= 1.25) confidence += 5;
+  else if (widthExpansion >= 1.1) confidence += 2;
+  if (squeezeAge === 1) confidence += 2;
+  if (released) { confidence += 2; reasons.push("Current candle released outside Keltner squeeze"); }
   if (oppositeDirectionRecently) {
-    confidence += 4;
+    confidence += 2;
     reasons.push("Fresh opposite breakout after recent failed-direction move");
   }
-  if (recentSqueeze) {
-    confidence += 5;
-    reasons.push(`Recent Bollinger/Keltner squeeze (${squeezeAge} bar${squeezeAge === 1 ? "" : "s"} ago)`);
-  }
-  const emaAligned = side === "long" ? hourPrice >= hourEma20 : hourPrice <= hourEma20;
-  if (emaAligned) { confidence += 2; reasons.push("1H EMA20 direction agrees"); }
-  if (released) reasons.push("Current candle is outside Keltner squeeze");
 
-  const widthExpansion = bb.width[i - 1] > 0 ? bb.width[i] / bb.width[i - 1] : 1;
   return {
     coin,
     side,
