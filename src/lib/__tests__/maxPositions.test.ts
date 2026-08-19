@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RSI_EXTREMES_KEY } from "../strategies/rsiExtremes";
+import { TREND_PULSE_KEY } from "../strategies/trendPulse";
 import { MAX_OPEN_POSITIONS, clampMaxPositions, strategySelectionPatch } from "../scalp";
 
 describe("maximum open positions", () => {
@@ -12,5 +13,9 @@ describe("maximum open positions", () => {
 
   it("sets the RSI strategy default to 30 positions", () => {
     expect(strategySelectionPatch(RSI_EXTREMES_KEY)).toMatchObject({ max_positions: 30, rsi_risk_pct: 1, rsi_max_leverage: 5 });
+  });
+
+  it("stores the canonical Trend-Pulse key", () => {
+    expect(strategySelectionPatch(TREND_PULSE_KEY)).toMatchObject({ strategy_key: TREND_PULSE_KEY, min_confidence: 75 });
   });
 });

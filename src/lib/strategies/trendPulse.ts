@@ -2,7 +2,8 @@ import { atr, bollinger, ema, last, rsi } from "../indicators";
 import type { Bar } from "../strategy";
 
 export const TREND_PULSE_KEY = "trend-pulse" as const;
-// Keep the deployed legacy storage value until the database allow-list migration lands.
+// Read-only compatibility for rows created before Trend-Pulse received its own
+// canonical database key. New selections must always store TREND_PULSE_KEY.
 export const TREND_PULSE_STORAGE_KEY = "trendline-break" as const;
 export function isTrendPulseKey(value: string | null | undefined) {
   return value === TREND_PULSE_KEY || value === TREND_PULSE_STORAGE_KEY;
