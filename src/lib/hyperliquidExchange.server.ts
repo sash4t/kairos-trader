@@ -132,32 +132,101 @@ export async function loadAssetIndex(): Promise<Map<string, AssetInfo>> {
   return map;
 }
 
+type HlUserFill = {
+  coin: string;
+  startPosition: string;
+  dir: string;
+  time: number;
+  fee: string;
+  feeToken?: string;
+};
+
+type HlFunding = {
+  time: number;
+  delta?: { type?: string; coin?: string; usdc?: string };
+};
+
+function positionLifecycleStart(fills: HlUserFill[], coin: string, side: "long" | "short"): number | null {
+  const wanted = side === "long" ? /open long/i : /open short/i;
+  const candidates = fills
+    .filter((f) => f.coin === coin && Math.abs(+f.startPosition) < 1e-12 && wanted.test(f.dir ?? ""))
+    .sort((a, b) => b.time - a.time);
+  return candidates[0]?.time ?? null;
+}
+
 export interface LiveAccount {
   accountValue: number;
   withdrawable: number;
   totalMarginUsed: number;
-  positions: { coin: string; size: number; side: "long" | "short"; entryPrice: number; unrealizedPnl: number; leverage: number }[];
+  positions: {
+    coin: string;
+    size: number;
+    side: "long" | "short";
+    entryPrice: number;
+    /** Net unrealized PnL after actual Hyperliquid fees and funding for the current position lifecycle. */
+    unrealizedPnl: number;
+    grossUnrealizedPnl: number;
+    feesPaid: number;
+    fundingPnl: number;
+    leverage: number;
+  }[];
 }
 
 export async function fetchLiveAccount(address: string): Promise<LiveAccount> {
-  const state = await hlInfo<{
-    marginSummary: { accountValue: string; totalMarginUsed: string };
-    withdrawable: string;
-    assetPositions: { position: { coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: { value: number } } }[];
-  }>({ type: "clearinghouseState", user: address });
+  const [state, fills] = await Promise.all([
+    hlInfo<{
+      marginSummary: { accountValue: string; totalMarginUsed: string };
+      withdrawable: string;
+      assetPositions: { position: { coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: { value: number } } }[];
+    }>({ type: "clearinghouseState", user: address }),
+    hlInfo<HlUserFill[]>({ type: "userFills", user: address, aggregateByTime: true }).catch(() => []),
+  ]);
+
+  const rawPositions = (state.assetPositions ?? []).map((p) => ({
+    coin: p.position.coin,
+    size: Math.abs(+p.position.szi),
+    side: (+p.position.szi >= 0 ? "long" : "short") as "long" | "short",
+    entryPrice: +p.position.entryPx,
+    grossUnrealizedPnl: +p.position.unrealizedPnl,
+    leverage: p.position.leverage?.value ?? 1,
+  }));
+
+  const starts = new Map<string, number>();
+  for (const p of rawPositions) {
+    const start = positionLifecycleStart(fills, p.coin, p.side);
+    if (start != null) starts.set(`${p.coin}:${p.side}`, start);
+  }
+  const earliestStart = starts.size ? Math.min(...starts.values()) : null;
+  const funding = earliestStart == null
+    ? []
+    : await hlInfo<HlFunding[]>({ type: "userFunding", user: address, startTime: earliestStart }).catch(() => []);
+
+  const positions = rawPositions.map((p) => {
+    const start = starts.get(`${p.coin}:${p.side}`);
+    const feesPaid = start == null ? 0 : fills.reduce((sum, f) => {
+      if (f.coin !== p.coin || f.time < start) return sum;
+      if (f.feeToken && f.feeToken !== "USDC") return sum;
+      const fee = +f.fee;
+      return sum + (Number.isFinite(fee) ? fee : 0);
+    }, 0);
+    const fundingPnl = start == null ? 0 : funding.reduce((sum, f) => {
+      if (f.time < start || f.delta?.coin !== p.coin) return sum;
+      const usdc = +(f.delta?.usdc ?? 0);
+      return sum + (Number.isFinite(usdc) ? usdc : 0);
+    }, 0);
+    return {
+      ...p,
+      feesPaid,
+      fundingPnl,
+      unrealizedPnl: p.grossUnrealizedPnl - feesPaid + fundingPnl,
+    };
+  });
 
   return {
     accountValue: +state.marginSummary.accountValue,
     withdrawable: +state.withdrawable,
     totalMarginUsed: +state.marginSummary.totalMarginUsed,
-    positions: (state.assetPositions ?? []).map((p) => ({
-      coin: p.position.coin,
-      size: Math.abs(+p.position.szi),
-      side: +p.position.szi >= 0 ? "long" : "short",
-      entryPrice: +p.position.entryPx,
-      unrealizedPnl: +p.position.unrealizedPnl,
-      leverage: p.position.leverage?.value ?? 1,
-    })),
+    positions,
   };
 }
 
