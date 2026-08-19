@@ -1,7 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/integrations/supabase/client";
 import { useBot } from "@/lib/botContext";
+import { reconcileExchangeClosedTrades } from "@/lib/tradeReconciliation.functions";
 import { Download } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/trades")({ component: Trades });
@@ -14,10 +16,16 @@ function csv(rows: any[]) {
 
 function Trades() {
   const { userId, positionsVersion } = useBot();
+  const reconcileFn = useServerFn(reconcileExchangeClosedTrades);
   const { data = [] } = useQuery({
     queryKey: ["trade-history", userId, positionsVersion],
     enabled: !!userId,
-    queryFn: async () => (await supabase.from("paper_positions").select("*").eq("user_id", userId!).eq("status", "closed").order("closed_at", { ascending: false }).limit(500)).data ?? [],
+    queryFn: async () => {
+      // Native Hyperliquid SL/TP can close a position between agent polls.
+      // Reconcile those rows from actual exchange fills before rendering them.
+      try { await reconcileFn({ data: undefined }); } catch (err) { console.warn("Trade reconciliation failed", err); }
+      return (await supabase.from("paper_positions").select("*").eq("user_id", userId!).eq("status", "closed").order("closed_at", { ascending: false }).limit(500)).data ?? [];
+    },
     refetchInterval: 10000,
   });
 
