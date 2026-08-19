@@ -1,4 +1,5 @@
 import { candlesToBars, bucket, TRENDLINE_STRATEGY_KEY, type Bar } from "./strategy";
+import { evaluateBtcDirectionGate } from "./strategies/btcDirectionGate";
 import { buildEntryIntent } from "./orderIntent";
 import { clampMaxPositions, evaluateScalpMulti, type ExitParams, type ScalpSignal } from "./scalp";
 import { fetchBtcProtection, shockHitsSide, type ShockDir } from "./btcShock";
@@ -92,6 +93,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       return bars;
     } catch { return null; }
   };
+  const btcHourly = await loadBars("BTC", "1h", 60);
 
   for (const raw of users) {
     const s = raw as unknown as Settings;
@@ -616,6 +618,17 @@ export async function runTradingCycle(): Promise<CycleReport> {
               : isOriginalTpa ? Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, +s.min_confidence) : +s.min_confidence;
           if (!sig.side || sig.confidence < minConfidence) continue;
           if (shockHitsSide(shockEntryDir, sig.side)) { report.vetoed++; continue; }
+          const btcDirection = evaluateBtcDirectionGate(sig.side, btcHourly ?? []);
+          if (!btcDirection.allowed) {
+            report.vetoed++;
+            await log(s.user_id, "info", `Skipped ${sig.coin}: ${btcDirection.reason}.`, { gate: "btc_1h_direction", ...btcDirection });
+            continue;
+          }
+          sig.reasons.push(`${btcDirection.reason} · 2H move ${btcDirection.twoHourMovePct.toFixed(2)}%`);
+          sig.indicators.btcOneHourPrice = btcDirection.price;
+          sig.indicators.btcOneHourEma20 = btcDirection.ema20;
+          sig.indicators.btcOneHourEma50 = btcDirection.ema50;
+          sig.indicators.btcTwoHourMovePct = btcDirection.twoHourMovePct;
           if (isRsi) {
             const signalCandleTs = sig.indicators.signalCandleTs;
             const { data: consumed } = await (supabaseAdmin as any).from("paper_positions")
