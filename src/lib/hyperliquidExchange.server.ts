@@ -264,29 +264,23 @@ export interface OrderFill {
   oid: number | null;
 }
 
-/**
- * Market order via aggressive IOC limit (Hyperliquid has no true market type).
- * `slippagePct` widens the limit so the order crosses the book.
- * Returns the ACTUAL fill — an IOC can fill partially or not at all.
- */
-export async function marketOrder(
+function isIocNoMatchError(err: unknown): boolean {
+  return err instanceof Error && /could not immediately match against any resting orders/i.test(err.message);
+}
+
+async function submitIocOrder(
   creds: HlCreds,
   asset: AssetInfo,
-  opts: { isBuy: boolean; size: number; markPrice: number; reduceOnly?: boolean; slippagePct?: number; limitPrice?: number },
+  opts: { isBuy: boolean; size: string; limit: number; reduceOnly: boolean },
 ): Promise<OrderFill> {
-  const slip = (opts.slippagePct ?? 0.5) / 100;
-  const limit = opts.limitPrice ?? (opts.isBuy ? opts.markPrice * (1 + slip) : opts.markPrice * (1 - slip));
-  if (!(limit > 0) || !Number.isFinite(limit)) throw new Error(`Invalid IOC limit for ${asset.name}`);
-  const sz = formatSize(opts.size, asset.szDecimals);
-  if (Number(sz) <= 0) throw new Error(`Size rounds to zero for ${asset.name}`);
   const json = await post(creds, {
     type: "order",
     orders: [{
       a: asset.index,
       b: opts.isBuy,
-      p: formatPrice(limit, asset.szDecimals),
-      s: sz,
-      r: opts.reduceOnly ?? false,
+      p: formatPrice(opts.limit, asset.szDecimals),
+      s: opts.size,
+      r: opts.reduceOnly,
       t: { limit: { tif: "Ioc" } },
     }],
     grouping: "na",
@@ -297,6 +291,40 @@ export async function marketOrder(
   const filled = first?.filled;
   if (!filled) return { size: 0, avgPrice: 0, oid: null };
   return { size: Math.abs(+filled.totalSz), avgPrice: +filled.avgPx, oid: filled.oid ?? null };
+}
+
+/**
+ * Market order via aggressive IOC limit (Hyperliquid has no true market type).
+ * `slippagePct` widens the limit so the order crosses the book.
+ *
+ * A stale explicit `limitPrice` can stop crossing the spread and Hyperliquid then
+ * returns "Order could not immediately match against any resting orders". For
+ * opening orders we treat that as a transient no-fill and retry once from a fresh
+ * midpoint, still bounded by `slippagePct` so the retry cannot chase indefinitely.
+ */
+export async function marketOrder(
+  creds: HlCreds,
+  asset: AssetInfo,
+  opts: { isBuy: boolean; size: number; markPrice: number; reduceOnly?: boolean; slippagePct?: number; limitPrice?: number },
+): Promise<OrderFill> {
+  const slip = (opts.slippagePct ?? 0.5) / 100;
+  const initialLimit = opts.limitPrice ?? (opts.isBuy ? opts.markPrice * (1 + slip) : opts.markPrice * (1 - slip));
+  if (!(initialLimit > 0) || !Number.isFinite(initialLimit)) throw new Error(`Invalid IOC limit for ${asset.name}`);
+  const sz = formatSize(opts.size, asset.szDecimals);
+  if (Number(sz) <= 0) throw new Error(`Size rounds to zero for ${asset.name}`);
+  const reduceOnly = opts.reduceOnly ?? false;
+
+  try {
+    return await submitIocOrder(creds, asset, { isBuy: opts.isBuy, size: sz, limit: initialLimit, reduceOnly });
+  } catch (err) {
+    if (reduceOnly || opts.limitPrice == null || !isIocNoMatchError(err)) throw err;
+
+    const mids = await hlInfo<Record<string, string>>({ type: "allMids" });
+    const freshMark = Number(mids[asset.name]);
+    if (!(freshMark > 0) || !Number.isFinite(freshMark)) throw err;
+    const retryLimit = opts.isBuy ? freshMark * (1 + slip) : freshMark * (1 - slip);
+    return await submitIocOrder(creds, asset, { isBuy: opts.isBuy, size: sz, limit: retryLimit, reduceOnly });
+  }
 }
 
 export interface NativeStopResult {
