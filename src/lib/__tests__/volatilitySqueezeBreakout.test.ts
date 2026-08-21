@@ -30,7 +30,9 @@ function hourlyShort(): Bar[] {
 function longWithFallingRsi(): Bar[] {
   const bars = hourlyLong();
   const prev = bars.at(-2)!.c;
-  bars[bars.length - 1] = { ...bars.at(-1)!, o: prev, h: prev + 0.03, l: prev - 0.20, c: prev - 0.15 };
+  // A small down-close turns RSI slope negative while preserving the separate
+  // long-side EMA20 filter. This fixture must isolate the RSI rejection path.
+  bars[bars.length - 1] = { ...bars.at(-1)!, o: prev, h: prev + 0.03, l: prev - 0.05, c: prev - 0.02 };
   return bars;
 }
 
@@ -114,6 +116,7 @@ describe("Volatility Squeeze Breakout Original Plus", () => {
     const bars = makeLongBreakout(180, true);
     const sig = evaluateVolatilitySqueezeBreakout("TEST", longWithFallingRsi(), bars, signalNow(bars));
     expect(sig.side).toBeNull();
+    expect(sig.indicators.emaAligned).toBe(1);
     expect(sig.indicators.rsiSlope).toBeLessThanOrEqual(0);
     expect(sig.reasons.join(" ")).toMatch(/RSI slope/i);
   });
