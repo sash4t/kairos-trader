@@ -323,7 +323,11 @@ async function ensureNativeTrigger(
   const matching = (open ?? []).filter((o) =>
     o.coin === asset.name && o.isTrigger && o.reduceOnly && o.side === expectedSide && typePattern.test(o.orderType ?? "")
   );
-  const existing = matching.find((o) => Math.abs(+o.triggerPx - opts.triggerPrice) <= tolerance);
+  const sizeTolerance = Math.max(10 ** -(asset.szDecimals + 1), opts.size * 0.0001);
+  const existing = matching.find((o) =>
+    Math.abs(+o.triggerPx - opts.triggerPrice) <= tolerance &&
+    Math.abs(Math.abs(+o.sz) - opts.size) <= sizeTolerance
+  );
   for (const stale of matching) {
     if (existing && stale.oid === existing.oid) continue;
     await cancelOrder(creds, asset, stale.oid);
