@@ -25,6 +25,7 @@ import {
 } from "./strategies/rsiExtremes";
 import { clampMaxPositions } from "./scalp";
 import { TREND_PULSE_KEY, TREND_PULSE_DEFAULTS, evaluateTrendPulse, trendPulseRiskSizedQuantity, isTrendPulseKey } from "./strategies/trendPulse";
+import { entryExecutionPlan } from "./executionParity";
 
 export interface Settings {
   user_id: string;
@@ -554,12 +555,31 @@ export class PaperEngine {
       const sig = evaluateTrendPulse(meta.name, h4, h1, m15);
       if (!sig.side || sig.stopLoss == null || sig.takeProfit == null || sig.confidence < Math.max(TREND_PULSE_DEFAULTS.minConfidence, this.settings.min_confidence)) continue;
       if (shockHitsSide(this.shockEntryDir, sig.side)) continue;
+      const quote = this.mid(sig.coin) ?? sig.price;
+      const entryPlan = entryExecutionPlan(this.settings.strategy_key, sig.side, sig.price, quote, sig.atrValue);
+      if (!entryPlan.allowed) {
+        this.log("info", `NO FILL ${sig.coin} [${TREND_PULSE_KEY}] — price exceeded chase allowance.`, {
+          signalPrice: sig.price, currentQuote: quote, allowance: entryPlan.allowance,
+          adverseAtr: entryPlan.adverseAtr, adversePct: entryPlan.adversePct,
+        });
+        continue;
+      }
+      const entry = entryPlan.referencePrice;
+      sig.indicators.entryAllowance = entryPlan.allowance;
+      sig.indicators.entryAdverseAtr = entryPlan.adverseAtr;
+      sig.indicators.entryAdversePct = entryPlan.adversePct;
+      const stop = sig.side === "long"
+        ? entry - sig.atrValue * TREND_PULSE_DEFAULTS.stopAtrMult
+        : entry + sig.atrValue * TREND_PULSE_DEFAULTS.stopAtrMult;
+      const takeProfit = sig.side === "long"
+        ? entry + sig.atrValue * TREND_PULSE_DEFAULTS.fullTargetAtrMult
+        : entry - sig.atrValue * TREND_PULSE_DEFAULTS.fullTargetAtrMult;
       const equity = this.currentEquity();
       const leverage = Math.max(1, Math.floor(Math.min(TREND_PULSE_DEFAULTS.maxLeverage, this.settings.max_leverage, meta.maxLeverage)));
-      const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / sig.price;
-      const size = Math.min(trendPulseRiskSizedQuantity(equity, sig.price, sig.stopLoss), roomQty);
+      const roomQty = Math.max(0, equity * (this.settings.max_exposure_pct / 100) * leverage - this.positions.reduce((s, p) => s + p.notional, 0)) / entry;
+      const size = Math.min(trendPulseRiskSizedQuantity(equity, entry, stop), roomQty);
       if (!(size > 0) || !Number.isFinite(size)) continue;
-      await this.openPaper(sig.coin, sig.side, size, leverage, sig.price, sig.stopLoss, sig.takeProfit, sig.confidence, sig.reasons, sig.indicators, TREND_PULSE_DEFAULTS.riskPct, undefined, undefined, "15m", TREND_PULSE_KEY);
+      await this.openPaper(sig.coin, sig.side, size, leverage, entry, stop, takeProfit, sig.confidence, sig.reasons, sig.indicators, TREND_PULSE_DEFAULTS.riskPct, undefined, undefined, "15m", TREND_PULSE_KEY);
       held.add(meta.name);
     }
   }

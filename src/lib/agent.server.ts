@@ -9,7 +9,7 @@ import {
 import {
   ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS, evaluateOriginalTrendPriceAction,
 } from "./strategies/originalTrendPriceAction";
-import { entryIocLimit, entryReferencePrice } from "./executionParity";
+import { entryExecutionPlan } from "./executionParity";
 import {
   INTRADAY_PULLBACK_KEY, INTRADAY_DEFAULTS, evaluateIntradayPullback,
   riskSizedQuantity, targetFromR, intradayRTrail,
@@ -693,7 +693,20 @@ export async function runTradingCycle(): Promise<CycleReport> {
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
           const currentQuotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
-          const quotePx = entryReferencePrice(s.strategy_key, sig.price, currentQuotePx);
+          const entryPlan = entryExecutionPlan(s.strategy_key, sig.side, sig.price, currentQuotePx, Number(sig.indicators.atrValue ?? 0));
+          if (!entryPlan.allowed) {
+            await log(s.user_id, "info", `NO FILL ${sig.coin} [${sig.family}] — price exceeded chase allowance.`, {
+              signalPrice: sig.price, currentQuote: currentQuotePx, allowance: entryPlan.allowance,
+              adverseAtr: entryPlan.adverseAtr, adversePct: entryPlan.adversePct,
+            });
+            continue;
+          }
+          const quotePx = entryPlan.referencePrice;
+          if (isTrendPulse) {
+            sig.indicators.entryAllowance = entryPlan.allowance;
+            sig.indicators.entryAdverseAtr = entryPlan.adverseAtr;
+            sig.indicators.entryAdversePct = entryPlan.adversePct;
+          }
           let leverage: number; let size: number; let tbStop = 0; let originalStop = 0; let rsiStop = 0; let defaultStop = 0;
           if (isRsi) {
             leverage = Math.max(1, Math.floor(Math.min(rsiMaxLeverage, +s.max_leverage, target.meta.maxLeverage)));
@@ -797,9 +810,15 @@ export async function runTradingCycle(): Promise<CycleReport> {
               await setLeverage(creds, liveAsset, leverage);
               const fill = await marketOrder(creds, liveAsset, {
                 isBuy: sig.side === "long", size, markPrice: currentQuotePx, reduceOnly: false, slippagePct: 1,
-                limitPrice: entryIocLimit(s.strategy_key, sig.price),
+                limitPrice: entryPlan.limitPrice,
               });
-              if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; }
+              if (fill.size <= 0) {
+                await log(s.user_id, "warn", `NO FILL ${sig.coin} [${sig.family}] — IOC did not execute within chase allowance.`, {
+                  signalPrice: sig.price, currentQuote: currentQuotePx, limitPrice: entryPlan.limitPrice,
+                  allowance: entryPlan.allowance, adverseAtr: entryPlan.adverseAtr, adversePct: entryPlan.adversePct,
+                });
+                continue;
+              }
               entry = fill.avgPrice || quote; size = fill.size;
             } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; }
           }
@@ -808,7 +827,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
             : isRsi
               ? rsiStop
               : isTrendPulse
-                ? squeezeStop
+                ? (sig.side === "long"
+                  ? entry - Number(sig.indicators.atrValue) * TREND_PULSE_DEFAULTS.stopAtrMult
+                  : entry + Number(sig.indicators.atrValue) * TREND_PULSE_DEFAULTS.stopAtrMult)
               : isSqueeze
                 ? squeezeStop
                 : isIntraday && intradayStop > 0
@@ -821,7 +842,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
             : isRsi
               ? rsiTakeProfitPrice(sig.side, quote, exits.tpPct)
             : isTrendPulse
-              ? squeezeTp
+              ? (sig.side === "long"
+                ? entry + Number(sig.indicators.atrValue) * TREND_PULSE_DEFAULTS.fullTargetAtrMult
+                : entry - Number(sig.indicators.atrValue) * TREND_PULSE_DEFAULTS.fullTargetAtrMult)
             : isSqueeze
               ? squeezeTp
               : isIntraday
@@ -866,7 +889,8 @@ export async function runTradingCycle(): Promise<CycleReport> {
           if (insErr || !inserted) { report.errors.push(`record ${sig.coin}: ${insErr?.message ?? "insert returned no row"}`); continue; }
           positions.push({ id: inserted.id, coin: sig.coin, side: sig.side, size, notional: size * entry, leverage, entry_price: entry, stop_loss: sl, take_profit: tp ?? (sig.side === "long" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY), trail_high: entry, confidence: sig.confidence, initial_stop: sl, safety_line: (isOriginalTpa ? originalSafety : tbSafety) ?? null, opened_at: inserted.opened_at, reason, partial_taken: false, realized_pnl: 0, indicators: sig.indicators });
           held.add(sig.coin); report.opened++;
-          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isRsi ? appliedRsiRiskPct : isTrendPulse ? TREND_PULSE_DEFAULTS.riskPct : isSqueeze ? SQUEEZE_DEFAULTS.riskPct : isIntraday ? INTRADAY_DEFAULTS.riskPct : isTb ? tbCfg.riskPct : isOriginalTpa ? originalRiskPct : 0.4, positionSizePct: isRsi ? +s.position_size_pct : isIntraday ? INTRADAY_DEFAULTS.positionSizePct : isTb ? tbCfg.positionSizePct : 6, hardSlPct: isRsi || isTrendPulse || isIntraday || isOriginalTpa ? null : isSqueeze ? SQUEEZE_DEFAULTS.stopPct : hardSlPct, leverage, nativeStop: isLive ? sl : null });
+          const fillDetail = isTrendPulse ? ` · drift ${entryPlan.adverseAtr.toFixed(2)} ATR (${entryPlan.adversePct.toFixed(2)}%)` : "";
+          await log(s.user_id, "trade", `${isLive ? "LIVE " : ""}OPEN ${sig.side.toUpperCase()} ${sig.coin} @ ${entry.toFixed(6)} · size ${size} · leverage ${leverage}x${fillDetail} · ${reason}`, { agent: "server", live: isLive, signal: sig, riskPct: isRsi ? appliedRsiRiskPct : isTrendPulse ? TREND_PULSE_DEFAULTS.riskPct : isSqueeze ? SQUEEZE_DEFAULTS.riskPct : isIntraday ? INTRADAY_DEFAULTS.riskPct : isTb ? tbCfg.riskPct : isOriginalTpa ? originalRiskPct : 0.4, positionSizePct: isRsi ? +s.position_size_pct : isIntraday ? INTRADAY_DEFAULTS.positionSizePct : isTb ? tbCfg.positionSizePct : 6, hardSlPct: isRsi || isTrendPulse || isIntraday || isOriginalTpa ? null : isSqueeze ? SQUEEZE_DEFAULTS.stopPct : hardSlPct, leverage, nativeStop: isLive ? sl : null });
         }
       }
       const note = notes.length ? notes.join(" · ") + ` · scanner_cursor=${nextCursor}` : `cycle complete · scanner_cursor=${nextCursor}`;
