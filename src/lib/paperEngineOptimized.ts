@@ -602,7 +602,7 @@ export class PaperEngine {
       const sig = evaluateOriginalTrendPriceAction(meta.name, daily, four, hourly);
       const threshold = Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, this.settings.min_confidence);
       if (!sig.side || sig.confidence < threshold || shockHitsSide(this.shockEntryDir, sig.side)) continue;
-      await this.openRiskManagedSignal(sig, meta, riskPct, ORIGINAL_TPA_DEFAULTS.positionSizePct, ORIGINAL_TPA_DEFAULTS.takeProfitR);
+      await this.openRiskManagedSignal(sig, meta, riskPct, ORIGINAL_TPA_DEFAULTS.positionSizePct, ORIGINAL_TPA_DEFAULTS.takeProfitR, undefined, ORIGINAL_TREND_PRICE_ACTION_KEY);
       held.add(meta.name);
     }
   }
@@ -626,7 +626,7 @@ export class PaperEngine {
     }
   }
 
-  private async openRiskManagedSignal(sig: Signal, meta: AssetMeta, riskPct: number, capPct: number, takeProfitR: number, fixedStopPct?: number) {
+  private async openRiskManagedSignal(sig: Signal, meta: AssetMeta, riskPct: number, capPct: number, takeProfitR: number, fixedStopPct?: number, family?: string) {
     const side = sig.side!;
     const price = sig.price;
     const fallback = Math.max(sig.atrValue * 1.25, price * 0.0035);
@@ -642,7 +642,7 @@ export class PaperEngine {
     const size = Math.min(riskQty, capQty, roomQty);
     if (!(size > 0)) return;
     const tp = targetFromR(side, price, stop, takeProfitR);
-    await this.openPaper(sig.coin, side, size, leverage, price, stop, tp, sig.confidence, sig.reasons, sig.indicators, riskPct);
+    await this.openPaper(sig.coin, side, size, leverage, price, stop, tp, sig.confidence, sig.reasons, sig.indicators, riskPct, undefined, undefined, undefined, family);
   }
 
   private tbConfig() {

@@ -272,10 +272,11 @@ export interface OrderFill {
 export async function marketOrder(
   creds: HlCreds,
   asset: AssetInfo,
-  opts: { isBuy: boolean; size: number; markPrice: number; reduceOnly?: boolean; slippagePct?: number },
+  opts: { isBuy: boolean; size: number; markPrice: number; reduceOnly?: boolean; slippagePct?: number; limitPrice?: number },
 ): Promise<OrderFill> {
   const slip = (opts.slippagePct ?? 0.5) / 100;
-  const limit = opts.isBuy ? opts.markPrice * (1 + slip) : opts.markPrice * (1 - slip);
+  const limit = opts.limitPrice ?? (opts.isBuy ? opts.markPrice * (1 + slip) : opts.markPrice * (1 - slip));
+  if (!(limit > 0) || !Number.isFinite(limit)) throw new Error(`Invalid IOC limit for ${asset.name}`);
   const sz = formatSize(opts.size, asset.szDecimals);
   if (Number(sz) <= 0) throw new Error(`Size rounds to zero for ${asset.name}`);
   const json = await post(creds, {

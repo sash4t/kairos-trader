@@ -11,6 +11,9 @@ import {
 import {
   ORIGINAL_TREND_PRICE_ACTION_KEY, ORIGINAL_TPA_DEFAULTS, evaluateOriginalTrendPriceAction,
 } from "./strategies/originalTrendPriceAction";
+import {
+  entryIocLimit, entryReferencePrice, shouldApplyBtcDirectionGate,
+} from "./strategies/originalTrendPriceActionExecution";
 import { targetFromR } from "./strategies/intradayMomentumPullback";
 import {
   VOLATILITY_SQUEEZE_BREAKOUT_KEY, SQUEEZE_DEFAULTS, evaluateVolatilitySqueezeBreakout,
@@ -146,6 +149,7 @@ export async function runTradingCycle(): Promise<CycleReport> {
       })) as PositionRow[];
       const isSqueezePosition = (p: PositionRow) => p.reason?.includes(`[${VOLATILITY_SQUEEZE_BREAKOUT_KEY}]`) === true;
       const isRsiPosition = (p: PositionRow) => p.reason?.includes(`[${RSI_EXTREMES_KEY}]`) === true;
+      const isOriginalTpaPosition = (p: PositionRow) => p.reason?.includes(`[${ORIGINAL_TREND_PRICE_ACTION_KEY}]`) === true;
       const isTrendlinePriceActionPosition = (p: PositionRow) => p.reason?.includes(`[${TRENDLINE_STRATEGY_KEY}]`) === true;
       let liveAcct: Awaited<ReturnType<typeof fetchLiveAccount>> | null = null;
       if (isLive && creds) {
@@ -360,6 +364,9 @@ export async function runTradingCycle(): Promise<CycleReport> {
             try {
               const native = await ensureNativeStopLoss(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.stop_loss });
               if (!native.alreadyPresent) await log(s.user_id, "info", `Installed/updated native Hyperliquid SL for ${p.coin} @ ${p.stop_loss.toFixed(6)}.`, { oid: native.oid, trigger: p.stop_loss });
+              if (isOriginalTpaPosition(p) && Number.isFinite(p.take_profit)) {
+                await ensureNativeTakeProfit(creds, asset, { positionSide: p.side, size: p.size, triggerPrice: p.take_profit });
+              }
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
               report.errors.push(`native SL ${p.coin}: ${msg}`);
@@ -618,17 +625,19 @@ export async function runTradingCycle(): Promise<CycleReport> {
               : isOriginalTpa ? Math.max(ORIGINAL_TPA_DEFAULTS.minConfidence, +s.min_confidence) : +s.min_confidence;
           if (!sig.side || sig.confidence < minConfidence) continue;
           if (shockHitsSide(shockEntryDir, sig.side)) { report.vetoed++; continue; }
-          const btcDirection = evaluateBtcDirectionGate(sig.side, btcHourly ?? []);
-          if (!btcDirection.allowed) {
-            report.vetoed++;
-            await log(s.user_id, "info", `Skipped ${sig.coin}: ${btcDirection.reason}.`, { gate: "btc_1h_direction", ...btcDirection });
-            continue;
+          if (shouldApplyBtcDirectionGate(s.strategy_key)) {
+            const btcDirection = evaluateBtcDirectionGate(sig.side, btcHourly ?? []);
+            if (!btcDirection.allowed) {
+              report.vetoed++;
+              await log(s.user_id, "info", `Skipped ${sig.coin}: ${btcDirection.reason}.`, { gate: "btc_1h_direction", ...btcDirection });
+              continue;
+            }
+            sig.reasons.push(`${btcDirection.reason} · 2H move ${btcDirection.twoHourMovePct.toFixed(2)}%`);
+            sig.indicators.btcOneHourPrice = btcDirection.price;
+            sig.indicators.btcOneHourEma20 = btcDirection.ema20;
+            sig.indicators.btcOneHourEma50 = btcDirection.ema50;
+            sig.indicators.btcTwoHourMovePct = btcDirection.twoHourMovePct;
           }
-          sig.reasons.push(`${btcDirection.reason} · 2H move ${btcDirection.twoHourMovePct.toFixed(2)}%`);
-          sig.indicators.btcOneHourPrice = btcDirection.price;
-          sig.indicators.btcOneHourEma20 = btcDirection.ema20;
-          sig.indicators.btcOneHourEma50 = btcDirection.ema50;
-          sig.indicators.btcTwoHourMovePct = btcDirection.twoHourMovePct;
           if (isRsi) {
             const signalCandleTs = sig.indicators.signalCandleTs;
             const { data: consumed } = await (supabaseAdmin as any).from("paper_positions")
@@ -638,7 +647,8 @@ export async function runTradingCycle(): Promise<CycleReport> {
           }
           const b = bucket(sig.coin); if (positions.filter((p) => bucket(p.coin) === b).length >= 3) continue;
           const liveCap = +(s.live_max_alloc_usd ?? 0); const equity = isLive && liveCap > 0 ? Math.min(equityNow, liveCap) : equityNow;
-          const quotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
+          const currentQuotePx = mids[sig.coin] ? +mids[sig.coin] : sig.price;
+          const quotePx = entryReferencePrice(s.strategy_key, sig.price, currentQuotePx);
           let leverage: number; let size: number; let tbStop = 0; let originalStop = 0; let rsiStop = 0;
           if (isRsi) {
             leverage = Math.max(1, Math.floor(Math.min(rsiMaxLeverage, +s.max_leverage, target.meta.maxLeverage)));
@@ -720,7 +730,10 @@ export async function runTradingCycle(): Promise<CycleReport> {
             try {
               leverage = isTb ? Math.max(1, Math.floor(Math.min(+s.max_leverage, liveAsset.maxLeverage))) : leverage;
               await setLeverage(creds, liveAsset, leverage);
-              const fill = await marketOrder(creds, liveAsset, { isBuy: sig.side === "long", size, markPrice: quote, reduceOnly: false, slippagePct: 1 });
+              const fill = await marketOrder(creds, liveAsset, {
+                isBuy: sig.side === "long", size, markPrice: currentQuotePx, reduceOnly: false, slippagePct: 1,
+                limitPrice: entryIocLimit(s.strategy_key, sig.price),
+              });
               if (fill.size <= 0) { await log(s.user_id, "warn", `Live entry for ${sig.coin} did not fill.`); continue; }
               entry = fill.avgPrice || quote; size = fill.size;
             } catch (err) { const msg = err instanceof Error ? err.message : String(err); report.errors.push(`open ${sig.coin}: ${msg}`); await log(s.user_id, "error", `Live entry failed for ${sig.coin}: ${msg}`); continue; }
@@ -762,11 +775,11 @@ export async function runTradingCycle(): Promise<CycleReport> {
               continue;
             }
           }
-          if (isLive && creds && liveAsset && isRsi && Number.isFinite(tp)) {
+          if (isLive && creds && liveAsset && (isRsi || isOriginalTpa) && Number.isFinite(tp)) {
             try {
               await ensureNativeTakeProfit(creds, liveAsset, { positionSide: sig.side, size, triggerPrice: tp! });
             } catch (err) {
-              await log(s.user_id, "error", `Native RSI take-profit placement failed for ${sig.coin}; server polling remains active: ${err instanceof Error ? err.message : String(err)}`);
+              await log(s.user_id, "error", `Native take-profit placement failed for ${sig.coin}; server polling remains active: ${err instanceof Error ? err.message : String(err)}`);
             }
           }
 
